@@ -305,11 +305,12 @@ mod tests {
             .begin_frame(tab)
             .expect("begin frame")
             .expect("document load schedules an initial frame");
-        let frame = host
-            .render_frame(request, Viewport::new(640, 480))
-            .expect("render frame");
-        assert_eq!(frame.status(), EngineFrameStatus::Initial);
-        drop(frame);
+        {
+            let frame = host
+                .render_frame(request, Viewport::new(640, 480))
+                .expect("render frame");
+            assert_eq!(frame.status(), EngineFrameStatus::Initial);
+        }
 
         host.complete_frame(request).expect("complete frame");
         assert_eq!(host.begin_frame(tab).expect("next frame"), None);
@@ -348,10 +349,12 @@ mod tests {
             })
         );
 
-        let frame = host
-            .render_frame(current, Viewport::new(640, 480))
-            .expect("current request remains valid");
-        drop(frame);
+        {
+            let frame = host
+                .render_frame(current, Viewport::new(640, 480))
+                .expect("current request remains valid");
+            assert_eq!(frame.status(), EngineFrameStatus::Initial);
+        }
         host.complete_frame(current).expect("complete current frame");
     }
 
