@@ -88,10 +88,6 @@ pub enum EngineHostError {
         view_generation: u64,
         request_id: u64,
     },
-    FrameRecovery {
-        render: EngineError,
-        discard: EngineError,
-    },
 }
 
 impl fmt::Display for EngineHostError {
@@ -115,10 +111,6 @@ impl fmt::Display for EngineHostError {
                 formatter,
                 "stale frame request {request_id} for tab {} view generation {view_generation}",
                 tab.get()
-            ),
-            Self::FrameRecovery { render, discard } => write!(
-                formatter,
-                "frame render failed ({render}) and its request could not be discarded ({discard})"
             ),
         }
     }
@@ -204,18 +196,8 @@ impl EngineHost {
         viewport: Viewport,
     ) -> Result<EngineRenderedFrame<'_>, EngineHostError> {
         let hosted = self.validate_frame_request(request)?;
-        let active = hosted
-            .view
-            .active_frame_request()
-            .expect("validated frame request remains active");
-
-        match hosted.view.render(viewport.rarog_size()) {
-            Ok(frame) => Ok(EngineRenderedFrame { inner: frame }),
-            Err(render) => match hosted.view.discard_frame_request(active) {
-                Ok(()) => Err(EngineHostError::Engine(render)),
-                Err(discard) => Err(EngineHostError::FrameRecovery { render, discard }),
-            },
-        }
+        let frame = hosted.view.render(viewport.rarog_size())?;
+        Ok(EngineRenderedFrame { inner: frame })
     }
 
     pub fn complete_frame(
@@ -371,6 +353,31 @@ mod tests {
             .expect("current request remains valid");
         drop(frame);
         host.complete_frame(current).expect("complete current frame");
+    }
+
+    #[test]
+    fn render_failure_keeps_request_available_for_explicit_discard() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        host.load_local_html(tab, "<p>bounded</p>")
+            .expect("local document");
+
+        let request = host
+            .begin_frame(tab)
+            .expect("begin frame")
+            .expect("initial frame");
+        assert!(matches!(
+            host.render_frame(request, Viewport::new(u32::MAX, u32::MAX)),
+            Err(EngineHostError::Engine(_))
+        ));
+
+        host.discard_frame(request)
+            .expect("failed render leaves the request active");
+        assert!(host
+            .begin_frame(tab)
+            .expect("begin retry")
+            .is_some());
     }
 
     #[test]
