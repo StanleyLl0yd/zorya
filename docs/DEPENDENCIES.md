@@ -2,7 +2,7 @@
 
 ## Rarog Web Engine
 
-Zorya consumes rarog-engine from:
+Zorya consumes the public `rarog-engine` and `rarog-types` crates from:
 
 https://github.com/StanleyLl0yd/rarog
 
@@ -10,7 +10,9 @@ The dependency is pinned to exact commit:
 
 b330f94fd43b6b809ec0d784f6d0d7f2cce44989
 
-Do not change this to a floating main or branch dependency.
+Both crates use the same exact revision. `rarog-engine` provides the embedder lifecycle and rendering contract; `rarog-types` is a direct dependency only for public geometry values required at that boundary.
+
+Do not change either dependency to a floating main or branch dependency.
 
 ### Upgrade procedure
 
