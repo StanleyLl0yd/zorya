@@ -7,8 +7,8 @@ use rarog_compositor::{
 use rarog_compositor_wgpu::WgpuCompositorBackend;
 use rarog_platform_windows::{WindowsGpuDevice, WindowsGpuSurface};
 use std::error::Error;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -165,12 +165,8 @@ impl NativeShell {
         let size = window.inner_size();
         let viewport = Viewport::new(size.width, size.height);
         let target = self.allocate_request()?;
-        let worker = WorkerHandle::spawn(
-            target,
-            Arc::clone(&window),
-            viewport,
-            self.proxy.clone(),
-        )?;
+        let worker =
+            WorkerHandle::spawn(target, Arc::clone(&window), viewport, self.proxy.clone())?;
 
         self.window = Some(window);
         self.worker = Some(worker);
@@ -494,17 +490,9 @@ struct WebContentSurface {
 }
 
 impl WebContentSurface {
-    fn new(
-        window: Arc<Window>,
-        gpu: WindowsGpuDevice,
-        viewport: Viewport,
-    ) -> Result<Self, String> {
+    fn new(window: Arc<Window>, gpu: WindowsGpuDevice, viewport: Viewport) -> Result<Self, String> {
         let surface = gpu
-            .create_surface(
-                Arc::clone(&window),
-                viewport.width(),
-                viewport.height(),
-            )
+            .create_surface(Arc::clone(&window), viewport.width(), viewport.height())
             .map_err(|error| format!("failed to create Web content surface: {error}"))?;
         let backend = gpu.compositor_backend();
         let surface_id = SurfaceId::new(1).expect("Z1 Web content surface id is non-zero");
@@ -523,9 +511,9 @@ impl WebContentSurface {
             return Ok(());
         }
 
-        if let Err(first) =
-            self.surface
-                .resize(&self.gpu, viewport.width(), viewport.height())
+        if let Err(first) = self
+            .surface
+            .resize(&self.gpu, viewport.width(), viewport.height())
         {
             self.recreate_surface(viewport).map_err(|recovery| {
                 format!("Web content surface resize failed ({first}); recovery failed ({recovery})")
