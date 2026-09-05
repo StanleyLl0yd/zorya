@@ -18,14 +18,15 @@ Goal: first useful developer browser host.
 
 - platform-independent browser model with stable window and tab identities;
 - one browser window with one active tab;
-- Windows native application lifecycle;
+- Windows native application lifecycle and top-level window;
 - one Rarog View behind a TabId-bound engine-host adapter;
-- stale-safe frame request lifecycle;
-- native event-loop integration;
-- viewport resize and presentation;
-- minimal navigation entry point;
-- surface/device recovery;
-- clear separation between browser chrome and Web content.
+- stale-safe async and frame request lifecycle;
+- native event-loop integration with bounded off-UI render work;
+- viewport resize, DPI redraw routing and DX12 presentation;
+- deterministic local start document as the first navigation entry point;
+- bounded native surface recreation after presentation failure;
+- clear separation between the privileged shell and Web content surface;
+- device-loss recovery beyond surface recreation remains a later Z1 slice.
 
 The existing rarog-window binary remains a small engine reference host. Product UX belongs here.
 
