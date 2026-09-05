@@ -23,7 +23,7 @@ jobs:
       - name: Commit lockfile
         shell: bash
         run: |
-          if git diff --quiet -- Cargo.lock; then
+          if [ -z "$(git status --porcelain -- Cargo.lock)" ]; then
             exit 0
           fi
           git config user.name "github-actions[bot]"
