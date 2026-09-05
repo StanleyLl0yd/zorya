@@ -435,4 +435,5 @@ name = "zorya"
 version = "0.1.0"
 dependencies = [
  "rarog-engine",
+ "rarog-types",
 ]
