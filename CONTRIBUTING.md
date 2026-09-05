@@ -27,6 +27,9 @@ Before a change is considered complete, run the relevant checks:
 For Windows native-shell changes, also build the actual application binary:
 
     cargo build --locked --bin zorya
+    target/debug/zorya --version
+
+On Windows, use `target\debug\zorya.exe --version`. The smoke path must exit before native window/GPU initialization.
 
 Windows is the primary target. Changes to portable product code should also continue to compile and test on Linux CI.
 
