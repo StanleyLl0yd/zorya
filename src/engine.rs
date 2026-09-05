@@ -413,6 +413,31 @@ mod tests {
     }
 
     #[test]
+    fn host_can_schedule_a_resize_frame_after_initial_presentation() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        host.load_local_html(tab, "<p>resize</p>")
+            .expect("local document");
+
+        let initial = host
+            .begin_frame(tab)
+            .expect("begin initial frame")
+            .expect("initial frame");
+        {
+            let frame = host
+                .render_frame(initial, Viewport::new(640, 480))
+                .expect("render initial frame");
+            assert_eq!(frame.status(), EngineFrameStatus::Initial);
+        }
+        host.complete_frame(initial).expect("complete initial frame");
+
+        host.request_frame(tab, EngineFrameCause::Resize)
+            .expect("schedule resize");
+        assert!(host.begin_frame(tab).expect("begin resize frame").is_some());
+    }
+
+    #[test]
     fn discarded_request_is_requeued_by_rarog_scheduler() {
         let tab = initial_tab();
         let mut host = EngineHost::new().expect("engine host");
