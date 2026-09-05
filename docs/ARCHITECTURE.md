@@ -1,0 +1,124 @@
+# Zorya Architecture
+
+## Mission
+
+Zorya is the reference desktop browser for the Rarog Web Engine.
+
+The product is Windows-first and Rust-first. The browser repository owns user-facing browser behavior while Rarog remains an independently embeddable Web engine.
+
+## Primary boundary
+
+The most important architectural rule is that Zorya is not another Web engine layer.
+
+    User
+      |
+      v
+    Zorya browser chrome and product state
+      |  windows · tabs · navigation policy · profile · permissions
+      v
+    Rarog embedder boundary
+      |
+      v
+    Rarog Web engine
+      |  DOM · CSS · script · layout · paint · compositor
+      v
+    Platform services / pixels
+
+Zorya may coordinate Rarog views and apply browser-level policy. It must not become an alternate source of DOM, CSS, layout, paint, origin, or Web compatibility semantics.
+
+If a browser feature requires information or control that Rarog does not expose, extend the supported Rarog embedder/platform contract first.
+
+## Product-owned state
+
+Zorya is authoritative for:
+
+- browser windows and chrome;
+- tab identity, ordering, selection and lifecycle;
+- navigation UI state and user intent;
+- profile selection and product settings;
+- history and bookmarks;
+- downloads and user-visible transfer state;
+- permission prompts and persisted browser decisions;
+- session restore;
+- browser-level crash/recovery UX;
+- updater, packaging and product release state.
+
+These are not engine-derived caches. Their persistence and lifecycle must be explicit.
+
+## Engine-owned state
+
+Rarog is authoritative for:
+
+- Web document and script semantics;
+- URL/origin/site security primitives exposed by its public API;
+- style, layout, fragments, display lists and rendering;
+- engine scheduling/invalidation semantics;
+- Web resource and compatibility behavior;
+- compositor and platform contracts exposed to embedders.
+
+Zorya must not infer engine truth by scraping derived pixels or reconstructing hidden engine state.
+
+## Trust boundaries
+
+Treat all Web-controlled input as untrusted, including titles, URLs, suggested filenames, downloads, clipboard payloads, permission requests, external-protocol targets and content-originated UI text.
+
+Browser chrome is privileged. Web content must not be able to impersonate, overlap, mutate, or directly own privileged browser controls.
+
+Future Rarog process/site isolation must remain visible in Zorya architecture. Do not design product state around the assumption that Web content permanently runs in the same process as browser chrome.
+
+## Navigation boundary
+
+Navigation is shared work with distinct ownership:
+
+- Zorya owns user intent, browser UX, tab lifecycle and browser policy;
+- Rarog owns URL/origin semantics and Web navigation execution exposed through its embedder API.
+
+Display strings and canonical security identities are different concepts. Never use a user-facing URL string as an authorization or same-origin decision.
+
+External protocols, local files, downloads and privileged internal pages require explicit browser policy.
+
+## Platform boundary
+
+Windows 10/11 is the primary product target.
+
+Windows-only APIs should stay behind narrow Zorya platform modules when they are product-shell concerns. Engine/platform functionality that belongs to reusable Web embedding should live behind Rarog platform contracts instead.
+
+Do not spread Win32, WinRT, shell, registry, credential-manager or installer types through browser-model code.
+
+Linux CI exists to keep non-platform product logic portable and to expose accidental Windows coupling early. It is not a promise of a Linux release.
+
+## Async and UI lifecycle
+
+The native UI thread must remain responsive.
+
+Do not perform unbounded file I/O, networking, decoding, database maintenance, engine waits or other potentially blocking work directly in event handlers.
+
+Long-running work needs explicit ownership, cancellation and completion routing. A closed tab/window/profile must not receive stale completions as though it were still current.
+
+Stable product identities should be used for asynchronous work instead of borrowing array positions or transient UI indices.
+
+## Persistent data
+
+Persistent browser data must be versioned and migration-aware before schemas become public.
+
+Writes that affect user data should be atomic or recoverable after interruption. Corruption must fail visibly and conservatively rather than silently discarding unrelated user state.
+
+Secrets and authentication material must not be stored in plaintext configuration files. Windows credential storage or another reviewed secret-storage boundary should be used when such features are introduced.
+
+## Dependency on Rarog
+
+Rarog is currently consumed as a Git dependency pinned to an exact commit.
+
+The pin is intentional:
+
+- builds are reproducible;
+- Zorya does not silently inherit breaking engine changes;
+- an engine upgrade is reviewable as its own change.
+
+When Rarog exposes a stable published/versioned embedder package, the dependency strategy may be revisited through an architectural change.
+
+## Safety
+
+Repository-owned Rust forbids unsafe by default.
+
+If native integration eventually requires unsafe code, isolate it behind the narrowest reviewed platform boundary. Do not weaken the repository-wide safety posture simply to make a dependency or convenience API compile.
