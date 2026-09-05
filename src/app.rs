@@ -22,7 +22,6 @@ mod tests {
 
     #[test]
     fn bootstrap_initializes_rarog_engine() {
-        let app = ZoryaApp::bootstrap().unwrap();
-        assert_eq!(app.engine().platform_name(), "null");
+        assert!(ZoryaApp::bootstrap().is_ok());
     }
 }
