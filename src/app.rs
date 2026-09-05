@@ -288,7 +288,10 @@ mod tests {
 
         app.close_tab(window, first).expect("close active tab");
 
-        assert_eq!(app.window(window).and_then(BrowserWindow::active_tab_id), Some(second));
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(second)
+        );
     }
 
     #[test]
