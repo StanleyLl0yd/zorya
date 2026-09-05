@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 rarog-engine = { git = "https://github.com/StanleyLl0yd/rarog", rev = "b330f94fd43b6b809ec0d784f6d0d7f2cce44989" }
+rarog-types = { git = "https://github.com/StanleyLl0yd/rarog", rev = "b330f94fd43b6b809ec0d784f6d0d7f2cce44989" }
 
 [lints.rust]
 unsafe_code = "forbid"

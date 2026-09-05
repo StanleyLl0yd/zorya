@@ -53,6 +53,14 @@ These are not engine-derived caches. Their persistence and lifecycle must be exp
 
 The product model is platform-independent. Native Windows identifiers and Rarog `ViewId` values are adapter concerns and must be mapped to product identities rather than becoming product identity themselves.
 
+### Rarog engine host
+
+`engine::EngineHost` is the Zorya-owned adapter around the public Rarog embedder API. It owns the shared `rarog_engine::Engine` and maps each product `TabId` to one live Rarog `View` without exposing Rarog identifiers as browser identity.
+
+Every hosted View receives a Zorya-owned monotonically increasing generation. Frame work is represented by `EngineFrameRequest`, which binds the product `TabId`, View generation and Rarog frame request number. A completion is accepted only while all three still identify the currently active request. Closing and recreating a View for the same tab therefore invalidates work from the previous View even when Rarog's per-View request numbering starts again from the same value.
+
+The adapter is responsible for View creation/destruction, deterministic local HTML loading, viewport conversion and Rarog frame-request lifecycle. It does not implement Web parsing, layout, paint, navigation semantics or compositor behavior.
+
 ## Engine-owned state
 
 Rarog is authoritative for:

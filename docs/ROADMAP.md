@@ -19,7 +19,8 @@ Goal: first useful developer browser host.
 - platform-independent browser model with stable window and tab identities;
 - one browser window with one active tab;
 - Windows native application lifecycle;
-- one Rarog View;
+- one Rarog View behind a TabId-bound engine-host adapter;
+- stale-safe frame request lifecycle;
 - native event-loop integration;
 - viewport resize and presentation;
 - minimal navigation entry point;
