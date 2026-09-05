@@ -1,4 +1,5 @@
 mod app;
+#[cfg(any(target_os = "windows", test))]
 mod async_lifecycle;
 pub mod engine;
 mod platform;
