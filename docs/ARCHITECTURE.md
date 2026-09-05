@@ -123,6 +123,10 @@ Long-running work needs explicit ownership, cancellation and completion routing.
 
 Stable product identities should be used for asynchronous work instead of borrowing array positions or transient UI indices.
 
+`async_lifecycle` centralizes Zorya-owned asynchronous identity and pending-request validation. `AsyncRequestSequence` allocates monotonically increasing request identities bound to a specific `BrowserWindowId` and `TabId`; `PendingRequest` permits only one owner for a request slot, rejects overlapping starts, accepts only the exact current completion and supports explicit invalidation on lifecycle teardown.
+
+Platform adapters use this mechanism rather than implementing their own request counters or stale-completion checks. Closing a window invalidates its pending initialization/render slots before the native worker channel is closed. The UI thread does not join the worker: dropping the bounded sender prevents new work while any already accepted render is allowed to finish at most once, and its eventual completion is stale after invalidation.
+
 ## Persistent data
 
 Persistent browser data must be versioned and migration-aware before schemas become public.
