@@ -1,4 +1,6 @@
+#[cfg(not(target_os = "windows"))]
 use std::error::Error;
+#[cfg(not(target_os = "windows"))]
 use std::fmt;
 
 #[cfg(target_os = "windows")]
