@@ -431,7 +431,8 @@ mod tests {
                 .expect("render initial frame");
             assert_eq!(frame.status(), EngineFrameStatus::Initial);
         }
-        host.complete_frame(initial).expect("complete initial frame");
+        host.complete_frame(initial)
+            .expect("complete initial frame");
 
         host.request_frame(tab, EngineFrameCause::Resize)
             .expect("schedule resize");
