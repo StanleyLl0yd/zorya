@@ -340,7 +340,7 @@ fn render_worker_main(
     receiver: Receiver<WorkerCommand>,
     proxy: EventLoopProxy<WorkerEvent>,
 ) {
-    let initialized = RenderWorker::initialize(init_target.window, init_target.tab, window, viewport);
+    let initialized = RenderWorker::initialize(init_target, window, viewport);
     let result = initialized.as_ref().map(|_| ()).map_err(Clone::clone);
     if proxy
         .send_event(WorkerEvent::Initialized {
@@ -377,16 +377,18 @@ struct RenderWorker {
     tab: TabId,
     engine: EngineHost,
     content: WebContentSurface,
+    last_request_id: u64,
     last_viewport: Option<Viewport>,
 }
 
 impl RenderWorker {
     fn initialize(
-        window_id: BrowserWindowId,
-        tab: TabId,
+        init_target: AsyncTarget,
         window: Arc<Window>,
         viewport: Viewport,
     ) -> Result<Self, String> {
+        let window_id = init_target.window;
+        let tab = init_target.tab;
         let mut engine =
             EngineHost::new().map_err(|error| format!("failed to initialize Rarog: {error}"))?;
         engine
@@ -405,12 +407,16 @@ impl RenderWorker {
             tab,
             engine,
             content,
+            last_request_id: init_target.request.get(),
             last_viewport: None,
         })
     }
 
     fn render(&mut self, target: AsyncTarget, viewport: Viewport) -> Result<(), String> {
-        if target.window != self.window || target.tab != self.tab {
+        if target.window != self.window
+            || target.tab != self.tab
+            || target.request.get() <= self.last_request_id
+        {
             return Err(format!(
                 "stale render request {} targeted window {} tab {}",
                 target.request.get(),
@@ -418,6 +424,8 @@ impl RenderWorker {
                 target.tab.get()
             ));
         }
+        self.last_request_id = target.request.get();
+
         if viewport.is_suspended() {
             return Ok(());
         }
