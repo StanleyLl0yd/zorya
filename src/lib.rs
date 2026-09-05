@@ -1,4 +1,5 @@
 mod app;
+mod async_lifecycle;
 pub mod engine;
 mod platform;
 
