@@ -1,4 +1,5 @@
 use crate::TabId;
+use rarog_compositor::FrameCause;
 use rarog_engine::{BaseUrl, Engine, EngineError, FrameStatus, View, ViewOptions};
 use rarog_types::Size;
 use std::collections::BTreeMap;
@@ -63,6 +64,29 @@ pub enum EngineFrameStatus {
     Incremental,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineFrameCause {
+    Initial,
+    Resize,
+    SceneChange,
+    Scroll,
+    ResourceReady,
+    Explicit,
+}
+
+impl EngineFrameCause {
+    const fn rarog(self) -> FrameCause {
+        match self {
+            Self::Initial => FrameCause::Initial,
+            Self::Resize => FrameCause::Resize,
+            Self::SceneChange => FrameCause::SceneChange,
+            Self::Scroll => FrameCause::Scroll,
+            Self::ResourceReady => FrameCause::ResourceReady,
+            Self::Explicit => FrameCause::Explicit,
+        }
+    }
+}
+
 pub struct EngineRenderedFrame<'a> {
     inner: rarog_engine::ViewFrame<'a>,
 }
@@ -74,6 +98,10 @@ impl EngineRenderedFrame<'_> {
             FrameStatus::ViewportRebuild => EngineFrameStatus::ViewportRebuild,
             FrameStatus::Incremental(_) => EngineFrameStatus::Incremental,
         }
+    }
+
+    pub(crate) const fn rarog_frame(&self) -> &rarog_engine::ViewFrame<'_> {
+        &self.inner
     }
 }
 
@@ -171,6 +199,15 @@ impl EngineHost {
         self.view_mut(tab)?
             .view
             .load_html(source, BaseUrl::about_blank())?;
+        Ok(())
+    }
+
+    pub fn request_frame(
+        &mut self,
+        tab: TabId,
+        cause: EngineFrameCause,
+    ) -> Result<(), EngineHostError> {
+        self.view_mut(tab)?.view.request_frame(cause.rarog())?;
         Ok(())
     }
 
