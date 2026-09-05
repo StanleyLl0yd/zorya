@@ -2,7 +2,7 @@
 
 ## Rarog Web Engine
 
-Zorya consumes the public `rarog-engine` and `rarog-types` crates from:
+Zorya consumes public Rarog crates from:
 
 https://github.com/StanleyLl0yd/rarog
 
@@ -10,9 +10,11 @@ The dependency is pinned to exact commit:
 
 b330f94fd43b6b809ec0d784f6d0d7f2cce44989
 
-Both crates use the same exact revision. `rarog-engine` provides the embedder lifecycle and rendering contract; `rarog-types` is a direct dependency only for public geometry values required at that boundary.
+`rarog-engine`, `rarog-compositor`, and `rarog-types` are portable integration dependencies. On Windows, Zorya additionally uses `rarog-compositor-wgpu` and `rarog-platform-windows` for the public GPU/presentation boundary. Every Rarog crate uses the same exact revision.
 
-Do not change either dependency to a floating main or branch dependency.
+The native Windows shell also uses exact `winit = 0.30.13` and `pollster = 0.4.0`, matching the pinned Rarog reference host. `winit` is restricted to the Windows platform adapter and does not become browser-model identity; `pollster` is used only on the render worker, never to block the UI event loop.
+
+Do not change any Rarog dependency to a floating main or branch dependency.
 
 ### Upgrade procedure
 
