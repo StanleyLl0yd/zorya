@@ -24,20 +24,26 @@ pub enum BrowserModelError {
     WindowIdExhausted,
     TabIdExhausted,
     UnknownWindow(BrowserWindowId),
-    UnknownTab {
-        window: BrowserWindowId,
-        tab: TabId,
-    },
+    UnknownTab { window: BrowserWindowId, tab: TabId },
 }
 
 impl fmt::Display for BrowserModelError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::WindowIdExhausted => formatter.write_str("browser window identifier space is exhausted"),
+            Self::WindowIdExhausted => {
+                formatter.write_str("browser window identifier space is exhausted")
+            }
             Self::TabIdExhausted => formatter.write_str("tab identifier space is exhausted"),
-            Self::UnknownWindow(window) => write!(formatter, "unknown browser window {}", window.get()),
+            Self::UnknownWindow(window) => {
+                write!(formatter, "unknown browser window {}", window.get())
+            }
             Self::UnknownTab { window, tab } => {
-                write!(formatter, "unknown tab {} in browser window {}", tab.get(), window.get())
+                write!(
+                    formatter,
+                    "unknown tab {} in browser window {}",
+                    tab.get(),
+                    window.get()
+                )
             }
         }
     }
@@ -105,7 +111,11 @@ impl BrowserWindow {
             self.active_tab = self
                 .tabs
                 .get(position)
-                .or_else(|| position.checked_sub(1).and_then(|index| self.tabs.get(index)))
+                .or_else(|| {
+                    position
+                        .checked_sub(1)
+                        .and_then(|index| self.tabs.get(index))
+                })
                 .map(Tab::id);
         }
 
@@ -261,7 +271,10 @@ mod tests {
         let second = app.create_tab(window).expect("second tab id");
 
         assert!(second.get() > first.get());
-        assert_eq!(app.window(window).and_then(BrowserWindow::active_tab_id), Some(second));
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(second)
+        );
     }
 
     #[test]
@@ -270,7 +283,8 @@ mod tests {
         let window = app.create_window().expect("window id");
         let first = app.create_tab(window).expect("first tab id");
         let second = app.create_tab(window).expect("second tab id");
-        app.set_active_tab(window, first).expect("activate first tab");
+        app.set_active_tab(window, first)
+            .expect("activate first tab");
 
         app.close_tab(window, first).expect("close active tab");
 
