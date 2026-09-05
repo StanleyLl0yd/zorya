@@ -62,8 +62,9 @@ Requirements:
     cargo test --locked
     cargo build --locked --bin zorya
     cargo run --locked
+    cargo run --locked -- --version
 
-Successful Windows CI runs retain the debug executable as an artifact named `zorya-windows-dev-<commit SHA>` for 14 days. Linux is kept as a portability compile/test target where practical, even though Windows is the first product platform.
+The `--version` path exits before native window or GPU initialization, so CI can smoke-test the built executable itself. Successful Windows CI runs retain the debug executable as an artifact named `zorya-windows-dev-<commit SHA>` for 14 days. Linux is kept as a portability compile/test target where practical, even though Windows is the first product platform.
 
 ## Rarog dependency
 
