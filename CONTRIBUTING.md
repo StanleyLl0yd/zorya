@@ -24,6 +24,10 @@ Before a change is considered complete, run the relevant checks:
     cargo clippy --locked --all-targets -- -D warnings
     cargo test --locked --all-targets
 
+For Windows native-shell changes, also build the actual application binary:
+
+    cargo build --locked --bin zorya
+
 Windows is the primary target. Changes to portable product code should also continue to compile and test on Linux CI.
 
 ## Rarog changes
