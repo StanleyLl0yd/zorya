@@ -103,6 +103,16 @@ Do not spread Win32, WinRT, shell, registry, credential-manager or installer typ
 
 Linux CI exists to keep non-platform product logic portable and to expose accidental Windows coupling early. It is not a promise of a Linux release.
 
+### Z1 Windows native shell
+
+The Z1 developer shell uses `winit` only as a narrow native-window/event-loop adapter. Winit `WindowId` values stay inside the Windows platform module; browser identity remains `BrowserWindowId`/`TabId`.
+
+The UI thread owns the native event loop, top-level window lifecycle, resize/redraw routing and browser product state. It does not wait for DX12 initialization or synchronous Rarog rendering. A dedicated bounded render worker owns `EngineHost`, the Rarog View and the Rarog Windows GPU/compositor objects. UI-to-worker render requests and worker completions carry a monotonically increasing Zorya request ID together with their target browser window and tab. Completions are ignored unless they still match the currently pending request and live product identities.
+
+Rendering is event driven. Resize/DPI changes mark the window dirty and request a redraw; only one render request may be in flight. A redraw that arrives while rendering is coalesced into one later redraw rather than starting a busy loop.
+
+`WebContentSurface` is the platform-owned presentation boundary for untrusted Web pixels. In the first Z1 vertical it occupies the full client area because privileged browser chrome is not rendered yet, but Web content does not own the top-level window or future chrome state. The compositor path may recreate a failed native surface once and retry presentation once; repeated failure terminates the developer shell conservatively.
+
 ## Async and UI lifecycle
 
 The native UI thread must remain responsive.

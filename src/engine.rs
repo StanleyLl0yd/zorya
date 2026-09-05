@@ -1,4 +1,5 @@
 use crate::TabId;
+use rarog_compositor::FrameCause;
 use rarog_engine::{BaseUrl, Engine, EngineError, FrameStatus, View, ViewOptions};
 use rarog_types::Size;
 use std::collections::BTreeMap;
@@ -63,6 +64,29 @@ pub enum EngineFrameStatus {
     Incremental,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineFrameCause {
+    Initial,
+    Resize,
+    SceneChange,
+    Scroll,
+    ResourceReady,
+    Explicit,
+}
+
+impl EngineFrameCause {
+    const fn rarog(self) -> FrameCause {
+        match self {
+            Self::Initial => FrameCause::Initial,
+            Self::Resize => FrameCause::Resize,
+            Self::SceneChange => FrameCause::SceneChange,
+            Self::Scroll => FrameCause::Scroll,
+            Self::ResourceReady => FrameCause::ResourceReady,
+            Self::Explicit => FrameCause::Explicit,
+        }
+    }
+}
+
 pub struct EngineRenderedFrame<'a> {
     inner: rarog_engine::ViewFrame<'a>,
 }
@@ -74,6 +98,11 @@ impl EngineRenderedFrame<'_> {
             FrameStatus::ViewportRebuild => EngineFrameStatus::ViewportRebuild,
             FrameStatus::Incremental(_) => EngineFrameStatus::Incremental,
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) const fn rarog_frame(&self) -> &rarog_engine::ViewFrame<'_> {
+        &self.inner
     }
 }
 
@@ -171,6 +200,15 @@ impl EngineHost {
         self.view_mut(tab)?
             .view
             .load_html(source, BaseUrl::about_blank())?;
+        Ok(())
+    }
+
+    pub fn request_frame(
+        &mut self,
+        tab: TabId,
+        cause: EngineFrameCause,
+    ) -> Result<(), EngineHostError> {
+        self.view_mut(tab)?.view.request_frame(cause.rarog());
         Ok(())
     }
 
@@ -373,6 +411,32 @@ mod tests {
         host.discard_frame(request)
             .expect("failed render leaves the request active");
         assert!(host.begin_frame(tab).expect("begin retry").is_some());
+    }
+
+    #[test]
+    fn host_can_schedule_a_resize_frame_after_initial_presentation() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        host.load_local_html(tab, "<p>resize</p>")
+            .expect("local document");
+
+        let initial = host
+            .begin_frame(tab)
+            .expect("begin initial frame")
+            .expect("initial frame");
+        {
+            let frame = host
+                .render_frame(initial, Viewport::new(640, 480))
+                .expect("render initial frame");
+            assert_eq!(frame.status(), EngineFrameStatus::Initial);
+        }
+        host.complete_frame(initial)
+            .expect("complete initial frame");
+
+        host.request_frame(tab, EngineFrameCause::Resize)
+            .expect("schedule resize");
+        assert!(host.begin_frame(tab).expect("begin resize frame").is_some());
     }
 
     #[test]
