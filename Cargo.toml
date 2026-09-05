@@ -1,0 +1,22 @@
+[package]
+name = "zorya"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["Stanley Lloyd", "Zorya Project Contributors"]
+description = "A Windows-first web browser powered by the Rarog engine."
+repository = "https://github.com/StanleyLl0yd/zorya"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+rarog-engine = { git = "https://github.com/StanleyLl0yd/rarog", rev = "b330f94fd43b6b809ec0d784f6d0d7f2cce44989" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
