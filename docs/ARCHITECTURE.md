@@ -111,7 +111,7 @@ The UI thread owns the native event loop, top-level window lifecycle, resize/red
 
 Rendering is event driven. Resize/DPI changes mark the window dirty and request a redraw; only one render request may be in flight. A redraw that arrives while rendering is coalesced into one later redraw rather than starting a busy loop.
 
-`WebContentSurface` is the platform-owned presentation boundary for untrusted Web pixels. In the first Z1 vertical it occupies the full client area because privileged browser chrome is not rendered yet, but Web content does not own the top-level window or future chrome state. The compositor path may recreate a failed native surface once and retry presentation once; repeated failure terminates the developer shell conservatively.
+`WebContentSurface` is the platform-owned presentation boundary for untrusted Web pixels. In the first Z1 vertical it occupies the full client area because privileged browser chrome is not rendered yet, but Web content does not own the top-level window or future chrome state. The presentation path may recreate the native surface once only when Rarog reports its public `WindowsGpuError::Surface` category, then retry presentation once. Resize/configuration and compositor failures are not treated as surface-loss recovery candidates. The nested backend-specific surface error is intentionally not inspected in Zorya; finer recovery classification and GPU device-loss handling remain blocked on the stable Rarog contract tracked in issue #6. Repeated or non-recoverable failure terminates the developer shell conservatively.
 
 ## Async and UI lifecycle
 

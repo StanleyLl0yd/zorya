@@ -6,7 +6,7 @@ use rarog_compositor::{
     CompositorBackend, FrameDecision, FramePlanner, FrameSubmission, SurfaceId, SurfaceSize,
 };
 use rarog_compositor_wgpu::WgpuCompositorBackend;
-use rarog_platform_windows::{WindowsGpuDevice, WindowsGpuSurface};
+use rarog_platform_windows::{WindowsGpuDevice, WindowsGpuError, WindowsGpuSurface};
 use std::error::Error;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
@@ -501,15 +501,9 @@ impl WebContentSurface {
             return Ok(());
         }
 
-        if let Err(first) = self
-            .surface
+        self.surface
             .resize(&self.gpu, viewport.width(), viewport.height())
-        {
-            self.recreate_surface(viewport).map_err(|recovery| {
-                format!("Web content surface resize failed ({first}); recovery failed ({recovery})")
-            })?;
-        }
-        Ok(())
+            .map_err(|error| format!("Web content surface resize failed: {error}"))
     }
 
     fn present_frame(
@@ -559,18 +553,19 @@ impl WebContentSurface {
     fn present_with_recovery(&mut self, viewport: Viewport) -> Result<(), String> {
         match self.surface.present(&mut self.backend) {
             Ok(()) => Ok(()),
-            Err(first) => {
+            Err(first @ WindowsGpuError::Surface(_)) => {
                 self.recreate_surface(viewport).map_err(|recovery| {
                     format!(
-                        "Web content presentation failed ({first}); surface recovery failed ({recovery})"
+                        "Web content surface acquisition failed ({first}); surface recreation failed ({recovery})"
                     )
                 })?;
                 self.surface.present(&mut self.backend).map_err(|second| {
                     format!(
-                        "Web content presentation failed ({first}); retry after surface recovery failed ({second})"
+                        "Web content surface acquisition failed ({first}); retry after surface recreation failed ({second})"
                     )
                 })
             }
+            Err(error) => Err(format!("Web content presentation failed: {error}")),
         }
     }
 

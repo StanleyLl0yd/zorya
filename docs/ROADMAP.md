@@ -25,7 +25,7 @@ Goal: first useful developer browser host.
 - native event-loop integration with bounded off-UI render work;
 - viewport resize, DPI redraw routing and DX12 presentation;
 - deterministic local start document as the first navigation entry point;
-- bounded native surface recreation after presentation failure;
+- bounded native surface recreation only for Rarog-reported surface acquisition failure;
 - clear separation between the privileged shell and Web content surface;
 - Windows developer executable built and retained by CI;
 - full GPU device-loss recovery is blocked on a stable Rarog recovery contract tracked in issue #6.
