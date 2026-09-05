@@ -30,6 +30,16 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked --all-targets
+      - name: Build developer executable
+        run: cargo build --locked --bin zorya
+      - name: Upload developer executable
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: zorya-windows-dev-${{ github.sha }}
+          path: target/debug/zorya.exe
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
 
   msrv:
     name: MSRV 1.85
