@@ -16,7 +16,8 @@ struct UnsupportedPlatform;
 #[cfg(not(target_os = "windows"))]
 impl fmt::Display for UnsupportedPlatform {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("the Zorya native developer shell is currently available only on Windows")
+        formatter
+            .write_str("the Zorya native developer shell is currently available only on Windows")
     }
 }
 
