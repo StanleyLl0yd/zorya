@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    match zorya::ZoryaApp::bootstrap() {
+    match zorya::BrowserApp::bootstrap() {
         Ok(_) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("zorya: {error}");

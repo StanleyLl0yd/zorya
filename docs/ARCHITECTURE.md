@@ -45,6 +45,14 @@ Zorya is authoritative for:
 
 These are not engine-derived caches. Their persistence and lifecycle must be explicit.
 
+### Browser product model
+
+`BrowserApp` is the authoritative in-memory owner of browser-window and tab lifecycle. `BrowserWindowId` and `TabId` are monotonically allocated product identities and are never derived from vector positions, native window handles or UI widget identities.
+
+`BrowserWindow` owns tab ordering and active-tab selection. Closing an active tab selects a surviving neighbor when one exists; closing the last tab leaves the window with no active tab. Recreating a tab allocates a new identity, so stale work targeting a closed tab cannot silently attach to a replacement.
+
+The product model is platform-independent. Native Windows identifiers and Rarog `ViewId` values are adapter concerns and must be mapped to product identities rather than becoming product identity themselves.
+
 ## Engine-owned state
 
 Rarog is authoritative for:

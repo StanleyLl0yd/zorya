@@ -16,8 +16,9 @@ Goal: establish a clean product repository and a reproducible Rarog dependency.
 
 Goal: first useful developer browser host.
 
+- platform-independent browser model with stable window and tab identities;
+- one browser window with one active tab;
 - Windows native application lifecycle;
-- one browser window;
 - one Rarog View;
 - native event-loop integration;
 - viewport resize and presentation;
@@ -29,8 +30,7 @@ The existing rarog-window binary remains a small engine reference host. Product 
 
 ## Z2 — Navigation and Tabs
 
-- tab model with stable identities;
-- create/close/select/reorder lifecycle;
+- multi-tab create/close/select/reorder UX building on the stable Z1 identities;
 - address bar and navigation state;
 - back/forward/reload/stop;
 - page title and loading state;
