@@ -32,6 +32,8 @@ jobs:
         run: cargo test --locked --all-targets
       - name: Build developer executable
         run: cargo build --locked --bin zorya
+      - name: Smoke test developer executable
+        run: .\target\debug\zorya.exe --version
       - name: Upload developer executable
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
