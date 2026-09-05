@@ -20,7 +20,7 @@ Goal: first useful developer browser host.
 - one browser window with one active tab;
 - Windows native application lifecycle and top-level window;
 - one Rarog View behind a TabId-bound engine-host adapter;
-- stale-safe async lifecycle with monotonic targeted request IDs, explicit invalidation and tested pending ownership;
+- stale-safe async lifecycle with monotonic targeted request IDs, explicit invalidation, tested pending ownership and cooperative worker cancellation before presentation;
 - stale-safe Rarog frame request lifecycle;
 - native event-loop integration with bounded off-UI render work;
 - viewport resize, DPI redraw routing and DX12 presentation;
