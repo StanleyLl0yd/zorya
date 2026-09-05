@@ -207,7 +207,7 @@ impl EngineHost {
         tab: TabId,
         cause: EngineFrameCause,
     ) -> Result<(), EngineHostError> {
-        self.view_mut(tab)?.view.request_frame(cause.rarog())?;
+        self.view_mut(tab)?.view.request_frame(cause.rarog());
         Ok(())
     }
 
