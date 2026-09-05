@@ -31,6 +31,8 @@ Do not copy Rarog source into this repository to work around an API limitation. 
 
 Third-party actions must be pinned to immutable full commit SHAs. Do not use moving tags such as v4 in committed workflow files.
 
+Windows CI uses GitHub's `actions/upload-artifact` at an immutable commit to retain the developer `zorya.exe` after the full Windows verification sequence and explicit binary build. The artifact is CI output only and is not a release, installer or signed distribution package.
+
 ## General dependency policy
 
 Add a dependency only for a concrete product requirement. Prefer small adapters around replaceable platform, UI and storage implementations and avoid allowing third-party types to become the browser authoritative cross-module state model.

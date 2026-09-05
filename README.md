@@ -7,7 +7,7 @@ Zorya is an experimental desktop browser written in Rust. Its product goals are 
 The first release-quality target is **Windows 10/11**. Zorya uses Rarog for Web-platform semantics and rendering:
 https://github.com/StanleyLl0yd/rarog
 
-Zorya is in early bootstrap development. It is not yet a general-purpose or production-ready browser.
+Zorya is in early Z1 native-shell development. It is not yet a general-purpose or production-ready browser.
 
 ## Repository responsibility
 
@@ -30,20 +30,25 @@ Rarog owns Web-engine behavior:
 
 If Zorya needs an engine capability that is not available through a supported Rarog boundary, extend the Rarog embedder API rather than reproduce or reach around engine internals here.
 
-## Current bootstrap
+## Current Z1 shell
 
-The repository currently proves one intentionally small integration point: Zorya can initialize the pinned Rarog engine revision. Native browser-window work is the next product slice.
+The current developer build has a real Windows native window, Zorya-owned browser/window/tab state, one Rarog View, deterministic local HTML loading, off-UI rendering and DX12 presentation through Rarog's public platform/compositor boundary.
 
-    Zorya product state / browser chrome
-                   |
-                   v
-            Rarog embedder API
-                   |
-                   v
-              Rarog engine
-                   |
-                   v
-         platform / compositor
+    Zorya browser state + native window
+                    |
+                    v
+          bounded render worker
+                    |
+                    v
+           Zorya EngineHost
+                    |
+                    v
+             Rarog View
+                    |
+                    v
+      Rarog compositor / DX12 surface
+
+Browser chrome, general network navigation and multi-tab UX are intentionally not implemented yet. Web content does not own the top-level window or privileged browser state.
 
 ## Build
 
@@ -55,9 +60,10 @@ Requirements:
 
     cargo check --locked
     cargo test --locked
+    cargo build --locked --bin zorya
     cargo run --locked
 
-Linux is kept as a portability compile/test target where practical, even though Windows is the first product platform.
+Successful Windows CI runs retain the debug executable as an artifact named `zorya-windows-dev-<commit SHA>` for 14 days. Linux is kept as a portability compile/test target where practical, even though Windows is the first product platform.
 
 ## Rarog dependency
 
