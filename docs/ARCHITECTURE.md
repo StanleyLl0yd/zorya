@@ -125,7 +125,7 @@ Stable product identities should be used for asynchronous work instead of borrow
 
 `async_lifecycle` centralizes Zorya-owned asynchronous identity and pending-request validation. `AsyncRequestSequence` allocates monotonically increasing request identities bound to a specific `BrowserWindowId` and `TabId`; `PendingRequest` permits only one owner for a request slot, rejects overlapping starts, accepts only the exact current completion and supports explicit invalidation on lifecycle teardown.
 
-Platform adapters use this mechanism rather than implementing their own request counters or stale-completion checks. Closing a window invalidates its pending initialization/render slots before the native worker channel is closed. The UI thread does not join the worker: dropping the bounded sender prevents new work while any already accepted render is allowed to finish at most once, and its eventual completion is stale after invalidation.
+Platform adapters use this mechanism rather than implementing their own request counters or stale-completion checks. A shared `CancellationToken` provides cooperative cancellation for accepted worker work. Closing a window first invalidates pending initialization/render slots and marks the worker cancelled, then closes the bounded worker channel. The UI thread does not join the worker. GPU initialization that is already inside the platform request may finish, but cancellation is checked before creating the presentation surface; an in-progress Rarog render is checked again before presentation, so completed engine work is discarded rather than presented after teardown whenever cancellation is observed before the presentation call begins. Any eventual completion is stale after invalidation.
 
 ## Persistent data
 
