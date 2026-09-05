@@ -132,7 +132,7 @@ impl PendingRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BrowserApp, BrowserWindow};
+    use crate::BrowserApp;
 
     fn target_ids() -> (BrowserWindowId, TabId) {
         let app = BrowserApp::bootstrap().expect("browser bootstrap");
