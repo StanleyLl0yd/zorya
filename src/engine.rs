@@ -200,10 +200,7 @@ impl EngineHost {
         Ok(EngineRenderedFrame { inner: frame })
     }
 
-    pub fn complete_frame(
-        &mut self,
-        request: EngineFrameRequest,
-    ) -> Result<(), EngineHostError> {
+    pub fn complete_frame(&mut self, request: EngineFrameRequest) -> Result<(), EngineHostError> {
         let hosted = self.validate_frame_request(request)?;
         let active = hosted
             .view
@@ -213,10 +210,7 @@ impl EngineHost {
         Ok(())
     }
 
-    pub fn discard_frame(
-        &mut self,
-        request: EngineFrameRequest,
-    ) -> Result<(), EngineHostError> {
+    pub fn discard_frame(&mut self, request: EngineFrameRequest) -> Result<(), EngineHostError> {
         let hosted = self.validate_frame_request(request)?;
         let active = hosted
             .view
@@ -355,7 +349,8 @@ mod tests {
                 .expect("current request remains valid");
             assert_eq!(frame.status(), EngineFrameStatus::Initial);
         }
-        host.complete_frame(current).expect("complete current frame");
+        host.complete_frame(current)
+            .expect("complete current frame");
     }
 
     #[test]
@@ -377,10 +372,7 @@ mod tests {
 
         host.discard_frame(request)
             .expect("failed render leaves the request active");
-        assert!(host
-            .begin_frame(tab)
-            .expect("begin retry")
-            .is_some());
+        assert!(host.begin_frame(tab).expect("begin retry").is_some());
     }
 
     #[test]
