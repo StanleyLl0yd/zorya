@@ -1,3 +1,4 @@
+use crate::async_lifecycle::{AsyncRequestSequence, AsyncTarget, PendingRequest};
 use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
 use crate::{BrowserApp, BrowserWindowId, TabId};
 use pollster::block_on;
@@ -38,22 +39,6 @@ pub(crate) fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AsyncRequestId(u64);
-
-impl AsyncRequestId {
-    const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AsyncTarget {
-    request: AsyncRequestId,
-    window: BrowserWindowId,
-    tab: TabId,
-}
-
 enum WorkerEvent {
     Initialized {
         target: AsyncTarget,
@@ -70,7 +55,6 @@ enum WorkerCommand {
         target: AsyncTarget,
         viewport: Viewport,
     },
-    Shutdown,
 }
 
 struct WorkerHandle {
@@ -104,7 +88,6 @@ impl WorkerHandle {
     }
 
     fn shutdown(self) {
-        let _ = self.sender.try_send(WorkerCommand::Shutdown);
         drop(self.sender);
         drop(self.thread);
     }
@@ -117,9 +100,9 @@ struct NativeShell {
     proxy: EventLoopProxy<WorkerEvent>,
     window: Option<Arc<Window>>,
     worker: Option<WorkerHandle>,
-    next_request_id: u64,
-    pending_init: Option<AsyncTarget>,
-    pending_frame: Option<AsyncTarget>,
+    requests: AsyncRequestSequence,
+    pending_init: PendingRequest,
+    pending_frame: PendingRequest,
     worker_ready: bool,
     needs_redraw: bool,
 }
@@ -138,9 +121,9 @@ impl NativeShell {
             proxy,
             window: None,
             worker: None,
-            next_request_id: 1,
-            pending_init: None,
-            pending_frame: None,
+            requests: AsyncRequestSequence::new(),
+            pending_init: PendingRequest::default(),
+            pending_frame: PendingRequest::default(),
             worker_ready: false,
             needs_redraw: false,
         }
@@ -164,36 +147,34 @@ impl NativeShell {
         );
         let size = window.inner_size();
         let viewport = Viewport::new(size.width, size.height);
-        let target = self.allocate_request()?;
+        let target = self
+            .requests
+            .allocate(self.browser_window, self.tab)
+            .map_err(|error| error.to_string())?;
+        self.pending_init
+            .begin(target)
+            .map_err(|error| error.to_string())?;
+
         let worker =
-            WorkerHandle::spawn(target, Arc::clone(&window), viewport, self.proxy.clone())?;
+            match WorkerHandle::spawn(target, Arc::clone(&window), viewport, self.proxy.clone()) {
+                Ok(worker) => worker,
+                Err(error) => {
+                    self.pending_init.complete_if_current(target);
+                    return Err(error);
+                }
+            };
 
         self.window = Some(window);
         self.worker = Some(worker);
-        self.pending_init = Some(target);
         Ok(())
     }
 
-    fn allocate_request(&mut self) -> Result<AsyncTarget, String> {
-        let request = self.next_request_id;
-        if request == 0 {
-            return Err("native async request identifier space is exhausted".into());
-        }
-
-        self.next_request_id = request.checked_add(1).unwrap_or(0);
-        Ok(AsyncTarget {
-            request: AsyncRequestId(request),
-            window: self.browser_window,
-            tab: self.tab,
-        })
-    }
-
     fn target_alive(&self, target: AsyncTarget) -> bool {
-        self.browser.window(target.window).is_some_and(|window| {
+        self.browser.window(target.window()).is_some_and(|window| {
             window
                 .tabs()
                 .iter()
-                .any(|candidate| candidate.id() == target.tab)
+                .any(|candidate| candidate.id() == target.tab())
         })
     }
 
@@ -207,7 +188,7 @@ impl NativeShell {
         if !self.worker_ready {
             return Ok(());
         }
-        if self.pending_frame.is_some() {
+        if self.pending_frame.is_pending() {
             self.needs_redraw = true;
             return Ok(());
         }
@@ -221,12 +202,24 @@ impl NativeShell {
             return Ok(());
         }
 
-        let target = self.allocate_request()?;
-        self.worker
+        let target = self
+            .requests
+            .allocate(self.browser_window, self.tab)
+            .map_err(|error| error.to_string())?;
+        self.pending_frame
+            .begin(target)
+            .map_err(|error| error.to_string())?;
+
+        let render_result = self
+            .worker
             .as_ref()
-            .ok_or_else(|| "render worker is unavailable".to_string())?
-            .render(target, viewport)?;
-        self.pending_frame = Some(target);
+            .ok_or_else(|| "render worker is unavailable".to_string())
+            .and_then(|worker| worker.render(target, viewport));
+        if let Err(error) = render_result {
+            self.pending_frame.complete_if_current(target);
+            return Err(error);
+        }
+
         self.needs_redraw = false;
         Ok(())
     }
@@ -234,10 +227,9 @@ impl NativeShell {
     fn handle_worker_event(&mut self, event_loop: &ActiveEventLoop, event: WorkerEvent) {
         match event {
             WorkerEvent::Initialized { target, result } => {
-                if self.pending_init != Some(target) || !self.target_alive(target) {
+                if !self.pending_init.complete_if_current(target) || !self.target_alive(target) {
                     return;
                 }
-                self.pending_init = None;
 
                 match result {
                     Ok(()) => {
@@ -249,10 +241,9 @@ impl NativeShell {
                 }
             }
             WorkerEvent::FrameFinished { target, result } => {
-                if self.pending_frame != Some(target) || !self.target_alive(target) {
+                if !self.pending_frame.complete_if_current(target) || !self.target_alive(target) {
                     return;
                 }
-                self.pending_frame = None;
 
                 match result {
                     Ok(()) => {
@@ -267,8 +258,8 @@ impl NativeShell {
     }
 
     fn shutdown(&mut self, event_loop: &ActiveEventLoop) {
-        self.pending_init = None;
-        self.pending_frame = None;
+        self.pending_init.invalidate();
+        self.pending_frame.invalidate();
         self.worker_ready = false;
         if let Some(worker) = self.worker.take() {
             worker.shutdown();
@@ -309,7 +300,7 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
             WindowEvent::CloseRequested => self.shutdown(event_loop),
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 self.needs_redraw = true;
-                if self.worker_ready && self.pending_frame.is_none() {
+                if self.worker_ready && !self.pending_frame.is_pending() {
                     self.request_redraw();
                 }
             }
@@ -363,7 +354,6 @@ fn render_worker_main(
                     return;
                 }
             }
-            WorkerCommand::Shutdown => return,
         }
     }
 }
@@ -383,8 +373,8 @@ impl RenderWorker {
         window: Arc<Window>,
         viewport: Viewport,
     ) -> Result<Self, String> {
-        let window_id = init_target.window;
-        let tab = init_target.tab;
+        let window_id = init_target.window();
+        let tab = init_target.tab();
         let mut engine =
             EngineHost::new().map_err(|error| format!("failed to initialize Rarog: {error}"))?;
         engine
@@ -403,24 +393,24 @@ impl RenderWorker {
             tab,
             engine,
             content,
-            last_request_id: init_target.request.get(),
+            last_request_id: init_target.request().get(),
             last_viewport: None,
         })
     }
 
     fn render(&mut self, target: AsyncTarget, viewport: Viewport) -> Result<(), String> {
-        if target.window != self.window
-            || target.tab != self.tab
-            || target.request.get() <= self.last_request_id
+        if target.window() != self.window
+            || target.tab() != self.tab
+            || target.request().get() <= self.last_request_id
         {
             return Err(format!(
                 "stale render request {} targeted window {} tab {}",
-                target.request.get(),
-                target.window.get(),
-                target.tab.get()
+                target.request().get(),
+                target.window().get(),
+                target.tab().get()
             ));
         }
-        self.last_request_id = target.request.get();
+        self.last_request_id = target.request().get();
 
         if viewport.is_suspended() {
             return Ok(());
