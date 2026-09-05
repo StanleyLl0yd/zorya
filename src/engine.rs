@@ -100,6 +100,7 @@ impl EngineRenderedFrame<'_> {
         }
     }
 
+    #[cfg(target_os = "windows")]
     pub(crate) const fn rarog_frame(&self) -> &rarog_engine::ViewFrame<'_> {
         &self.inner
     }
