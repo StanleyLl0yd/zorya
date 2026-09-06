@@ -12,7 +12,7 @@ b330f94fd43b6b809ec0d784f6d0d7f2cce44989
 
 `rarog-engine`, `rarog-compositor`, and `rarog-types` are portable integration dependencies. On Windows, Zorya additionally uses `rarog-compositor-wgpu` and `rarog-platform-windows` for the public GPU/presentation boundary. Every Rarog crate uses the same exact revision.
 
-The native Windows shell also uses exact `winit = 0.30.13` and `pollster = 0.4.0`, matching the pinned Rarog reference host. `winit` is restricted to the Windows platform adapter and does not become browser-model identity; `pollster` is used only on the render worker, never to block the UI event loop.
+The native Windows shell also uses exact `winit = 0.30.13` and `pollster = 0.4.0`, matching the pinned Rarog reference host. `winit` is restricted to the Windows platform adapter and does not become browser-model identity. Safe winit window-handle access is thread-affine on Windows, so Rarog native-surface creation/replacement is performed on the event-loop thread while GPU-device initialization stays on the worker. `pollster` is used only on the render worker, never to block the UI event loop.
 
 Do not change any Rarog dependency to a floating main or branch dependency.
 

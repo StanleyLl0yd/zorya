@@ -103,6 +103,10 @@ impl PendingRequest {
         self.current.is_some()
     }
 
+    pub(crate) fn is_current(&self, target: AsyncTarget) -> bool {
+        self.current == Some(target)
+    }
+
     pub(crate) fn begin(&mut self, target: AsyncTarget) -> Result<(), AsyncLifecycleError> {
         if let Some(current) = self.current {
             return Err(AsyncLifecycleError::RequestAlreadyPending {
@@ -182,8 +186,11 @@ mod tests {
         let target = sequence.allocate(window, tab).expect("request");
 
         pending.begin(target).expect("begin request");
+        assert!(pending.is_current(target));
+
         pending.invalidate();
 
+        assert!(!pending.is_current(target));
         assert!(!pending.complete_if_current(target));
         assert!(!pending.is_pending());
     }
