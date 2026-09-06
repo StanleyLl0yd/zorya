@@ -1,4 +1,5 @@
 mod app;
+mod chrome;
 #[cfg(any(target_os = "windows", test))]
 mod async_lifecycle;
 pub mod engine;
@@ -6,6 +7,7 @@ mod navigation;
 mod platform;
 
 pub use app::{BrowserApp, BrowserModelError, BrowserWindow, BrowserWindowId, Tab, TabId};
+pub use chrome::{AddressBarEdit, AddressBarState, AddressBarSubmission};
 pub use navigation::{
     HistoryEntry, HistoryEntryId, NavigationFailure, NavigationId, NavigationIntent,
     NavigationIntentKind, NavigationStart, TabNavigation,

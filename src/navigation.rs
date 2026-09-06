@@ -151,6 +151,13 @@ impl TabNavigation {
         self.last_failure.as_ref()
     }
 
+    pub fn display_location(&self) -> Option<&str> {
+        self.pending
+            .as_ref()
+            .map(NavigationIntent::requested_location)
+            .or_else(|| self.current_entry().map(HistoryEntry::location))
+    }
+
     pub fn can_go_back(&self) -> bool {
         self.current_index().is_some_and(|index| index > 0)
     }
