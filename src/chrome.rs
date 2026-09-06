@@ -92,32 +92,36 @@ impl AddressBarState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tab(value: u64) -> TabId {
-        TabId(value)
-    }
+    use crate::app::BrowserApp;
 
     #[test]
     fn submission_preserves_verbatim_user_text_and_target_tab() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let tab = app.create_tab(window).expect("tab");
         let mut state = AddressBarState::default();
-        state.begin(tab(7), "  Example Search?  ".into());
+        state.begin(tab, "  Example Search?  ".into());
         state.set_text("  Example Search?  ".into());
 
         let submission = state.submit().expect("active edit");
 
-        assert_eq!(submission.tab(), tab(7));
+        assert_eq!(submission.tab(), tab);
         assert_eq!(submission.text(), "  Example Search?  ");
         assert!(!state.is_editing());
     }
 
     #[test]
     fn cancel_for_tab_does_not_destroy_another_tabs_edit() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first tab");
+        let second = app.create_tab(window).expect("second tab");
         let mut state = AddressBarState::default();
-        state.begin(tab(2), "https://example.test/".into());
+        state.begin(second, "https://example.test/".into());
 
-        assert!(!state.cancel_for_tab(tab(1)));
+        assert!(!state.cancel_for_tab(first));
         assert!(state.is_editing());
-        assert!(state.cancel_for_tab(tab(2)));
+        assert!(state.cancel_for_tab(second));
         assert!(!state.is_editing());
     }
 }
