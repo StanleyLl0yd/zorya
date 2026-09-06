@@ -36,12 +36,12 @@ The existing rarog-window binary remains a small engine reference host. Product 
 
 - platform-independent per-tab navigation intent and browser-history model with stable navigation/history identities;
 - supersession, stop and stale-completion rejection for browser-owned navigation work;
-- stable-ID multi-tab create/close/select/reorder product model, with native chrome UX still to be wired;
+- stable-ID multi-tab create/close/select/reorder product model; presentation-safe native activation is tracked in issue #20 before multi-tab chrome is wired;
 - window-owned address bar edit/display model with stable TabId-bound raw submissions;
-- back/forward/reload/stop wiring to the engine;
-- page title and loading state;
-- keyboard-first tab/navigation controls;
-- general HTTP(S) navigation completion blocked on the supported Rarog Fetch/View contract tracked in issue #13.
+- back/forward/reload/stop engine wiring and general HTTP(S) navigation completion are blocked on the supported Rarog Fetch/View contract tracked in issue #13;
+- page-title observation is blocked on a supported Rarog View title contract tracked in issue #18;
+- keyboard-first browser accelerators can remain product-owned, while Web-content input dispatch is blocked on the supported Rarog View input contract tracked in issue #16;
+- loading-state chrome wiring can build on the existing pending navigation model.
 
 ## Z3 — Browser Profile
 

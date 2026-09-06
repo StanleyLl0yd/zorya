@@ -7,7 +7,7 @@ Zorya is an experimental desktop browser written in Rust. Its product goals are 
 The first release-quality target is **Windows 10/11**. Zorya uses Rarog for Web-platform semantics and rendering:
 https://github.com/StanleyLl0yd/rarog
 
-Zorya is in early Z1 native-shell development. It is not yet a general-purpose or production-ready browser.
+Zorya has a verified Z1 native-shell vertical and is now building the Z2 browser-product model. It is not yet a general-purpose or production-ready browser.
 
 ## Repository responsibility
 
@@ -30,9 +30,11 @@ Rarog owns Web-engine behavior:
 
 If Zorya needs an engine capability that is not available through a supported Rarog boundary, extend the Rarog embedder API rather than reproduce or reach around engine internals here.
 
-## Current Z1 shell
+## Current development state
 
-The current developer build has a real Windows native window, Zorya-owned browser/window/tab state, one Rarog View, deterministic local HTML loading, off-UI rendering and DX12 presentation through Rarog's public platform/compositor boundary.
+The current developer build has a real Windows native window, Zorya-owned browser state, one natively presented Rarog View, deterministic local HTML loading, off-UI rendering and DX12 presentation through Rarog's public platform/compositor boundary. Windows CI exercises this full vertical with a real native-window/GPU/Rarog presentation smoke test.
+
+The platform-independent Z2 product model already includes stable window/tab identities, tab create/close/select/reorder state, monotonic navigation and history identities, stale-navigation rejection, committed `about:blank` startup history, back/forward/reload/stop state, and privileged address-bar edit/display state bound to stable `TabId` values.
 
     Zorya browser state + native window
                     |
@@ -48,7 +50,15 @@ The current developer build has a real Windows native window, Zorya-owned browse
                     v
       Rarog compositor / DX12 surface
 
-Browser chrome, general network navigation and multi-tab UX are intentionally not implemented yet. Web content does not own the top-level window or privileged browser state.
+The current Windows presentation shell still presents only one active Web View and does not yet render browser chrome or general multi-tab UX. General HTTP(S) navigation is also intentionally not implemented until Rarog exposes the supported navigation-completion/Fetch integration. Native Web input, page-title observation and presentation-safe native tab activation likewise remain explicit integration/design work. Web content does not own the top-level window or privileged browser state.
+
+Current tracked boundaries include:
+
+- issue #6 — stable Rarog GPU device-loss recovery contract;
+- issue #13 — Rarog navigation completion / Fetch integration;
+- issue #16 — supported Rarog View input dispatch;
+- issue #18 — Rarog document-title observation;
+- issue #20 — presentation-safe native tab activation in Zorya.
 
 ## Build
 
