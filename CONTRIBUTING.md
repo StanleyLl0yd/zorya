@@ -29,7 +29,7 @@ For Windows native-shell changes, also build the actual application binary:
     cargo build --locked --bin zorya
     target/debug/zorya --version
 
-On Windows, use `target\debug\zorya.exe --version`. The smoke path must exit before native window/GPU initialization.
+On Windows, use `target\debug\zorya.exe --version` for the headless executable smoke and `target\debug\zorya.exe --native-smoke` for the full native-window/Rarog/DX12 smoke. The native smoke must exit automatically after its first successful presentation.
 
 Windows is the primary target. Changes to portable product code should also continue to compile and test on Linux CI.
 
