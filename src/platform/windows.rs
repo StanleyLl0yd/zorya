@@ -433,26 +433,27 @@ impl NativeShell {
     fn commit_initial_navigation(&mut self) -> Result<(), String> {
         let navigation = self
             .initial_navigation
-            .take()
             .ok_or_else(|| "initial browser navigation is already resolved".to_string())?;
         self.browser
             .commit_navigation(self.browser_window, self.tab, navigation, START_LOCATION)
-            .map(|_| ())
-            .map_err(|error| format!("failed to commit initial browser navigation: {error}"))
+            .map_err(|error| format!("failed to commit initial browser navigation: {error}"))?;
+        self.initial_navigation = None;
+        Ok(())
     }
 
     fn fail_initial_navigation(&mut self, message: &str) -> Result<(), String> {
-        let Some(navigation) = self.initial_navigation.take() else {
+        let Some(navigation) = self.initial_navigation else {
             return Ok(());
         };
         self.browser
             .fail_navigation(self.browser_window, self.tab, navigation, message)
-            .map(|_| ())
-            .map_err(|error| format!("failed to fail initial browser navigation: {error}"))
+            .map_err(|error| format!("failed to fail initial browser navigation: {error}"))?;
+        self.initial_navigation = None;
+        Ok(())
     }
 
     fn stop_initial_navigation(&mut self) -> Result<(), String> {
-        let Some(navigation) = self.initial_navigation.take() else {
+        let Some(navigation) = self.initial_navigation else {
             return Ok(());
         };
         let stopped = self
@@ -460,7 +461,10 @@ impl NativeShell {
             .stop_navigation(self.browser_window, self.tab)
             .map_err(|error| format!("failed to stop initial browser navigation: {error}"))?;
         match stopped {
-            Some(intent) if intent.id() == navigation => Ok(()),
+            Some(intent) if intent.id() == navigation => {
+                self.initial_navigation = None;
+                Ok(())
+            }
             Some(intent) => Err(format!(
                 "stopped navigation {} instead of initial navigation {}",
                 intent.id().get(),
