@@ -9,7 +9,10 @@ fn main() -> ExitCode {
             println!("Zorya {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        (None, None) => run_browser(),
+        (Some(argument), None) if argument == "--native-smoke" => {
+            finish(zorya::run_native_smoke())
+        }
+        (None, None) => finish(zorya::run()),
         _ => {
             eprintln!("zorya: unsupported command-line arguments");
             ExitCode::FAILURE
@@ -17,8 +20,8 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_browser() -> ExitCode {
-    match zorya::run() {
+fn finish(result: Result<(), Box<dyn std::error::Error>>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("zorya: {error}");
