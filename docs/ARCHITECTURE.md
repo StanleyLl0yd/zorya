@@ -63,6 +63,8 @@ Beginning an activation does not mutate `active_tab` or address-bar edit state. 
 
 Immediate product selection and tab closure expose any activation they invalidate instead of silently deleting it. Closing the activation source or target invalidates that transition, closing an unrelated tab and reordering tabs preserve it, and stable `TabId` values remain the only identities involved.
 
+Keyboard-style cyclic tab targeting is also identity-based. `begin_tab_cycle(Next|Previous)` follows the current tab order with wraparound but, while an activation is pending, advances from that pending target rather than from the still-committed active tab. Rapid Next input can therefore supersede A→B with A→C without prematurely changing privileged chrome. A single-tab window produces no activation and does not consume an activation identity.
+
 This is the browser-model half of the native presentation-safety rule tracked in issue #20. The current Windows shell still presents one Web View. It must not wire multi-tab selection until worker/compositor handoff resets retained presentation state and provides an explicit browser-owned neutral content phase. Without an atomic surface/chrome swap, the safe sequence is source chrome/source pixels, confirmed neutral content, target chrome/neutral content, then the first target Web frame. Presenting target pixels before chrome commit is also unsafe because the worker-to-UI acknowledgement is not atomic with GPU presentation. Closing the currently presented active tab likewise needs an explicit safe handoff or neutral-content transition; synchronous product neighbor selection by itself is not a native presentation protocol.
 
 ### Browser navigation model
