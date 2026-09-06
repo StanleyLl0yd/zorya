@@ -77,6 +77,16 @@ Requirements:
 
 The `--version` path exits before native window or GPU initialization. On Windows, `--native-smoke` runs the real native-window, Rarog render and DX12 presentation path and exits after the first successful presentation. Windows CI executes both smoke paths before retaining the debug executable as an artifact named `zorya-windows-dev-<commit SHA>` for 14 days. Linux is kept as a portability compile/test target where practical, even though Windows is the first product platform.
 
+## Technical Preview packaging
+
+The first distributable target is `0.1.0 Technical Preview` for Windows 10/11 x86-64. It is intentionally not described as a general-purpose or production-ready browser.
+
+The release-candidate workflow builds `target/release/zorya.exe` from the locked dependency graph, verifies the exact Cargo/binary version, runs the real release-mode native smoke, generates a dependency license bundle, packages the executable with preview notes and licenses, records a SHA-256 digest, extracts the resulting ZIP, and repeats the packaged version/native smoke checks before retaining the candidate artifact.
+
+The Technical Preview remains unsigned and has no installer or updater. General HTTP(S) browsing, Web-content input and full native multi-tab presentation are not implied by the existence of a packaged executable.
+
+See `README-TECHNICAL-PREVIEW.md` for the package-specific scope and known limitations.
+
 ## Rarog dependency
 
 Zorya pins Rarog to a specific Git commit in Cargo.toml for reproducible builds. Engine updates are intentional dependency changes: update the revision, review the upstream changes, regenerate Cargo.lock, and run the full Zorya verification matrix.
@@ -87,6 +97,7 @@ See docs/DEPENDENCIES.md.
 
 - docs/ARCHITECTURE.md — ownership and trust boundaries;
 - docs/ROADMAP.md — product milestones;
+- docs/RELEASING.md — release-candidate and publication gates;
 - AGENTS.md — mandatory rules for automated coding agents;
 - CONTRIBUTING.md — contribution workflow;
 - SECURITY.md — vulnerability reporting guidance.
