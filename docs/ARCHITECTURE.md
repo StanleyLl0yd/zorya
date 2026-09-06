@@ -63,6 +63,14 @@ A new-document commit truncates only the forward portion after the current entry
 
 Locations stored in this product model are browser display/history strings. They are not canonical URL, origin, site or authorization identities and must never be used for Web security decisions. Rarog remains authoritative for those semantics. General HTTP(S) navigation completion is blocked on the supported Rarog Fetch/navigation integration described in issue #13; Zorya must not implement a parallel HTTP loader that receives a URL string and calls `load_html`.
 
+### Privileged address-bar state
+
+Address-bar editing is window-owned privileged chrome state, not part of the Web document and not a property of a Rarog View. `AddressBarState` binds an active edit to the stable `TabId` that was active when editing began. Switching away from that tab or closing it cancels the edit so unfinished chrome input cannot later target another tab by position.
+
+Outside edit mode, the displayed location follows the active tab's browser navigation state: the currently pending requested location takes precedence over the committed history location. While editing, user text is preserved even if the underlying tab starts or commits navigation; cancelling the edit reveals the current navigation display location.
+
+Submitting the address bar returns an `AddressBarSubmission` containing the stable target `TabId` and the user's verbatim text, then leaves edit mode. Submission deliberately does not parse, normalize or start navigation. Search-vs-URL interpretation, canonical Web URL/origin semantics and HTTP navigation execution must cross reviewed browser/Rarog policy boundaries rather than being hidden inside chrome state.
+
 ### Rarog engine host
 
 `engine::EngineHost` is the Zorya-owned adapter around the public Rarog embedder API. It owns the shared `rarog_engine::Engine` and maps each product `TabId` to one live Rarog `View` without exposing Rarog identifiers as browser identity.

@@ -1,3 +1,4 @@
+use crate::chrome::{AddressBarState, AddressBarSubmission};
 use crate::navigation::{
     HistoryEntry, HistoryEntryId, NavigationFailure, NavigationId, NavigationIntent,
     NavigationIntentKind, NavigationStart, TabNavigation,
@@ -44,6 +45,9 @@ pub enum BrowserModelError {
         window: BrowserWindowId,
         tab: TabId,
         entry: HistoryEntryId,
+    },
+    AddressBarNotEditing {
+        window: BrowserWindowId,
     },
 }
 
@@ -100,6 +104,11 @@ impl fmt::Display for BrowserModelError {
                 window.get(),
                 tab.get()
             ),
+            Self::AddressBarNotEditing { window } => write!(
+                formatter,
+                "address bar is not being edited in browser window {}",
+                window.get()
+            ),
         }
     }
 }
@@ -127,6 +136,7 @@ pub struct BrowserWindow {
     id: BrowserWindowId,
     tabs: Vec<Tab>,
     active_tab: Option<TabId>,
+    address_bar: AddressBarState,
 }
 
 impl BrowserWindow {
@@ -135,6 +145,7 @@ impl BrowserWindow {
             id,
             tabs: Vec::new(),
             active_tab: None,
+            address_bar: AddressBarState::default(),
         }
     }
 
@@ -158,6 +169,42 @@ impl BrowserWindow {
         self.tab(self.active_tab?)
     }
 
+    pub const fn address_bar(&self) -> &AddressBarState {
+        &self.address_bar
+    }
+
+    pub fn address_bar_text(&self) -> &str {
+        if let Some(edit) = self.address_bar.edit()
+            && self.active_tab == Some(edit.tab())
+        {
+            return edit.text();
+        }
+
+        self.active_tab()
+            .and_then(|tab| tab.navigation().display_location())
+            .unwrap_or("")
+    }
+
+    fn begin_address_bar_edit(&mut self) -> Option<TabId> {
+        let tab = self.active_tab()?;
+        let tab_id = tab.id();
+        let text = tab.navigation().display_location().unwrap_or("").to_owned();
+        self.address_bar.begin(tab_id, text);
+        Some(tab_id)
+    }
+
+    fn set_address_bar_text(&mut self, text: String) -> bool {
+        self.address_bar.set_text(text)
+    }
+
+    fn cancel_address_bar_edit(&mut self) -> bool {
+        self.address_bar.cancel()
+    }
+
+    fn submit_address_bar_edit(&mut self) -> Option<AddressBarSubmission> {
+        self.address_bar.submit()
+    }
+
     fn tab_mut(&mut self, id: TabId) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|tab| tab.id == id)
     }
@@ -172,6 +219,7 @@ impl BrowserWindow {
 
     fn close_tab(&mut self, tab: TabId) -> Option<Tab> {
         let position = self.tabs.iter().position(|candidate| candidate.id == tab)?;
+        self.address_bar.cancel_for_tab(tab);
         let removed = self.tabs.remove(position);
 
         if self.active_tab == Some(tab) {
@@ -191,6 +239,9 @@ impl BrowserWindow {
 
     fn set_active_tab(&mut self, tab: TabId) -> bool {
         if self.tabs.iter().any(|candidate| candidate.id == tab) {
+            if self.active_tab != Some(tab) {
+                self.address_bar.cancel();
+            }
             self.active_tab = Some(tab);
             true
         } else {
@@ -309,6 +360,57 @@ impl BrowserApp {
         } else {
             Err(BrowserModelError::UnknownTab { window, tab })
         }
+    }
+
+    pub fn begin_address_bar_edit(
+        &mut self,
+        window: BrowserWindowId,
+    ) -> Result<Option<TabId>, BrowserModelError> {
+        let browser_window = self
+            .windows
+            .get_mut(&window)
+            .ok_or(BrowserModelError::UnknownWindow(window))?;
+        Ok(browser_window.begin_address_bar_edit())
+    }
+
+    pub fn set_address_bar_text(
+        &mut self,
+        window: BrowserWindowId,
+        text: impl Into<String>,
+    ) -> Result<(), BrowserModelError> {
+        let browser_window = self
+            .windows
+            .get_mut(&window)
+            .ok_or(BrowserModelError::UnknownWindow(window))?;
+        if browser_window.set_address_bar_text(text.into()) {
+            Ok(())
+        } else {
+            Err(BrowserModelError::AddressBarNotEditing { window })
+        }
+    }
+
+    pub fn cancel_address_bar_edit(
+        &mut self,
+        window: BrowserWindowId,
+    ) -> Result<bool, BrowserModelError> {
+        let browser_window = self
+            .windows
+            .get_mut(&window)
+            .ok_or(BrowserModelError::UnknownWindow(window))?;
+        Ok(browser_window.cancel_address_bar_edit())
+    }
+
+    pub fn submit_address_bar_edit(
+        &mut self,
+        window: BrowserWindowId,
+    ) -> Result<AddressBarSubmission, BrowserModelError> {
+        let browser_window = self
+            .windows
+            .get_mut(&window)
+            .ok_or(BrowserModelError::UnknownWindow(window))?;
+        browser_window
+            .submit_address_bar_edit()
+            .ok_or(BrowserModelError::AddressBarNotEditing { window })
     }
 
     pub fn begin_navigation(
@@ -819,6 +921,168 @@ mod tests {
 
         assert!(second_navigation.get() > first_navigation.get());
         assert!(second_entry.get() > first_entry.get());
+    }
+
+    #[test]
+    fn address_bar_displays_pending_location_before_committed_history() {
+        let mut app = BrowserApp::bootstrap().expect("bootstrap");
+        let (window, tab) = bootstrap_ids(&app);
+        let committed = app
+            .begin_navigation(window, tab, "https://committed.example/")
+            .expect("committed navigation")
+            .intent()
+            .id();
+        app.commit_navigation(window, tab, committed, "https://committed.example/final")
+            .expect("commit navigation");
+
+        assert_eq!(
+            app.window(window).expect("window").address_bar_text(),
+            "https://committed.example/final"
+        );
+
+        let pending = app
+            .begin_navigation(window, tab, "https://pending.example/")
+            .expect("pending navigation")
+            .intent()
+            .id();
+        assert_eq!(
+            app.window(window).expect("window").address_bar_text(),
+            "https://pending.example/"
+        );
+
+        app.fail_navigation(window, tab, pending, "fixture failure")
+            .expect("fail pending navigation");
+        assert_eq!(
+            app.window(window).expect("window").address_bar_text(),
+            "https://committed.example/final"
+        );
+    }
+
+    #[test]
+    fn address_bar_edit_preserves_user_text_while_navigation_changes_underneath() {
+        let mut app = BrowserApp::bootstrap().expect("bootstrap");
+        let (window, tab) = bootstrap_ids(&app);
+        let initial = app
+            .begin_navigation(window, tab, "https://initial.example/")
+            .expect("initial navigation")
+            .intent()
+            .id();
+        app.commit_navigation(window, tab, initial, "https://initial.example/")
+            .expect("initial commit");
+
+        assert_eq!(
+            app.begin_address_bar_edit(window).expect("begin edit"),
+            Some(tab)
+        );
+        app.set_address_bar_text(window, "user typed query")
+            .expect("edit text");
+        app.begin_navigation(window, tab, "https://background.example/")
+            .expect("background navigation");
+
+        assert_eq!(
+            app.window(window).expect("window").address_bar_text(),
+            "user typed query"
+        );
+
+        assert!(app.cancel_address_bar_edit(window).expect("cancel edit"));
+        assert_eq!(
+            app.window(window).expect("window").address_bar_text(),
+            "https://background.example/"
+        );
+    }
+
+    #[test]
+    fn switching_tabs_cancels_window_owned_address_bar_edit() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first tab");
+        let second = app.create_tab(window).expect("second tab");
+
+        let first_navigation = app
+            .begin_navigation(window, first, "https://first.example/")
+            .expect("first navigation")
+            .intent()
+            .id();
+        app.commit_navigation(window, first, first_navigation, "https://first.example/")
+            .expect("first commit");
+
+        let second_navigation = app
+            .begin_navigation(window, second, "https://second.example/")
+            .expect("second navigation")
+            .intent()
+            .id();
+        app.commit_navigation(window, second, second_navigation, "https://second.example/")
+            .expect("second commit");
+
+        app.begin_address_bar_edit(window)
+            .expect("begin edit")
+            .expect("active first tab");
+        app.set_address_bar_text(window, "unfinished edit")
+            .expect("edit text");
+
+        app.set_active_tab(window, second)
+            .expect("activate second tab");
+
+        let browser_window = app.window(window).expect("window");
+        assert!(!browser_window.address_bar().is_editing());
+        assert_eq!(browser_window.address_bar_text(), "https://second.example/");
+    }
+
+    #[test]
+    fn closing_the_edited_tab_clears_edit_before_selecting_neighbor() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first tab");
+        let second = app.create_tab(window).expect("second tab");
+        let navigation = app
+            .begin_navigation(window, second, "https://second.example/")
+            .expect("second navigation")
+            .intent()
+            .id();
+        app.commit_navigation(window, second, navigation, "https://second.example/")
+            .expect("second commit");
+
+        app.begin_address_bar_edit(window)
+            .expect("begin edit")
+            .expect("active first tab");
+        app.set_address_bar_text(window, "unfinished edit")
+            .expect("edit text");
+        app.close_tab(window, first).expect("close edited tab");
+
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(browser_window.active_tab_id(), Some(second));
+        assert!(!browser_window.address_bar().is_editing());
+        assert_eq!(browser_window.address_bar_text(), "https://second.example/");
+    }
+
+    #[test]
+    fn address_bar_submission_is_raw_chrome_input_not_implicit_navigation() {
+        let mut app = BrowserApp::bootstrap().expect("bootstrap");
+        let (window, tab) = bootstrap_ids(&app);
+
+        app.begin_address_bar_edit(window)
+            .expect("begin edit")
+            .expect("active tab");
+        app.set_address_bar_text(window, "  example search terms  ")
+            .expect("edit text");
+        let submission = app
+            .submit_address_bar_edit(window)
+            .expect("submit address bar");
+
+        assert_eq!(submission.tab(), tab);
+        assert_eq!(submission.text(), "  example search terms  ");
+        let navigation = app
+            .window(window)
+            .and_then(|browser_window| browser_window.tab(tab))
+            .expect("tab")
+            .navigation();
+        assert!(navigation.pending().is_none());
+        assert!(navigation.history().is_empty());
+        assert_eq!(app.window(window).expect("window").address_bar_text(), "");
+        assert_eq!(
+            app.submit_address_bar_edit(window),
+            Err(BrowserModelError::AddressBarNotEditing { window })
+        );
     }
 
     #[test]
