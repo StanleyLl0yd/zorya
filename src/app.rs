@@ -188,11 +188,7 @@ impl BrowserWindow {
     fn begin_address_bar_edit(&mut self) -> Option<TabId> {
         let tab = self.active_tab()?;
         let tab_id = tab.id();
-        let text = tab
-            .navigation()
-            .display_location()
-            .unwrap_or("")
-            .to_owned();
+        let text = tab.navigation().display_location().unwrap_or("").to_owned();
         self.address_bar.begin(tab_id, text);
         Some(tab_id)
     }
@@ -936,13 +932,8 @@ mod tests {
             .expect("committed navigation")
             .intent()
             .id();
-        app.commit_navigation(
-            window,
-            tab,
-            committed,
-            "https://committed.example/final",
-        )
-        .expect("commit navigation");
+        app.commit_navigation(window, tab, committed, "https://committed.example/final")
+            .expect("commit navigation");
 
         assert_eq!(
             app.window(window).expect("window").address_bar_text(),
@@ -1020,13 +1011,8 @@ mod tests {
             .expect("second navigation")
             .intent()
             .id();
-        app.commit_navigation(
-            window,
-            second,
-            second_navigation,
-            "https://second.example/",
-        )
-        .expect("second commit");
+        app.commit_navigation(window, second, second_navigation, "https://second.example/")
+            .expect("second commit");
 
         app.begin_address_bar_edit(window)
             .expect("begin edit")
@@ -1034,7 +1020,8 @@ mod tests {
         app.set_address_bar_text(window, "unfinished edit")
             .expect("edit text");
 
-        app.set_active_tab(window, second).expect("activate second tab");
+        app.set_active_tab(window, second)
+            .expect("activate second tab");
 
         let browser_window = app.window(window).expect("window");
         assert!(!browser_window.address_bar().is_editing());
