@@ -1,4 +1,6 @@
-use crate::async_lifecycle::{AsyncRequestSequence, AsyncTarget, PendingRequest};
+use crate::async_lifecycle::{
+    AsyncRequestSequence, AsyncTarget, CancellationToken, PendingRequest,
+};
 use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
 use crate::{BrowserApp, BrowserWindowId, TabId};
 use pollster::block_on;
@@ -81,17 +83,24 @@ enum FrameOutcome {
 struct WorkerHandle {
     sender: SyncSender<WorkerCommand>,
     thread: JoinHandle<()>,
+    cancellation: CancellationToken,
 }
 
 impl WorkerHandle {
     fn spawn(target: AsyncTarget, proxy: EventLoopProxy<WorkerEvent>) -> Result<Self, String> {
         let (sender, receiver) = sync_channel(1);
+        let cancellation = CancellationToken::new();
+        let worker_cancellation = cancellation.clone();
         let thread = thread::Builder::new()
             .name("zorya-render".into())
-            .spawn(move || render_worker_main(target, receiver, proxy))
+            .spawn(move || render_worker_main(target, receiver, proxy, worker_cancellation))
             .map_err(|error| format!("failed to start render worker: {error}"))?;
 
-        Ok(Self { sender, thread })
+        Ok(Self {
+            sender,
+            thread,
+            cancellation,
+        })
     }
 
     fn attach_initial_surface(
@@ -115,6 +124,10 @@ impl WorkerHandle {
     }
 
     fn send(&self, command: WorkerCommand) -> Result<(), String> {
+        if self.cancellation.is_cancelled() {
+            return Err("render worker is cancelled".into());
+        }
+
         self.sender.try_send(command).map_err(|error| match error {
             TrySendError::Full(_) => "render worker command queue is full".into(),
             TrySendError::Disconnected(_) => "render worker is unavailable".into(),
@@ -122,6 +135,7 @@ impl WorkerHandle {
     }
 
     fn shutdown(self) {
+        self.cancellation.cancel();
         drop(self.sender);
         drop(self.thread);
     }
@@ -458,8 +472,9 @@ fn render_worker_main(
     init_target: AsyncTarget,
     receiver: Receiver<WorkerCommand>,
     proxy: EventLoopProxy<WorkerEvent>,
+    cancellation: CancellationToken,
 ) {
-    let mut worker = match RenderWorker::initialize(init_target) {
+    let mut worker = match RenderWorker::initialize(init_target, cancellation.clone()) {
         Ok(worker) => worker,
         Err(error) => {
             let _ = proxy.send_event(WorkerEvent::GpuReady {
@@ -469,6 +484,10 @@ fn render_worker_main(
             return;
         }
     };
+
+    if cancellation.is_cancelled() {
+        return;
+    }
 
     if proxy
         .send_event(WorkerEvent::GpuReady {
@@ -481,6 +500,10 @@ fn render_worker_main(
     }
 
     while let Ok(command) = receiver.recv() {
+        if cancellation.is_cancelled() {
+            return;
+        }
+
         match command {
             WorkerCommand::AttachInitialSurface { target, surface } => {
                 let result = worker.attach_initial_surface(target, surface);
@@ -519,12 +542,16 @@ struct RenderWorker {
     engine: EngineHost,
     gpu: Arc<WindowsGpuDevice>,
     content: Option<WebContentSurface>,
+    cancellation: CancellationToken,
     last_request_id: u64,
     last_viewport: Option<Viewport>,
 }
 
 impl RenderWorker {
-    fn initialize(init_target: AsyncTarget) -> Result<Self, String> {
+    fn initialize(
+        init_target: AsyncTarget,
+        cancellation: CancellationToken,
+    ) -> Result<Self, String> {
         let window = init_target.window();
         let tab = init_target.tab();
         let mut engine =
@@ -536,10 +563,17 @@ impl RenderWorker {
             .load_local_html(tab, START_PAGE)
             .map_err(|error| format!("failed to load Z1 start fixture: {error}"))?;
 
+        if cancellation.is_cancelled() {
+            return Err("render worker initialization was cancelled".into());
+        }
+
         let gpu = Arc::new(
             block_on(WindowsGpuDevice::request())
                 .map_err(|error| format!("failed to initialize DX12 device: {error}"))?,
         );
+        if cancellation.is_cancelled() {
+            return Err("render worker initialization was cancelled".into());
+        }
 
         Ok(Self {
             window,
@@ -547,6 +581,7 @@ impl RenderWorker {
             engine,
             gpu,
             content: None,
+            cancellation,
             last_request_id: init_target.request().get(),
             last_viewport: None,
         })
@@ -557,6 +592,8 @@ impl RenderWorker {
         target: AsyncTarget,
         surface: WindowsGpuSurface,
     ) -> Result<(), String> {
+        self.ensure_active()?;
+
         if target.window() != self.window
             || target.tab() != self.tab
             || target.request().get() != self.last_request_id
@@ -579,6 +616,7 @@ impl RenderWorker {
         target: AsyncTarget,
         surface: WindowsGpuSurface,
     ) -> Result<(), String> {
+        self.ensure_active()?;
         self.validate_new_target(target)?;
         let content = self
             .content
@@ -592,6 +630,7 @@ impl RenderWorker {
     }
 
     fn render(&mut self, target: AsyncTarget, viewport: Viewport) -> Result<FrameOutcome, String> {
+        self.ensure_active()?;
         self.validate_new_target(target)?;
 
         if viewport.is_suspended() {
@@ -620,6 +659,9 @@ impl RenderWorker {
 
         let outcome = match request {
             Some(request) => self.render_engine_frame(request, viewport)?,
+            None if self.cancellation.is_cancelled() => {
+                return Err("render worker was cancelled before presentation".into());
+            }
             None => match self
                 .content
                 .as_mut()
@@ -645,6 +687,7 @@ impl RenderWorker {
         request: EngineFrameRequest,
         viewport: Viewport,
     ) -> Result<FrameOutcome, String> {
+        let cancellation = self.cancellation.clone();
         let presentation = {
             let engine = &mut self.engine;
             let content = self
@@ -653,6 +696,11 @@ impl RenderWorker {
                 .ok_or_else(|| "Web content surface is not initialized".to_string())?;
 
             match engine.render_frame(request, viewport) {
+                Ok(_) if cancellation.is_cancelled() => {
+                    Err(PresentationError::Fatal(
+                        "render worker was cancelled before presentation".into(),
+                    ))
+                }
                 Ok(frame) => content.present_frame(frame.rarog_frame(), viewport),
                 Err(error) => Err(PresentationError::Fatal(format!(
                     "Rarog frame render failed: {error}"
@@ -682,6 +730,14 @@ impl RenderWorker {
                     PresentationError::Fatal(error) => Err(error),
                 }
             }
+        }
+    }
+
+    fn ensure_active(&self) -> Result<(), String> {
+        if self.cancellation.is_cancelled() {
+            Err("render worker is cancelled".into())
+        } else {
+            Ok(())
         }
     }
 
