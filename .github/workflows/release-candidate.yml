@@ -1,0 +1,193 @@
+name: Release candidate
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/package-release.ps1"
+      - ".github/workflows/release-candidate.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "LICENSE"
+      - "README-TECHNICAL-PREVIEW.md"
+      - "third_party/licenses/**"
+      - "src/main.rs"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/scripts/package-release.ps1"
+      - ".github/workflows/release-candidate.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "LICENSE"
+      - "README-TECHNICAL-PREVIEW.md"
+      - "third_party/licenses/**"
+      - "src/main.rs"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows-release-candidate:
+    name: Windows release candidate
+    runs-on: windows-latest
+    env:
+      ZORYA_SOURCE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+
+      - name: Validate packaging script syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          $path = (Resolve-Path ".github/scripts/package-release.ps1").Path
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $path,
+            [ref]$tokens,
+            [ref]$parseErrors
+          ) | Out-Null
+          if ($parseErrors.Count -ne 0) {
+            $parseErrors | ForEach-Object { Write-Error $_.Message }
+            throw "release packaging script contains PowerShell parse errors"
+          }
+
+      - name: Resolve release version
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --format-version 1 --no-deps | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo metadata failed with exit code $LASTEXITCODE"
+          }
+
+          $packages = @(
+            $metadata.packages | Where-Object {
+              $_.name -eq "zorya" -and $null -eq $_.source
+            }
+          )
+          if ($packages.Count -ne 1) {
+            throw "expected exactly one workspace zorya package; found $($packages.Count)"
+          }
+
+          $version = [string]$packages[0].version
+          "ZORYA_RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked --target x86_64-pc-windows-msvc
+
+      - name: Build release executable
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo build --locked --release --bin zorya
+
+      - name: Verify release executable version
+        shell: pwsh
+        run: |
+          $executable = Join-Path "target/release" "zorya.exe"
+          $actual = (& $executable --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "release executable version check failed with exit code $LASTEXITCODE"
+          }
+          $expected = "Zorya $env:ZORYA_RELEASE_VERSION"
+          if ($actual -ne $expected) {
+            throw "release executable reports '$actual'; expected '$expected'"
+          }
+
+      - name: Smoke test release native shell
+        shell: pwsh
+        run: |
+          $executable = Join-Path "target/release" "zorya.exe"
+          $process = Start-Process -FilePath $executable -ArgumentList "--native-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "release native shell smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "release native shell smoke test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Package release candidate
+        shell: pwsh
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          & ".github/scripts/package-release.ps1" -Version $env:ZORYA_RELEASE_VERSION -CommitSha $env:ZORYA_SOURCE_COMMIT
+
+      - name: Verify packaged release
+        shell: pwsh
+        run: |
+          $packageName = "zorya-$env:ZORYA_RELEASE_VERSION-windows-x86_64"
+          $archive = Join-Path "dist" "$packageName.zip"
+          $hashFile = "$archive.sha256"
+
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "release archive was not created"
+          }
+          if (-not (Test-Path -LiteralPath $hashFile -PathType Leaf)) {
+            throw "release SHA-256 file was not created"
+          }
+
+          $expectedHash = ((Get-Content -LiteralPath $hashFile -Raw).Trim() -split ' +')[0]
+          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expectedHash -ne $actualHash) {
+            throw "release archive SHA-256 mismatch"
+          }
+
+          $verifyRoot = Join-Path $env:RUNNER_TEMP "zorya-release-verify"
+          if (Test-Path -LiteralPath $verifyRoot) {
+            Remove-Item -LiteralPath $verifyRoot -Recurse -Force
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $verifyRoot
+
+          $packageRoot = Join-Path $verifyRoot $packageName
+          $packagedExecutable = Join-Path $packageRoot "zorya.exe"
+          $actualVersion = (& $packagedExecutable --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "packaged executable version check failed with exit code $LASTEXITCODE"
+          }
+          if ($actualVersion -ne "Zorya $env:ZORYA_RELEASE_VERSION") {
+            throw "packaged executable reports unexpected version '$actualVersion'"
+          }
+
+          $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "packaged native shell smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "packaged native shell smoke test failed with exit code $($process.ExitCode)"
+          }
+
+          $buildInfoPath = Join-Path $packageRoot "BUILD-INFO.txt"
+          if (-not (Test-Path -LiteralPath $buildInfoPath -PathType Leaf)) {
+            throw "packaged build provenance is missing"
+          }
+          $buildInfo = Get-Content -LiteralPath $buildInfoPath -Raw
+          if ($buildInfo -notmatch [regex]::Escape("Zorya version: $env:ZORYA_RELEASE_VERSION")) {
+            throw "packaged build provenance has the wrong Zorya version"
+          }
+          if ($buildInfo -notmatch [regex]::Escape("Source commit: $env:ZORYA_SOURCE_COMMIT")) {
+            throw "packaged build provenance has the wrong source commit"
+          }
+
+          $licenseRoot = Join-Path $packageRoot "THIRD_PARTY_LICENSES"
+          $licenseIndex = Join-Path $licenseRoot "README.md"
+          if (-not (Test-Path -LiteralPath $licenseIndex -PathType Leaf)) {
+            throw "packaged third-party license index is missing"
+          }
+
+      - name: Upload release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: zorya-${{ env.ZORYA_RELEASE_VERSION }}-windows-x86_64
+          path: |
+            dist/zorya-${{ env.ZORYA_RELEASE_VERSION }}-windows-x86_64.zip
+            dist/zorya-${{ env.ZORYA_RELEASE_VERSION }}-windows-x86_64.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

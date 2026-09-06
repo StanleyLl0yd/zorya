@@ -33,6 +33,8 @@ On Windows, use `target\debug\zorya.exe --version` for the headless executable s
 
 Windows is the primary target. Changes to portable product code should also continue to compile and test on Linux CI.
 
+Release-packaging changes must also exercise the release-candidate workflow. A candidate is not complete until the release executable and the re-extracted packaged executable both pass the exact version check and full native smoke, the archive hash is verified, and dependency license material is present. Do not describe an Actions artifact as a public release.
+
 ## Rarog changes
 
 Do not patch around a missing Rarog capability by duplicating engine code in Zorya or depending on undocumented internals.

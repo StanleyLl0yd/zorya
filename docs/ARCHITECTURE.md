@@ -95,6 +95,14 @@ The adapter is responsible for View creation/destruction, deterministic local HT
 
 The Z1 start fixture is loaded by Rarog with `BaseUrl::about_blank()`. Zorya therefore represents the startup document with the browser-history display location `about:blank` rather than inventing a privileged or origin-bearing internal URL. The browser model starts that navigation before native initialization, commits it only after the Rarog View has loaded and the initial Web-content surface has attached successfully, records initialization failure against the pending navigation, and stops the pending navigation if the shell closes first. This product-history transition does not create or override Rarog URL/origin semantics.
 
+## Release packaging boundary
+
+Release packaging is Zorya-owned product behavior. A distributable candidate must be derived from the committed Cargo version and locked dependency graph; the packaged executable version must match that source version exactly.
+
+The Windows Technical Preview candidate is a ZIP, not an installer. Candidate generation runs on Windows x86-64, builds Cargo's release profile, executes the release native-window/Rarog/DX12 smoke, generates third-party license material from the resolved Windows dependency graph, records exact source/Rarog/toolchain provenance plus a SHA-256 digest, then re-extracts and re-smokes the packaged executable. Candidate creation fails closed on missing version, package, provenance, hash or dependency-license evidence.
+
+Candidate generation is distinct from public publication. Producing a green CI artifact does not itself make a GitHub Release, imply code signing, or change browser-readiness claims. Publication/tagging is a separate release action after the candidate has passed its gates.
+
 ## Engine-owned state
 
 Rarog is authoritative for:
