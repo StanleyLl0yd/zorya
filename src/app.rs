@@ -3,6 +3,7 @@ use crate::navigation::{
     HistoryEntry, HistoryEntryId, NavigationFailure, NavigationId, NavigationIntent,
     NavigationIntentKind, NavigationStart, TabNavigation,
 };
+use crate::tab_activation::{TabActivationId, TabActivationIntent, TabActivationStart};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -30,6 +31,7 @@ pub enum BrowserModelError {
     TabIdExhausted,
     NavigationIdExhausted,
     HistoryEntryIdExhausted,
+    TabActivationIdExhausted,
     UnknownWindow(BrowserWindowId),
     UnknownTab {
         window: BrowserWindowId,
@@ -49,6 +51,14 @@ pub enum BrowserModelError {
     AddressBarNotEditing {
         window: BrowserWindowId,
     },
+    NoActiveTab {
+        window: BrowserWindowId,
+    },
+    StaleTabActivation {
+        window: BrowserWindowId,
+        expected: Option<TabActivationId>,
+        actual: TabActivationId,
+    },
 }
 
 impl fmt::Display for BrowserModelError {
@@ -63,6 +73,9 @@ impl fmt::Display for BrowserModelError {
             }
             Self::HistoryEntryIdExhausted => {
                 formatter.write_str("history entry identifier space is exhausted")
+            }
+            Self::TabActivationIdExhausted => {
+                formatter.write_str("tab activation identifier space is exhausted")
             }
             Self::UnknownWindow(window) => {
                 write!(formatter, "unknown browser window {}", window.get())
@@ -109,6 +122,30 @@ impl fmt::Display for BrowserModelError {
                 "address bar is not being edited in browser window {}",
                 window.get()
             ),
+            Self::NoActiveTab { window } => write!(
+                formatter,
+                "browser window {} has no active tab",
+                window.get()
+            ),
+            Self::StaleTabActivation {
+                window,
+                expected,
+                actual,
+            } => match expected {
+                Some(expected) => write!(
+                    formatter,
+                    "tab activation {} is stale for browser window {}; current activation is {}",
+                    actual.get(),
+                    window.get(),
+                    expected.get()
+                ),
+                None => write!(
+                    formatter,
+                    "tab activation {} is stale for browser window {}; no activation is pending",
+                    actual.get(),
+                    window.get()
+                ),
+            },
         }
     }
 }
@@ -132,10 +169,36 @@ impl Tab {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabCloseResult {
+    tab: Tab,
+    invalidated_activation: Option<TabActivationIntent>,
+    active_tab: Option<TabId>,
+}
+
+impl TabCloseResult {
+    pub const fn tab(&self) -> &Tab {
+        &self.tab
+    }
+
+    pub const fn invalidated_activation(&self) -> Option<TabActivationIntent> {
+        self.invalidated_activation
+    }
+
+    pub const fn active_tab(&self) -> Option<TabId> {
+        self.active_tab
+    }
+
+    pub fn into_tab(self) -> Tab {
+        self.tab
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrowserWindow {
     id: BrowserWindowId,
     tabs: Vec<Tab>,
     active_tab: Option<TabId>,
+    pending_activation: Option<TabActivationIntent>,
     address_bar: AddressBarState,
 }
 
@@ -145,6 +208,7 @@ impl BrowserWindow {
             id,
             tabs: Vec::new(),
             active_tab: None,
+            pending_activation: None,
             address_bar: AddressBarState::default(),
         }
     }
@@ -163,6 +227,10 @@ impl BrowserWindow {
 
     pub const fn active_tab_id(&self) -> Option<TabId> {
         self.active_tab
+    }
+
+    pub const fn pending_tab_activation(&self) -> Option<TabActivationIntent> {
+        self.pending_activation
     }
 
     pub fn active_tab(&self) -> Option<&Tab> {
@@ -217,8 +285,16 @@ impl BrowserWindow {
         }
     }
 
-    fn close_tab(&mut self, tab: TabId) -> Option<Tab> {
+    fn close_tab(&mut self, tab: TabId) -> Option<TabCloseResult> {
         let position = self.tabs.iter().position(|candidate| candidate.id == tab)?;
+        let invalidated_activation = if self
+            .pending_activation
+            .is_some_and(|activation| activation.from() == tab || activation.to() == tab)
+        {
+            self.pending_activation.take()
+        } else {
+            None
+        };
         self.address_bar.cancel_for_tab(tab);
         let removed = self.tabs.remove(position);
 
@@ -234,18 +310,36 @@ impl BrowserWindow {
                 .map(Tab::id);
         }
 
-        Some(removed)
+        Some(TabCloseResult {
+            tab: removed,
+            invalidated_activation,
+            active_tab: self.active_tab,
+        })
     }
 
-    fn set_active_tab(&mut self, tab: TabId) -> bool {
-        if self.tabs.iter().any(|candidate| candidate.id == tab) {
-            if self.active_tab != Some(tab) {
-                self.address_bar.cancel();
-            }
-            self.active_tab = Some(tab);
-            true
+    fn set_active_tab(&mut self, tab: TabId) -> Option<TabActivationIntent> {
+        debug_assert!(
+            self.tabs.iter().any(|candidate| candidate.id == tab),
+            "active tab target must be validated before mutation"
+        );
+        let invalidated_activation = self.pending_activation.take();
+        if self.active_tab != Some(tab) {
+            self.address_bar.cancel();
+        }
+        self.active_tab = Some(tab);
+        invalidated_activation
+    }
+
+    fn begin_tab_activation(&mut self, intent: TabActivationIntent) -> TabActivationStart {
+        let superseded = self.pending_activation.replace(intent);
+        TabActivationStart::new(intent, superseded)
+    }
+
+    fn take_tab_activation(&mut self, activation: TabActivationId) -> Option<TabActivationIntent> {
+        if self.pending_activation.map(TabActivationIntent::id) == Some(activation) {
+            self.pending_activation.take()
         } else {
-            false
+            None
         }
     }
 
@@ -277,6 +371,7 @@ pub struct BrowserApp {
     windows: BTreeMap<BrowserWindowId, BrowserWindow>,
     next_window_id: u64,
     next_tab_id: u64,
+    next_tab_activation_id: u64,
     next_navigation_id: u64,
     next_history_entry_id: u64,
 }
@@ -293,6 +388,7 @@ impl BrowserApp {
             windows: BTreeMap::new(),
             next_window_id: 1,
             next_tab_id: 1,
+            next_tab_activation_id: 1,
             next_navigation_id: 1,
             next_history_entry_id: 1,
         }
@@ -356,7 +452,7 @@ impl BrowserApp {
         &mut self,
         window: BrowserWindowId,
         tab: TabId,
-    ) -> Result<Tab, BrowserModelError> {
+    ) -> Result<TabCloseResult, BrowserModelError> {
         let browser_window = self
             .windows
             .get_mut(&window)
@@ -371,17 +467,16 @@ impl BrowserApp {
         &mut self,
         window: BrowserWindowId,
         tab: TabId,
-    ) -> Result<(), BrowserModelError> {
+    ) -> Result<Option<TabActivationIntent>, BrowserModelError> {
         let browser_window = self
             .windows
             .get_mut(&window)
             .ok_or(BrowserModelError::UnknownWindow(window))?;
 
-        if browser_window.set_active_tab(tab) {
-            Ok(())
-        } else {
-            Err(BrowserModelError::UnknownTab { window, tab })
+        if browser_window.tab(tab).is_none() {
+            return Err(BrowserModelError::UnknownTab { window, tab });
         }
+        Ok(browser_window.set_active_tab(tab))
     }
 
     pub fn move_tab_before(
@@ -409,6 +504,93 @@ impl BrowserApp {
 
         browser_window.move_tab_before(tab, before);
         Ok(())
+    }
+
+    pub fn begin_tab_activation(
+        &mut self,
+        window: BrowserWindowId,
+        tab: TabId,
+    ) -> Result<TabActivationStart, BrowserModelError> {
+        self.ensure_tab(window, tab)?;
+        let active = self
+            .windows
+            .get(&window)
+            .expect("target tab validation also validates the window")
+            .active_tab_id()
+            .ok_or(BrowserModelError::NoActiveTab { window })?;
+        let id = self.allocate_tab_activation_id()?;
+        let intent = TabActivationIntent::new(id, active, tab);
+        Ok(self
+            .windows
+            .get_mut(&window)
+            .expect("window validated before activation")
+            .begin_tab_activation(intent))
+    }
+
+    pub fn commit_tab_activation(
+        &mut self,
+        window: BrowserWindowId,
+        activation: TabActivationId,
+    ) -> Result<TabId, BrowserModelError> {
+        let browser_window = self
+            .windows
+            .get_mut(&window)
+            .ok_or(BrowserModelError::UnknownWindow(window))?;
+        let expected = browser_window
+            .pending_tab_activation()
+            .map(TabActivationIntent::id);
+        if expected != Some(activation) {
+            return Err(BrowserModelError::StaleTabActivation {
+                window,
+                expected,
+                actual: activation,
+            });
+        }
+
+        let intent = browser_window
+            .pending_tab_activation()
+            .expect("pending activation validated before commit");
+        if browser_window.active_tab_id() != Some(intent.from())
+            || browser_window.tab(intent.to()).is_none()
+        {
+            return Err(BrowserModelError::StaleTabActivation {
+                window,
+                expected: Some(activation),
+                actual: activation,
+            });
+        }
+
+        let intent = browser_window
+            .take_tab_activation(activation)
+            .expect("pending activation remains current after validation");
+        let target = intent.to();
+        let invalidated = browser_window.set_active_tab(target);
+        debug_assert!(
+            invalidated.is_none(),
+            "committed activation was removed before active-tab mutation"
+        );
+        Ok(target)
+    }
+
+    pub fn cancel_tab_activation(
+        &mut self,
+        window: BrowserWindowId,
+        activation: TabActivationId,
+    ) -> Result<TabActivationIntent, BrowserModelError> {
+        let browser_window = self
+            .windows
+            .get_mut(&window)
+            .ok_or(BrowserModelError::UnknownWindow(window))?;
+        let expected = browser_window
+            .pending_tab_activation()
+            .map(TabActivationIntent::id);
+        browser_window.take_tab_activation(activation).ok_or(
+            BrowserModelError::StaleTabActivation {
+                window,
+                expected,
+                actual: activation,
+            },
+        )
     }
 
     pub fn begin_address_bar_edit(
@@ -634,6 +816,15 @@ impl BrowserApp {
         self.tab(window, tab).map(|_| ())
     }
 
+    fn allocate_tab_activation_id(&mut self) -> Result<TabActivationId, BrowserModelError> {
+        let id = TabActivationId(self.next_tab_activation_id);
+        self.next_tab_activation_id = self
+            .next_tab_activation_id
+            .checked_add(1)
+            .ok_or(BrowserModelError::TabActivationIdExhausted)?;
+        Ok(id)
+    }
+
     fn allocate_navigation_id(&mut self) -> Result<NavigationId, BrowserModelError> {
         let id = NavigationId(self.next_navigation_id);
         self.next_navigation_id = self
@@ -707,8 +898,11 @@ mod tests {
         let window = app.create_window().expect("window id");
         let first = app.create_tab(window).expect("first tab id");
         let second = app.create_tab(window).expect("second tab id");
-        app.set_active_tab(window, first)
-            .expect("activate first tab");
+        assert_eq!(
+            app.set_active_tab(window, first)
+                .expect("activate first tab"),
+            None
+        );
 
         app.close_tab(window, first).expect("close active tab");
 
@@ -1069,8 +1263,11 @@ mod tests {
         app.set_address_bar_text(window, "unfinished edit")
             .expect("edit text");
 
-        app.set_active_tab(window, second)
-            .expect("activate second tab");
+        assert_eq!(
+            app.set_active_tab(window, second)
+                .expect("activate second tab"),
+            None
+        );
 
         let browser_window = app.window(window).expect("window");
         assert!(!browser_window.address_bar().is_editing());
@@ -1241,6 +1438,378 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first, second]
         );
+    }
+
+    #[test]
+    fn tab_activation_begin_does_not_change_active_tab_or_address_edit() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+
+        app.begin_address_bar_edit(window)
+            .expect("begin edit")
+            .expect("active first tab");
+        app.set_address_bar_text(window, "unfinished edit")
+            .expect("edit text");
+
+        let start = app
+            .begin_tab_activation(window, second)
+            .expect("begin activation");
+
+        assert_eq!(start.intent().from(), first);
+        assert_eq!(start.intent().to(), second);
+        assert!(start.superseded().is_none());
+
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(browser_window.active_tab_id(), Some(first));
+        assert_eq!(
+            browser_window.pending_tab_activation(),
+            Some(start.intent())
+        );
+        assert_eq!(browser_window.address_bar().editing_tab(), Some(first));
+        assert_eq!(browser_window.address_bar_text(), "unfinished edit");
+    }
+
+    #[test]
+    fn tab_activation_commit_changes_active_tab_only_after_exact_commit() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+
+        app.begin_address_bar_edit(window)
+            .expect("begin edit")
+            .expect("active first tab");
+        app.set_address_bar_text(window, "unfinished edit")
+            .expect("edit text");
+
+        let activation = app
+            .begin_tab_activation(window, second)
+            .expect("begin activation")
+            .intent()
+            .id();
+
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(first)
+        );
+        assert_eq!(
+            app.commit_tab_activation(window, activation)
+                .expect("commit activation"),
+            second
+        );
+
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(browser_window.active_tab_id(), Some(second));
+        assert!(browser_window.pending_tab_activation().is_none());
+        assert!(!browser_window.address_bar().is_editing());
+    }
+
+    #[test]
+    fn newer_tab_activation_supersedes_older_and_rejects_stale_commit() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let third = app.create_tab(window).expect("third");
+
+        let stale = app
+            .begin_tab_activation(window, second)
+            .expect("first activation");
+        let current = app
+            .begin_tab_activation(window, third)
+            .expect("second activation");
+
+        assert!(current.intent().id().get() > stale.intent().id().get());
+        assert_eq!(current.intent().from(), first);
+        assert_eq!(current.superseded(), Some(stale.intent()));
+        assert_eq!(
+            app.commit_tab_activation(window, stale.intent().id()),
+            Err(BrowserModelError::StaleTabActivation {
+                window,
+                expected: Some(current.intent().id()),
+                actual: stale.intent().id(),
+            })
+        );
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(first)
+        );
+
+        app.commit_tab_activation(window, current.intent().id())
+            .expect("commit current activation");
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(third)
+        );
+    }
+
+    #[test]
+    fn closing_activation_target_invalidates_pending_transition() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let activation = app
+            .begin_tab_activation(window, second)
+            .expect("activation")
+            .intent()
+            .id();
+
+        let closed = app.close_tab(window, second).expect("close target");
+        assert_eq!(
+            closed.invalidated_activation().map(TabActivationIntent::id),
+            Some(activation)
+        );
+
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(browser_window.active_tab_id(), Some(first));
+        assert!(browser_window.pending_tab_activation().is_none());
+        assert_eq!(
+            app.commit_tab_activation(window, activation),
+            Err(BrowserModelError::StaleTabActivation {
+                window,
+                expected: None,
+                actual: activation,
+            })
+        );
+    }
+
+    #[test]
+    fn closing_activation_source_invalidates_transition_before_neighbor_selection() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let third = app.create_tab(window).expect("third");
+        let activation = app
+            .begin_tab_activation(window, third)
+            .expect("activation")
+            .intent()
+            .id();
+
+        let closed = app.close_tab(window, first).expect("close source");
+        assert_eq!(
+            closed.invalidated_activation().map(TabActivationIntent::id),
+            Some(activation)
+        );
+        assert_eq!(closed.active_tab(), Some(second));
+
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(browser_window.active_tab_id(), Some(second));
+        assert!(browser_window.pending_tab_activation().is_none());
+        assert_eq!(
+            app.commit_tab_activation(window, activation),
+            Err(BrowserModelError::StaleTabActivation {
+                window,
+                expected: None,
+                actual: activation,
+            })
+        );
+    }
+
+    #[test]
+    fn closing_unrelated_tab_preserves_pending_activation() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let third = app.create_tab(window).expect("third");
+        let activation = app
+            .begin_tab_activation(window, second)
+            .expect("activation")
+            .intent();
+
+        let closed = app.close_tab(window, third).expect("close unrelated tab");
+        assert!(closed.invalidated_activation().is_none());
+
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(browser_window.active_tab_id(), Some(first));
+        assert_eq!(browser_window.pending_tab_activation(), Some(activation));
+        app.commit_tab_activation(window, activation.id())
+            .expect("commit preserved activation");
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn reorder_preserves_pending_activation_by_stable_tab_identity() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let third = app.create_tab(window).expect("third");
+        let activation = app
+            .begin_tab_activation(window, third)
+            .expect("activation")
+            .intent();
+
+        app.move_tab_before(window, third, Some(second))
+            .expect("reorder target");
+        app.move_tab_before(window, first, None)
+            .expect("reorder source");
+
+        assert_eq!(
+            app.window(window).expect("window").pending_tab_activation(),
+            Some(activation)
+        );
+        app.commit_tab_activation(window, activation.id())
+            .expect("commit after reorder");
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(third)
+        );
+    }
+
+    #[test]
+    fn immediate_active_tab_change_cancels_pending_activation() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let third = app.create_tab(window).expect("third");
+        let activation = app
+            .begin_tab_activation(window, second)
+            .expect("activation")
+            .intent()
+            .id();
+
+        let invalidated = app
+            .set_active_tab(window, third)
+            .expect("immediate active change");
+        assert_eq!(invalidated.map(TabActivationIntent::id), Some(activation));
+
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(browser_window.active_tab_id(), Some(third));
+        assert!(browser_window.pending_tab_activation().is_none());
+        assert_eq!(
+            app.commit_tab_activation(window, activation),
+            Err(BrowserModelError::StaleTabActivation {
+                window,
+                expected: None,
+                actual: activation,
+            })
+        );
+        assert_ne!(first, third);
+    }
+
+    #[test]
+    fn activation_to_current_tab_supersedes_pending_switch_without_dropping_edit() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+
+        app.begin_address_bar_edit(window)
+            .expect("begin edit")
+            .expect("active first tab");
+        app.set_address_bar_text(window, "unfinished edit")
+            .expect("edit text");
+
+        let pending = app
+            .begin_tab_activation(window, second)
+            .expect("pending switch");
+        let stay = app
+            .begin_tab_activation(window, first)
+            .expect("stay on current tab");
+
+        assert_eq!(stay.superseded(), Some(pending.intent()));
+        assert_eq!(stay.intent().from(), first);
+        assert_eq!(stay.intent().to(), first);
+        app.commit_tab_activation(window, stay.intent().id())
+            .expect("commit current-tab activation");
+
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(browser_window.active_tab_id(), Some(first));
+        assert_eq!(browser_window.address_bar().editing_tab(), Some(first));
+        assert_eq!(browser_window.address_bar_text(), "unfinished edit");
+    }
+
+    #[test]
+    fn stale_activation_cancel_cannot_remove_newer_transition() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let _first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let third = app.create_tab(window).expect("third");
+
+        let stale = app
+            .begin_tab_activation(window, second)
+            .expect("stale activation")
+            .intent();
+        let current = app
+            .begin_tab_activation(window, third)
+            .expect("current activation")
+            .intent();
+
+        assert_eq!(
+            app.cancel_tab_activation(window, stale.id()),
+            Err(BrowserModelError::StaleTabActivation {
+                window,
+                expected: Some(current.id()),
+                actual: stale.id(),
+            })
+        );
+        assert_eq!(
+            app.window(window).expect("window").pending_tab_activation(),
+            Some(current)
+        );
+    }
+
+    #[test]
+    fn tab_activation_can_be_cancelled_without_changing_active_tab() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let start = app
+            .begin_tab_activation(window, second)
+            .expect("activation");
+
+        assert_eq!(
+            app.cancel_tab_activation(window, start.intent().id())
+                .expect("cancel activation"),
+            start.intent()
+        );
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(first)
+        );
+        assert!(
+            app.window(window)
+                .expect("window")
+                .pending_tab_activation()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tab_activation_identity_is_monotonic_across_windows() {
+        let mut app = BrowserApp::new();
+        let first_window = app.create_window().expect("first window");
+        let first_active = app.create_tab(first_window).expect("first active");
+        let first_target = app.create_tab(first_window).expect("first target");
+        let second_window = app.create_window().expect("second window");
+        let second_active = app.create_tab(second_window).expect("second active");
+        let second_target = app.create_tab(second_window).expect("second target");
+
+        let first = app
+            .begin_tab_activation(first_window, first_target)
+            .expect("first activation")
+            .intent()
+            .id();
+        let second = app
+            .begin_tab_activation(second_window, second_target)
+            .expect("second activation")
+            .intent()
+            .id();
+
+        assert!(second.get() > first.get());
+        assert_ne!(first_active, first_target);
+        assert_ne!(second_active, second_target);
     }
 
     #[test]
