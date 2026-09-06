@@ -113,6 +113,8 @@ Windows native surface creation is intentionally split from GPU-device initializ
 
 Rendering is event driven. Resize/DPI changes mark the window dirty and request a redraw; only one render request may be in flight. A redraw that arrives while rendering is coalesced into one later redraw rather than starting a busy loop.
 
+The developer binary has an explicit native-runtime smoke mode. It follows the same window, worker, GPU, surface, Rarog render and presentation path as the interactive shell, then exits immediately after the first successfully presented frame. Fatal shell failures are retained in `NativeShell` and propagated back through `run` after the event loop exits, so automation receives a non-zero process result instead of mistaking an internally failed event loop for success.
+
 `WebContentSurface` is the platform-owned presentation boundary for untrusted Web pixels. In the first Z1 vertical it occupies the full client area because privileged browser chrome is not rendered yet, but Web content does not own the top-level window or future chrome state. When Rarog reports its public `WindowsGpuError::Surface` category, the worker discards the affected compositor/Rarog frame and requests one replacement native surface from the event-loop thread; after replacement it requests a fresh explicit Rarog frame. Resize/configuration and compositor failures are not treated as surface-loss recovery candidates. The nested backend-specific surface error is intentionally not inspected in Zorya; finer recovery classification and GPU device-loss handling remain blocked on the stable Rarog contract tracked in issue #6. Repeated or non-recoverable failure terminates the developer shell conservatively.
 
 ## Async and UI lifecycle
