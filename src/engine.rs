@@ -392,6 +392,67 @@ mod tests {
     }
 
     #[test]
+    fn simultaneous_views_keep_frame_requests_isolated_by_tab_and_generation() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first_tab = app.create_tab(window).expect("first tab");
+        let second_tab = app.create_tab(window).expect("second tab");
+        let mut host = EngineHost::new().expect("engine host");
+
+        host.create_view(first_tab).expect("first view");
+        host.create_view(second_tab).expect("second view");
+        host.load_local_html(first_tab, "<p>first tab</p>")
+            .expect("first document");
+        host.load_local_html(second_tab, "<p>second tab</p>")
+            .expect("second document");
+
+        let first = host
+            .begin_frame(first_tab)
+            .expect("first begin")
+            .expect("first frame");
+        let second = host
+            .begin_frame(second_tab)
+            .expect("second begin")
+            .expect("second frame");
+
+        assert_eq!(first.tab(), first_tab);
+        assert_eq!(second.tab(), second_tab);
+        assert_ne!(first.view_generation(), second.view_generation());
+
+        let forged_second = EngineFrameRequest {
+            tab: second_tab,
+            view_generation: first.view_generation(),
+            request_id: second.request_id(),
+        };
+        assert_eq!(
+            host.render_frame(forged_second, Viewport::new(640, 480))
+                .map(|_| ()),
+            Err(EngineHostError::StaleFrameRequest {
+                tab: second_tab,
+                view_generation: first.view_generation(),
+                request_id: second.request_id(),
+            })
+        );
+
+        {
+            let frame = host
+                .render_frame(first, Viewport::new(640, 480))
+                .expect("render first");
+            assert_eq!(frame.status(), EngineFrameStatus::Initial);
+        }
+        host.complete_frame(first).expect("complete first");
+        assert!(host.close_view(first_tab));
+
+        {
+            let frame = host
+                .render_frame(second, Viewport::new(640, 480))
+                .expect("second remains independently valid");
+            assert_eq!(frame.status(), EngineFrameStatus::Initial);
+        }
+        host.complete_frame(second).expect("complete second");
+    }
+
+    #[test]
     fn render_failure_keeps_request_available_for_explicit_discard() {
         let tab = initial_tab();
         let mut host = EngineHost::new().expect("engine host");
