@@ -71,6 +71,8 @@ Every hosted View receives a Zorya-owned monotonically increasing generation. Fr
 
 The adapter is responsible for View creation/destruction, deterministic local HTML loading, viewport conversion and Rarog frame-request lifecycle. It does not implement Web parsing, layout, paint, navigation semantics or compositor behavior.
 
+The Z1 start fixture is loaded by Rarog with `BaseUrl::about_blank()`. Zorya therefore represents the startup document with the browser-history display location `about:blank` rather than inventing a privileged or origin-bearing internal URL. The browser model starts that navigation before native initialization, commits it only after the Rarog View has loaded and the initial Web-content surface has attached successfully, records initialization failure against the pending navigation, and stops the pending navigation if the shell closes first. This product-history transition does not create or override Rarog URL/origin semantics.
+
 ## Engine-owned state
 
 Rarog is authoritative for:
