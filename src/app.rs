@@ -248,6 +248,28 @@ impl BrowserWindow {
             false
         }
     }
+
+    fn move_tab_before(&mut self, tab: TabId, before: Option<TabId>) {
+        if before == Some(tab) {
+            return;
+        }
+
+        let from = self
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == tab)
+            .expect("tab validated before reorder");
+        let moved = self.tabs.remove(from);
+        let destination = match before {
+            Some(anchor) => self
+                .tabs
+                .iter()
+                .position(|candidate| candidate.id == anchor)
+                .expect("reorder anchor validated before mutation"),
+            None => self.tabs.len(),
+        };
+        self.tabs.insert(destination, moved);
+    }
 }
 
 #[derive(Debug)]
@@ -360,6 +382,33 @@ impl BrowserApp {
         } else {
             Err(BrowserModelError::UnknownTab { window, tab })
         }
+    }
+
+    pub fn move_tab_before(
+        &mut self,
+        window: BrowserWindowId,
+        tab: TabId,
+        before: Option<TabId>,
+    ) -> Result<(), BrowserModelError> {
+        let browser_window = self
+            .windows
+            .get_mut(&window)
+            .ok_or(BrowserModelError::UnknownWindow(window))?;
+
+        if browser_window.tab(tab).is_none() {
+            return Err(BrowserModelError::UnknownTab { window, tab });
+        }
+        if let Some(anchor) = before
+            && browser_window.tab(anchor).is_none()
+        {
+            return Err(BrowserModelError::UnknownTab {
+                window,
+                tab: anchor,
+            });
+        }
+
+        browser_window.move_tab_before(tab, before);
+        Ok(())
     }
 
     pub fn begin_address_bar_edit(
@@ -1082,6 +1131,111 @@ mod tests {
         assert_eq!(
             app.submit_address_bar_edit(window),
             Err(BrowserModelError::AddressBarNotEditing { window })
+        );
+    }
+
+    #[test]
+    fn tab_reorder_uses_stable_anchor_identity_and_preserves_active_tab() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let third = app.create_tab(window).expect("third");
+
+        app.move_tab_before(window, third, Some(first))
+            .expect("move third before first");
+        assert_eq!(
+            app.window(window)
+                .expect("window")
+                .tabs()
+                .iter()
+                .map(Tab::id)
+                .collect::<Vec<_>>(),
+            vec![third, first, second]
+        );
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(first)
+        );
+
+        app.move_tab_before(window, first, None)
+            .expect("move first to end");
+        assert_eq!(
+            app.window(window)
+                .expect("window")
+                .tabs()
+                .iter()
+                .map(Tab::id)
+                .collect::<Vec<_>>(),
+            vec![third, second, first]
+        );
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn tab_reorder_preserves_address_bar_edit_bound_to_tab_identity() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+
+        app.begin_address_bar_edit(window)
+            .expect("begin edit")
+            .expect("active first tab");
+        app.set_address_bar_text(window, "unfinished edit")
+            .expect("edit text");
+
+        app.move_tab_before(window, second, Some(first))
+            .expect("move second before edited tab");
+
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(browser_window.active_tab_id(), Some(first));
+        assert_eq!(browser_window.address_bar().editing_tab(), Some(first));
+        assert_eq!(browser_window.address_bar_text(), "unfinished edit");
+        assert_eq!(
+            browser_window.tabs().iter().map(Tab::id).collect::<Vec<_>>(),
+            vec![second, first]
+        );
+    }
+
+    #[test]
+    fn invalid_reorder_anchor_is_rejected_before_tab_order_changes() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let missing = TabId(999);
+
+        assert_eq!(
+            app.move_tab_before(window, second, Some(missing)),
+            Err(BrowserModelError::UnknownTab {
+                window,
+                tab: missing,
+            })
+        );
+        assert_eq!(
+            app.window(window)
+                .expect("window")
+                .tabs()
+                .iter()
+                .map(Tab::id)
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
+
+        app.move_tab_before(window, first, Some(first))
+            .expect("self anchor is a no-op");
+        assert_eq!(
+            app.window(window)
+                .expect("window")
+                .tabs()
+                .iter()
+                .map(Tab::id)
+                .collect::<Vec<_>>(),
+            vec![first, second]
         );
     }
 

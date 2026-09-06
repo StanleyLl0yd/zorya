@@ -51,6 +51,8 @@ These are not engine-derived caches. Their persistence and lifecycle must be exp
 
 `BrowserWindow` owns tab ordering and active-tab selection. Closing an active tab selects a surviving neighbor when one exists; closing the last tab leaves the window with no active tab. Recreating a tab allocates a new identity, so stale work targeting a closed tab cannot silently attach to a replacement.
 
+Tab reorder is expressed through stable identities rather than persistent indices: `move_tab_before(tab, anchor)` moves one `TabId` before another, while a missing anchor means move to the end. All target identities are validated before mutation. Reordering changes only presentation order; it does not change active-tab identity, navigation ownership or a window address-bar edit already bound to that tab.
+
 The product model is platform-independent. Native Windows identifiers and Rarog `ViewId` values are adapter concerns and must be mapped to product identities rather than becoming product identity themselves.
 
 ### Browser navigation model
