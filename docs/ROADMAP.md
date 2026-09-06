@@ -40,7 +40,7 @@ The existing rarog-window binary remains a small engine reference host. Product 
 - window-owned address bar edit/display model with stable TabId-bound raw submissions;
 - back/forward/reload/stop engine wiring and general HTTP(S) navigation completion are blocked on the supported Rarog Fetch/View contract tracked in issue #13;
 - page-title observation is blocked on a supported Rarog View title contract tracked in issue #18;
-- keyboard-first browser accelerators can remain product-owned, while Web-content input dispatch is blocked on the supported Rarog View input contract tracked in issue #16;
+- keyboard-first browser accelerators can remain product-owned; pending-aware cyclic tab targeting is modeled, while native shortcut mapping and Web-content input dispatch remain separate and Web dispatch is blocked on issue #16;
 - loading-state chrome wiring can build on the existing pending navigation model.
 
 ## Z3 — Browser Profile

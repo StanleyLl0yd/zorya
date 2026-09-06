@@ -10,6 +10,12 @@ impl TabActivationId {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabCycleDirection {
+    Next,
+    Previous,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TabActivationIntent {
     id: TabActivationId,
     from: TabId,

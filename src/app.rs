@@ -3,7 +3,9 @@ use crate::navigation::{
     HistoryEntry, HistoryEntryId, NavigationFailure, NavigationId, NavigationIntent,
     NavigationIntentKind, NavigationStart, TabNavigation,
 };
-use crate::tab_activation::{TabActivationId, TabActivationIntent, TabActivationStart};
+use crate::tab_activation::{
+    TabActivationId, TabActivationIntent, TabActivationStart, TabCycleDirection,
+};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -343,6 +345,26 @@ impl BrowserWindow {
         }
     }
 
+    fn cycle_target(&self, direction: TabCycleDirection) -> Option<TabId> {
+        if self.tabs.len() < 2 {
+            return None;
+        }
+
+        let anchor = self
+            .pending_activation
+            .map(TabActivationIntent::to)
+            .or(self.active_tab)?;
+        let index = self
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == anchor)?;
+        let target = match direction {
+            TabCycleDirection::Next => (index + 1) % self.tabs.len(),
+            TabCycleDirection::Previous => index.checked_sub(1).unwrap_or(self.tabs.len() - 1),
+        };
+        self.tabs.get(target).map(Tab::id)
+    }
+
     fn move_tab_before(&mut self, tab: TabId, before: Option<TabId>) {
         if before == Some(tab) {
             return;
@@ -504,6 +526,21 @@ impl BrowserApp {
 
         browser_window.move_tab_before(tab, before);
         Ok(())
+    }
+
+    pub fn begin_tab_cycle(
+        &mut self,
+        window: BrowserWindowId,
+        direction: TabCycleDirection,
+    ) -> Result<Option<TabActivationStart>, BrowserModelError> {
+        let target = self
+            .windows
+            .get(&window)
+            .ok_or(BrowserModelError::UnknownWindow(window))?
+            .cycle_target(direction);
+        target
+            .map(|tab| self.begin_tab_activation(window, tab))
+            .transpose()
     }
 
     pub fn begin_tab_activation(
@@ -1438,6 +1475,138 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first, second]
         );
+    }
+
+    #[test]
+    fn tab_cycle_wraps_in_both_directions_without_committing_selection() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let third = app.create_tab(window).expect("third");
+
+        let next = app
+            .begin_tab_cycle(window, TabCycleDirection::Next)
+            .expect("next cycle")
+            .expect("multiple tabs");
+        assert_eq!(next.intent().from(), first);
+        assert_eq!(next.intent().to(), second);
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(first)
+        );
+
+        app.cancel_tab_activation(window, next.intent().id())
+            .expect("cancel next");
+        let previous = app
+            .begin_tab_cycle(window, TabCycleDirection::Previous)
+            .expect("previous cycle")
+            .expect("multiple tabs");
+        assert_eq!(previous.intent().from(), first);
+        assert_eq!(previous.intent().to(), third);
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn rapid_tab_cycle_advances_from_pending_target_and_supersedes() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let third = app.create_tab(window).expect("third");
+
+        let to_second = app
+            .begin_tab_cycle(window, TabCycleDirection::Next)
+            .expect("cycle to second")
+            .expect("multiple tabs");
+        let to_third = app
+            .begin_tab_cycle(window, TabCycleDirection::Next)
+            .expect("cycle to third")
+            .expect("multiple tabs");
+
+        assert_eq!(to_second.intent().to(), second);
+        assert_eq!(to_third.intent().from(), first);
+        assert_eq!(to_third.intent().to(), third);
+        assert_eq!(to_third.superseded(), Some(to_second.intent()));
+
+        let wrap = app
+            .begin_tab_cycle(window, TabCycleDirection::Next)
+            .expect("wrap cycle")
+            .expect("multiple tabs");
+        assert_eq!(wrap.intent().from(), first);
+        assert_eq!(wrap.intent().to(), first);
+        assert_eq!(wrap.superseded(), Some(to_third.intent()));
+        assert_eq!(
+            app.window(window).and_then(BrowserWindow::active_tab_id),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn reverse_cycle_uses_pending_target_as_anchor() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let third = app.create_tab(window).expect("third");
+
+        let previous = app
+            .begin_tab_cycle(window, TabCycleDirection::Previous)
+            .expect("previous")
+            .expect("multiple tabs");
+        assert_eq!(previous.intent().to(), third);
+
+        let previous_again = app
+            .begin_tab_cycle(window, TabCycleDirection::Previous)
+            .expect("previous again")
+            .expect("multiple tabs");
+        assert_eq!(previous_again.intent().from(), first);
+        assert_eq!(previous_again.intent().to(), second);
+        assert_eq!(previous_again.superseded(), Some(previous.intent()));
+    }
+
+    #[test]
+    fn tab_cycle_respects_current_reordered_tab_order() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+        let third = app.create_tab(window).expect("third");
+
+        app.move_tab_before(window, third, Some(second))
+            .expect("reorder third");
+        let cycle = app
+            .begin_tab_cycle(window, TabCycleDirection::Next)
+            .expect("cycle")
+            .expect("multiple tabs");
+
+        assert_eq!(cycle.intent().from(), first);
+        assert_eq!(cycle.intent().to(), third);
+    }
+
+    #[test]
+    fn single_tab_cycle_is_a_noop_without_allocating_activation_identity() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+
+        assert_eq!(
+            app.begin_tab_cycle(window, TabCycleDirection::Next)
+                .expect("single-tab cycle"),
+            None
+        );
+
+        let second = app.create_tab(window).expect("second");
+        let activation = app
+            .begin_tab_cycle(window, TabCycleDirection::Next)
+            .expect("two-tab cycle")
+            .expect("activation");
+        assert_eq!(activation.intent().id().get(), 1);
+        assert_eq!(activation.intent().from(), first);
+        assert_eq!(activation.intent().to(), second);
     }
 
     #[test]

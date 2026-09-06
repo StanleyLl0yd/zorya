@@ -15,7 +15,9 @@ pub use navigation::{
     HistoryEntry, HistoryEntryId, NavigationControls, NavigationFailure, NavigationId,
     NavigationIntent, NavigationIntentKind, NavigationStart, ReloadControl, TabNavigation,
 };
-pub use tab_activation::{TabActivationId, TabActivationIntent, TabActivationStart};
+pub use tab_activation::{
+    TabActivationId, TabActivationIntent, TabActivationStart, TabCycleDirection,
+};
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     platform::run(platform::RunMode::Interactive)
