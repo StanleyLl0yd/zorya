@@ -3,7 +3,7 @@ use crate::async_lifecycle::{
     AsyncRequestSequence, AsyncTarget, CancellationToken, PendingRequest,
 };
 use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
-use crate::{BrowserApp, BrowserWindowId, TabId};
+use crate::{BrowserApp, BrowserWindowId, NavigationId, TabId};
 use pollster::block_on;
 use rarog_compositor::{
     CompositorBackend, FrameDecision, FramePlanner, FrameSubmission, SurfaceId, SurfaceSize,
@@ -20,10 +20,11 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
+const START_LOCATION: &str = "about:blank";
 const START_PAGE: &str = include_str!("../../assets/z1-start.html");
 
 pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
-    let browser = BrowserApp::bootstrap()?;
+    let mut browser = BrowserApp::bootstrap()?;
     let browser_window = browser
         .windows()
         .next()
@@ -33,11 +34,22 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         .window(browser_window)
         .and_then(|window| window.active_tab_id())
         .expect("browser bootstrap creates one active tab");
+    let initial_navigation = browser
+        .begin_navigation(browser_window, tab, START_LOCATION)?
+        .intent()
+        .id();
 
     let event_loop = EventLoop::<WorkerEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
-    let mut shell = NativeShell::new(browser, browser_window, tab, proxy, mode);
+    let mut shell = NativeShell::new(
+        browser,
+        browser_window,
+        tab,
+        initial_navigation,
+        proxy,
+        mode,
+    );
     event_loop.run_app(&mut shell)?;
 
     if let Some(error) = shell.fatal_error.take() {
@@ -151,6 +163,7 @@ struct NativeShell {
     browser: BrowserApp,
     browser_window: BrowserWindowId,
     tab: TabId,
+    initial_navigation: Option<NavigationId>,
     proxy: EventLoopProxy<WorkerEvent>,
     window: Option<Arc<Window>>,
     gpu: Option<Arc<WindowsGpuDevice>>,
@@ -170,6 +183,7 @@ impl NativeShell {
         browser: BrowserApp,
         browser_window: BrowserWindowId,
         tab: TabId,
+        initial_navigation: NavigationId,
         proxy: EventLoopProxy<WorkerEvent>,
         run_mode: RunMode,
     ) -> Self {
@@ -177,6 +191,7 @@ impl NativeShell {
             browser,
             browser_window,
             tab,
+            initial_navigation: Some(initial_navigation),
             proxy,
             window: None,
             gpu: None,
@@ -364,6 +379,10 @@ impl NativeShell {
 
                 match result {
                     Ok(()) => {
+                        if let Err(error) = self.commit_initial_navigation() {
+                            self.fail(event_loop, error);
+                            return;
+                        }
                         self.worker_ready = true;
                         self.needs_redraw = true;
                         self.request_redraw();
@@ -412,7 +431,55 @@ impl NativeShell {
         }
     }
 
+    fn commit_initial_navigation(&mut self) -> Result<(), String> {
+        let navigation = self
+            .initial_navigation
+            .take()
+            .ok_or_else(|| "initial browser navigation is already resolved".to_string())?;
+        self.browser
+            .commit_navigation(self.browser_window, self.tab, navigation, START_LOCATION)
+            .map(|_| ())
+            .map_err(|error| format!("failed to commit initial browser navigation: {error}"))
+    }
+
+    fn fail_initial_navigation(&mut self, message: &str) -> Result<(), String> {
+        let Some(navigation) = self.initial_navigation.take() else {
+            return Ok(());
+        };
+        self.browser
+            .fail_navigation(self.browser_window, self.tab, navigation, message)
+            .map(|_| ())
+            .map_err(|error| format!("failed to fail initial browser navigation: {error}"))
+    }
+
+    fn stop_initial_navigation(&mut self) -> Result<(), String> {
+        let Some(navigation) = self.initial_navigation.take() else {
+            return Ok(());
+        };
+        let stopped = self
+            .browser
+            .stop_navigation(self.browser_window, self.tab)
+            .map_err(|error| format!("failed to stop initial browser navigation: {error}"))?;
+        match stopped {
+            Some(intent) if intent.id() == navigation => Ok(()),
+            Some(intent) => Err(format!(
+                "stopped navigation {} instead of initial navigation {}",
+                intent.id().get(),
+                navigation.get()
+            )),
+            None => Err(format!(
+                "initial navigation {} disappeared before shutdown",
+                navigation.get()
+            )),
+        }
+    }
+
     fn shutdown(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(error) = self.stop_initial_navigation()
+            && self.fatal_error.is_none()
+        {
+            self.fatal_error = Some(error);
+        }
         self.pending_init.invalidate();
         self.pending_frame.invalidate();
         self.pending_surface.invalidate();
@@ -427,8 +494,13 @@ impl NativeShell {
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: impl std::fmt::Display) {
+        let message = error.to_string();
+        let failure = self.fail_initial_navigation(&message).err();
         if self.fatal_error.is_none() {
-            self.fatal_error = Some(error.to_string());
+            self.fatal_error = Some(match failure {
+                Some(failure) => format!("{message}; {failure}"),
+                None => message,
+            });
         }
         self.shutdown(event_loop);
     }
