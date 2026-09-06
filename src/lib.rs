@@ -1,7 +1,7 @@
 mod app;
-mod chrome;
 #[cfg(any(target_os = "windows", test))]
 mod async_lifecycle;
+mod chrome;
 pub mod engine;
 mod navigation;
 mod platform;
