@@ -121,6 +121,34 @@ impl NavigationFailure {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReloadControl {
+    Unavailable,
+    Reload,
+    Stop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NavigationControls {
+    can_go_back: bool,
+    can_go_forward: bool,
+    reload: ReloadControl,
+}
+
+impl NavigationControls {
+    pub const fn can_go_back(self) -> bool {
+        self.can_go_back
+    }
+
+    pub const fn can_go_forward(self) -> bool {
+        self.can_go_forward
+    }
+
+    pub const fn reload(self) -> ReloadControl {
+        self.reload
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TabNavigation {
     history: Vec<HistoryEntry>,
@@ -156,6 +184,24 @@ impl TabNavigation {
             .as_ref()
             .map(NavigationIntent::requested_location)
             .or_else(|| self.current_entry().map(HistoryEntry::location))
+    }
+
+    pub const fn is_loading(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub fn controls(&self) -> NavigationControls {
+        NavigationControls {
+            can_go_back: self.can_go_back(),
+            can_go_forward: self.can_go_forward(),
+            reload: if self.pending.is_some() {
+                ReloadControl::Stop
+            } else if self.current.is_some() {
+                ReloadControl::Reload
+            } else {
+                ReloadControl::Unavailable
+            },
+        }
     }
 
     pub fn can_go_back(&self) -> bool {
@@ -270,5 +316,105 @@ impl TabNavigation {
     fn current_index(&self) -> Option<usize> {
         let current = self.current?;
         self.history.iter().position(|entry| entry.id == current)
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    fn entry(id: u64, location: &str) -> HistoryEntry {
+        HistoryEntry::new(HistoryEntryId(id), location.into())
+    }
+
+    fn intent(id: u64, location: &str) -> NavigationIntent {
+        NavigationIntent::new(
+            NavigationId(id),
+            location.into(),
+            NavigationIntentKind::NewDocument,
+        )
+    }
+
+    #[test]
+    fn empty_tab_has_no_history_controls() {
+        let state = TabNavigation::default();
+
+        assert!(!state.is_loading());
+        assert_eq!(
+            state.controls(),
+            NavigationControls {
+                can_go_back: false,
+                can_go_forward: false,
+                reload: ReloadControl::Unavailable,
+            }
+        );
+    }
+
+    #[test]
+    fn committed_document_enables_reload_and_history_direction() {
+        let mut state = TabNavigation::default();
+        state.start(intent(1, "https://a.example/"));
+        state
+            .commit_new(NavigationId(1), entry(1, "https://a.example/"))
+            .expect("commit first");
+        state.start(intent(2, "https://b.example/"));
+        state
+            .commit_new(NavigationId(2), entry(2, "https://b.example/"))
+            .expect("commit second");
+
+        assert_eq!(
+            state.controls(),
+            NavigationControls {
+                can_go_back: true,
+                can_go_forward: false,
+                reload: ReloadControl::Reload,
+            }
+        );
+    }
+
+    #[test]
+    fn pending_navigation_turns_reload_control_into_stop_without_hiding_history() {
+        let mut state = TabNavigation::default();
+        state.start(intent(1, "https://a.example/"));
+        state
+            .commit_new(NavigationId(1), entry(1, "https://a.example/"))
+            .expect("commit first");
+        state.start(intent(2, "https://b.example/"));
+        state
+            .commit_new(NavigationId(2), entry(2, "https://b.example/"))
+            .expect("commit second");
+        state.start(intent(3, "https://pending.example/"));
+
+        assert!(state.is_loading());
+        assert_eq!(
+            state.controls(),
+            NavigationControls {
+                can_go_back: true,
+                can_go_forward: false,
+                reload: ReloadControl::Stop,
+            }
+        );
+
+        state.stop().expect("stop pending navigation");
+        assert!(!state.is_loading());
+        assert_eq!(
+            state.controls(),
+            NavigationControls {
+                can_go_back: true,
+                can_go_forward: false,
+                reload: ReloadControl::Reload,
+            }
+        );
+    }
+
+    #[test]
+    fn pending_initial_navigation_can_be_stopped_before_any_commit() {
+        let mut state = TabNavigation::default();
+        state.start(intent(1, "about:blank"));
+
+        let controls = state.controls();
+        assert_eq!(controls.reload(), ReloadControl::Stop);
+        assert!(!controls.can_go_back());
+        assert!(!controls.can_go_forward());
     }
 }
