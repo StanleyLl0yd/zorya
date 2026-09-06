@@ -77,6 +77,14 @@ Requirements:
 
 The `--version` path exits before native window or GPU initialization. On Windows, `--native-smoke` runs the real native-window, Rarog render and DX12 presentation path and exits after the first successful presentation. Windows CI executes both smoke paths before retaining the debug executable as an artifact named `zorya-windows-dev-<commit SHA>` for 14 days. Linux is kept as a portability compile/test target where practical, even though Windows is the first product platform.
 
+## Technical Preview releases
+
+Technical Preview releases are portable, unsigned Windows x86-64 ZIP archives. They are intentionally separate from the short-lived debug artifacts produced by ordinary CI.
+
+A Technical Preview release is published only from a `release-publish/vX.Y.Z` ref that points exactly at current `main`. The guarded release workflow verifies that the ref version matches `Cargo.toml`, reruns the full Rust checks, builds the release profile, runs both executable smoke paths, packages release notes and discovered third-party license files, and publishes a SHA-256 checksum beside the ZIP.
+
+These previews are not installer, updater, signing, security-hardening or compatibility milestones. Known limitations for each version live under `docs/releases/`.
+
 ## Rarog dependency
 
 Zorya pins Rarog to a specific Git commit in Cargo.toml for reproducible builds. Engine updates are intentional dependency changes: update the revision, review the upstream changes, regenerate Cargo.lock, and run the full Zorya verification matrix.

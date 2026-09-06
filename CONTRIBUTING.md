@@ -44,6 +44,22 @@ When an engine change is required:
 3. update Zorya exact Rarog revision;
 4. add or adjust Zorya integration coverage.
 
+## Technical Preview release flow
+
+Technical Preview publication is repository-owned release behavior and must remain reproducible.
+
+Before publishing a version:
+
+1. set the intended package version in `Cargo.toml` and keep `Cargo.lock` synchronized;
+2. add reviewed notes at `docs/releases/<version>.md` with explicit known limitations;
+3. merge the release-preparation PR only after normal CI and the Windows release dry-run are green;
+4. ensure the release commit is current `main`;
+5. create `release-publish/v<version>` at that exact `main` commit.
+
+The publish workflow refuses a release ref whose SHA differs from `origin/main`, whose version differs from Cargo metadata, or whose tag/release already exists. It repeats fmt/check/clippy/test, builds `target\release\zorya.exe`, runs `--version` and the full native smoke, packages the portable x86-64 ZIP, inventories discovered third-party license files and publishes a SHA-256 checksum.
+
+Do not upload a locally built binary as an official release, bypass failed release checks, or commit signing credentials. Technical Preview builds remain unsigned until the reviewed signing pipeline in Z5 exists.
+
 ## Pull requests
 
 Keep each PR coherent. Explain:
