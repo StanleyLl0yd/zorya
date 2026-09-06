@@ -36,7 +36,7 @@ The existing rarog-window binary remains a small engine reference host. Product 
 
 - platform-independent per-tab navigation intent and browser-history model with stable navigation/history identities;
 - supersession, stop and stale-completion rejection for browser-owned navigation work;
-- stable-ID multi-tab create/close/select/reorder product model; presentation-safe native activation is tracked in issue #20 before multi-tab chrome is wired;
+- stable-ID multi-tab create/close/reorder product model plus two-phase TabActivationId selection lifecycle; worker/compositor presentation handoff and active-tab close safety remain tracked in issue #20 before multi-tab chrome is wired;
 - window-owned address bar edit/display model with stable TabId-bound raw submissions;
 - back/forward/reload/stop engine wiring and general HTTP(S) navigation completion are blocked on the supported Rarog Fetch/View contract tracked in issue #13;
 - page-title observation is blocked on a supported Rarog View title contract tracked in issue #18;
