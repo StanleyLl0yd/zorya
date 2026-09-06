@@ -696,11 +696,9 @@ impl RenderWorker {
                 .ok_or_else(|| "Web content surface is not initialized".to_string())?;
 
             match engine.render_frame(request, viewport) {
-                Ok(_) if cancellation.is_cancelled() => {
-                    Err(PresentationError::Fatal(
-                        "render worker was cancelled before presentation".into(),
-                    ))
-                }
+                Ok(_) if cancellation.is_cancelled() => Err(PresentationError::Fatal(
+                    "render worker was cancelled before presentation".into(),
+                )),
                 Ok(frame) => content.present_frame(frame.rarog_frame(), viewport),
                 Err(error) => Err(PresentationError::Fatal(format!(
                     "Rarog frame render failed: {error}"
