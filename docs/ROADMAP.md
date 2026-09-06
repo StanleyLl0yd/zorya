@@ -36,7 +36,7 @@ The existing rarog-window binary remains a small engine reference host. Product 
 
 - platform-independent per-tab navigation intent and browser-history model with stable navigation/history identities;
 - supersession, stop and stale-completion rejection for browser-owned navigation work;
-- multi-tab create/close/select/reorder UX building on the stable Z1 identities;
+- stable-ID multi-tab create/close/select/reorder product model, with native chrome UX still to be wired;
 - window-owned address bar edit/display model with stable TabId-bound raw submissions;
 - back/forward/reload/stop wiring to the engine;
 - page title and loading state;
