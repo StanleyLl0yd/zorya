@@ -9,9 +9,7 @@ fn main() -> ExitCode {
             println!("Zorya {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        (Some(argument), None) if argument == "--native-smoke" => {
-            finish(zorya::run_native_smoke())
-        }
+        (Some(argument), None) if argument == "--native-smoke" => finish(zorya::run_native_smoke()),
         (None, None) => finish(zorya::run()),
         _ => {
             eprintln!("zorya: unsupported command-line arguments");
