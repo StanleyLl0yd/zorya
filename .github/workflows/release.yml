@@ -1,0 +1,158 @@
+name: Publish Technical Preview
+
+on:
+  push:
+    branches:
+      - "release-publish/v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zorya-release-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish Windows Technical Preview
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt, clippy
+      - name: Validate release ref
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $branch = $env:GITHUB_REF_NAME
+          $releaseMatch = [regex]::Match(
+            $branch,
+            '^release-publish/v(?<version>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$'
+          )
+          if (-not $releaseMatch.Success) {
+            throw "invalid release branch name: $branch"
+          }
+
+          $version = $releaseMatch.Groups["version"].Value
+          $tag = "v$version"
+
+          git fetch origin main --depth=1
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to fetch origin/main"
+          }
+          $headSha = (git rev-parse HEAD).Trim()
+          $mainSha = (git rev-parse origin/main).Trim()
+          if ($headSha -ne $mainSha) {
+            throw "release ref must point exactly at current origin/main"
+          }
+
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo metadata failed"
+          }
+          $package = @($metadata.packages | Where-Object { $_.name -eq "zorya" -and $null -eq $_.source })
+          if ($package.Count -ne 1) {
+            throw "expected exactly one workspace package named zorya"
+          }
+          if ($package[0].version -ne $version) {
+            throw "release branch version $version does not match Cargo.toml version $($package[0].version)"
+          }
+
+          $notes = "docs/releases/$version.md"
+          if (-not (Test-Path -LiteralPath $notes -PathType Leaf)) {
+            throw "release notes are missing: $notes"
+          }
+
+          $existingTag = git ls-remote --tags origin "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to query existing release tags"
+          }
+          if ($existingTag) {
+            throw "release tag already exists: $tag"
+          }
+
+          & gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "GitHub Release already exists: $tag"
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check
+        run: cargo check --locked --all-targets
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked --all-targets
+      - name: Build release executable
+        run: cargo build --locked --release --bin zorya
+      - name: Verify release executable version
+        shell: pwsh
+        run: |
+          $expected = "Zorya ${{ steps.release.outputs.version }}"
+          $actual = & .\target\release\zorya.exe --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "release executable --version failed"
+          }
+          if ($actual -ne $expected) {
+            throw "release executable version mismatch: expected '$expected', got '$actual'"
+          }
+      - name: Smoke test release native shell
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ".\target\release\zorya.exe" -ArgumentList "--native-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "release native shell smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "release native shell smoke test failed with exit code $($process.ExitCode)"
+          }
+      - name: Package release
+        id: package_release
+        shell: pwsh
+        run: |
+          .\.github\scripts\package-windows-release.ps1 -Version "${{ steps.release.outputs.version }}"
+      - name: Verify release checksum
+        shell: pwsh
+        run: |
+          $archive = "${{ steps.package_release.outputs.archive }}"
+          $checksum = "${{ steps.package_release.outputs.checksum }}"
+          $expectedHash = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
+          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "release archive checksum verification failed"
+          }
+      - name: Retain release build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: zorya-windows-${{ steps.release.outputs.tag }}-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - name: Publish GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ steps.release.outputs.version }}"
+          $tag = "${{ steps.release.outputs.tag }}"
+          $archive = "${{ steps.package_release.outputs.archive }}"
+          $checksum = "${{ steps.package_release.outputs.checksum }}"
+          $title = "Zorya $version Technical Preview"
+          $notes = "docs/releases/$version.md"
+
+          gh release create $tag $archive $checksum --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title $title --notes-file $notes --prerelease
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub prerelease publication failed"
+          }

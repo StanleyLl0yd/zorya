@@ -43,6 +43,18 @@ The existing rarog-window binary remains a small engine reference host. Product 
 - keyboard-first browser accelerators can remain product-owned; pending-aware cyclic tab targeting is modeled, while native shortcut mapping and Web-content input dispatch remain separate and Web dispatch is blocked on issue #16;
 - loading-state chrome wiring can build on the existing pending navigation model.
 
+## 0.1.x — Technical Preview release line
+
+The first public runnable builds are intentionally below Alpha readiness.
+
+- portable unsigned Windows x86-64 ZIP;
+- exact-main release ref and version validation;
+- release-profile build plus headless and full native smoke before publication;
+- SHA-256 checksum and packaged release notes;
+- generated inventory of discovered third-party license/notice files;
+- explicit known limitations; no claim of general-purpose browsing, production security hardening or broad compatibility;
+- installer, updater and signing remain Z5 work.
+
 ## Z3 — Browser Profile
 
 - settings;
