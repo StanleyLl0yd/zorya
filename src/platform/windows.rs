@@ -1,3 +1,4 @@
+use super::RunMode;
 use crate::async_lifecycle::{
     AsyncRequestSequence, AsyncTarget, CancellationToken, PendingRequest,
 };
@@ -21,7 +22,7 @@ use winit::window::{Window, WindowId};
 
 const START_PAGE: &str = include_str!("../../assets/z1-start.html");
 
-pub(crate) fn run() -> Result<(), Box<dyn Error>> {
+pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
     let browser = BrowserApp::bootstrap()?;
     let browser_window = browser
         .windows()
@@ -36,8 +37,13 @@ pub(crate) fn run() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<WorkerEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
-    let mut shell = NativeShell::new(browser, browser_window, tab, proxy);
+    let mut shell = NativeShell::new(browser, browser_window, tab, proxy, mode);
     event_loop.run_app(&mut shell)?;
+
+    if let Some(error) = shell.fatal_error.take() {
+        return Err(std::io::Error::other(error).into());
+    }
+
     Ok(())
 }
 
@@ -155,6 +161,8 @@ struct NativeShell {
     pending_surface: PendingRequest,
     worker_ready: bool,
     needs_redraw: bool,
+    run_mode: RunMode,
+    fatal_error: Option<String>,
 }
 
 impl NativeShell {
@@ -163,6 +171,7 @@ impl NativeShell {
         browser_window: BrowserWindowId,
         tab: TabId,
         proxy: EventLoopProxy<WorkerEvent>,
+        run_mode: RunMode,
     ) -> Self {
         Self {
             browser,
@@ -178,6 +187,8 @@ impl NativeShell {
             pending_surface: PendingRequest::default(),
             worker_ready: false,
             needs_redraw: false,
+            run_mode,
+            fatal_error: None,
         }
     }
 
@@ -367,7 +378,9 @@ impl NativeShell {
 
                 match result {
                     Ok(FrameOutcome::Presented) => {
-                        if self.needs_redraw {
+                        if self.run_mode == RunMode::ExitAfterFirstPresentation {
+                            self.shutdown(event_loop);
+                        } else if self.needs_redraw {
                             self.request_redraw();
                         }
                     }
@@ -414,7 +427,9 @@ impl NativeShell {
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: impl std::fmt::Display) {
-        eprintln!("zorya: {error}");
+        if self.fatal_error.is_none() {
+            self.fatal_error = Some(error.to_string());
+        }
         self.shutdown(event_loop);
     }
 }

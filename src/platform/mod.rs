@@ -3,6 +3,12 @@ use std::error::Error;
 #[cfg(not(target_os = "windows"))]
 use std::fmt;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunMode {
+    Interactive,
+    ExitAfterFirstPresentation,
+}
+
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -25,6 +31,6 @@ impl fmt::Display for UnsupportedPlatform {
 impl Error for UnsupportedPlatform {}
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn run() -> Result<(), Box<dyn Error>> {
+pub(crate) fn run(_mode: RunMode) -> Result<(), Box<dyn Error>> {
     Err(Box::new(UnsupportedPlatform))
 }

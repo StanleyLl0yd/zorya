@@ -34,6 +34,17 @@ jobs:
         run: cargo build --locked --bin zorya
       - name: Smoke test developer executable
         run: .\target\debug\zorya.exe --version
+      - name: Smoke test native shell
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ".\target\debug\zorya.exe" -ArgumentList "--native-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "native shell smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "native shell smoke test failed with exit code $($process.ExitCode)"
+          }
       - name: Upload developer executable
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

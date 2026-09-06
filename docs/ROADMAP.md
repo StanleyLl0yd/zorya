@@ -27,7 +27,7 @@ Goal: first useful developer browser host.
 - deterministic local start document as the first navigation entry point;
 - bounded native surface recreation only for Rarog-reported surface acquisition failure;
 - clear separation between the privileged shell and Web content surface;
-- Windows developer executable built and retained by CI;
+- Windows developer executable built, headless-smoked, full native-window/Rarog/DX12-smoked and retained by CI;
 - full GPU device-loss recovery is blocked on a stable Rarog recovery contract tracked in issue #6.
 
 The existing rarog-window binary remains a small engine reference host. Product UX belongs here.
