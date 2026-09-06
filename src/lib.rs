@@ -9,8 +9,8 @@ mod platform;
 pub use app::{BrowserApp, BrowserModelError, BrowserWindow, BrowserWindowId, Tab, TabId};
 pub use chrome::{AddressBarEdit, AddressBarState, AddressBarSubmission};
 pub use navigation::{
-    HistoryEntry, HistoryEntryId, NavigationFailure, NavigationId, NavigationIntent,
-    NavigationIntentKind, NavigationStart, TabNavigation,
+    HistoryEntry, HistoryEntryId, NavigationControls, NavigationFailure, NavigationId,
+    NavigationIntent, NavigationIntentKind, NavigationStart, ReloadControl, TabNavigation,
 };
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
