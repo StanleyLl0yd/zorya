@@ -24,7 +24,7 @@ Goal: first useful developer browser host.
 - stale-safe Rarog frame request lifecycle;
 - native event-loop integration with bounded off-UI render work;
 - viewport resize, DPI redraw routing and DX12 presentation with event-loop-thread native surface creation;
-- deterministic local start document as the first navigation entry point;
+- deterministic local `about:blank` start document tracked as a pending browser navigation and committed into history only after successful native/Rarog initialization;
 - bounded native surface recreation only for Rarog-reported surface acquisition failure;
 - clear separation between the privileged shell and Web content surface;
 - Windows developer executable built, headless-smoked, full native-window/Rarog/DX12-smoked and retained by CI;
