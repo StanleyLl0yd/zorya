@@ -355,8 +355,8 @@ impl BrowserApp {
         tab: TabId,
     ) -> Result<Option<NavigationStart>, BrowserModelError> {
         let target = self.tab(window, tab)?.navigation.reload_target();
-        self.begin_existing_navigation(window, tab, target, |entry| {
-            NavigationIntentKind::Reload { entry }
+        self.begin_existing_navigation(window, tab, target, |entry| NavigationIntentKind::Reload {
+            entry,
         })
     }
 
