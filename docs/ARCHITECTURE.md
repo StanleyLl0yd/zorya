@@ -55,6 +55,16 @@ Tab reorder is expressed through stable identities rather than persistent indice
 
 The product model is platform-independent. Native Windows identifiers and Rarog `ViewId` values are adapter concerns and must be mapped to product identities rather than becoming product identity themselves.
 
+### Two-phase tab activation
+
+A future native tab switch must not change privileged chrome to tab B while the shared Web-content surface can still present a late frame from tab A. The browser product model therefore represents selection handoff explicitly with monotonically allocated `TabActivationId` values and `TabActivationIntent { from, to }`.
+
+Beginning an activation does not mutate `active_tab` or address-bar edit state. A newer activation returns the superseded intent so platform code can cancel older worker-side preparation. Only the exact current activation may commit; commit then changes active-tab identity. Explicit cancellation returns the cancelled intent as well.
+
+Immediate product selection and tab closure expose any activation they invalidate instead of silently deleting it. Closing the activation source or target invalidates that transition, closing an unrelated tab and reordering tabs preserve it, and stable `TabId` values remain the only identities involved.
+
+This is the browser-model half of the native presentation-safety rule tracked in issue #20. The current Windows shell still presents one Web View. It must not wire multi-tab selection until worker/compositor handoff resets retained presentation state and provides an explicit browser-owned neutral content phase. Without an atomic surface/chrome swap, the safe sequence is source chrome/source pixels, confirmed neutral content, target chrome/neutral content, then the first target Web frame. Presenting target pixels before chrome commit is also unsafe because the worker-to-UI acknowledgement is not atomic with GPU presentation. Closing the currently presented active tab likewise needs an explicit safe handoff or neutral-content transition; synchronous product neighbor selection by itself is not a native presentation protocol.
+
 ### Browser navigation model
 
 Each `Tab` owns a platform-independent `TabNavigation` product state. Navigation work uses monotonically allocated `NavigationId` values; committed browser-history entries use separate monotonic `HistoryEntryId` values. Ordering stays in vectors, but current/back/forward targets are stable entry identities rather than array indices.
