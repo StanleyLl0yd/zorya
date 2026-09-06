@@ -34,13 +34,12 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         .window(browser_window)
         .and_then(|window| window.active_tab_id())
         .expect("browser bootstrap creates one active tab");
+    let event_loop = EventLoop::<WorkerEvent>::with_user_event().build()?;
+    event_loop.set_control_flow(ControlFlow::Wait);
     let initial_navigation = browser
         .begin_navigation(browser_window, tab, START_LOCATION)?
         .intent()
         .id();
-
-    let event_loop = EventLoop::<WorkerEvent>::with_user_event().build()?;
-    event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     let mut shell = NativeShell::new(
         browser,
