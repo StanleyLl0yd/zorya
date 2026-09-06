@@ -34,12 +34,14 @@ The existing rarog-window binary remains a small engine reference host. Product 
 
 ## Z2 — Navigation and Tabs
 
+- platform-independent per-tab navigation intent and browser-history model with stable navigation/history identities;
+- supersession, stop and stale-completion rejection for browser-owned navigation work;
 - multi-tab create/close/select/reorder UX building on the stable Z1 identities;
-- address bar and navigation state;
-- back/forward/reload/stop;
+- address bar edit/display state;
+- back/forward/reload/stop wiring to the engine;
 - page title and loading state;
 - keyboard-first tab/navigation controls;
-- cancellation of stale navigation work.
+- general HTTP(S) navigation completion blocked on the supported Rarog Fetch/View contract tracked in issue #13.
 
 ## Z3 — Browser Profile
 

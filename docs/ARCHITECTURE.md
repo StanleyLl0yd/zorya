@@ -53,6 +53,16 @@ These are not engine-derived caches. Their persistence and lifecycle must be exp
 
 The product model is platform-independent. Native Windows identifiers and Rarog `ViewId` values are adapter concerns and must be mapped to product identities rather than becoming product identity themselves.
 
+### Browser navigation model
+
+Each `Tab` owns a platform-independent `TabNavigation` product state. Navigation work uses monotonically allocated `NavigationId` values; committed browser-history entries use separate monotonic `HistoryEntryId` values. Ordering stays in vectors, but current/back/forward targets are stable entry identities rather than array indices.
+
+Starting a newer navigation replaces the pending intent and returns the superseded intent to the caller so future engine/transport integration can cancel old work explicitly. Commit and failure transitions accept only the currently pending `NavigationId`; stale completions fail without mutating committed history. Stop removes and returns pending work while leaving the last committed history entry intact.
+
+A new-document commit truncates only the forward portion after the current entry and then appends a newly identified history entry. Reload preserves the current history-entry identity. Back/forward traversal targets an existing stable entry and changes the current entry only on commit, not when the user merely initiates navigation.
+
+Locations stored in this product model are browser display/history strings. They are not canonical URL, origin, site or authorization identities and must never be used for Web security decisions. Rarog remains authoritative for those semantics. General HTTP(S) navigation completion is blocked on the supported Rarog Fetch/navigation integration described in issue #13; Zorya must not implement a parallel HTTP loader that receives a URL string and calls `load_html`.
+
 ### Rarog engine host
 
 `engine::EngineHost` is the Zorya-owned adapter around the public Rarog embedder API. It owns the shared `rarog_engine::Engine` and maps each product `TabId` to one live Rarog `View` without exposing Rarog identifiers as browser identity.
