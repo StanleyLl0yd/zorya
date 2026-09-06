@@ -1196,7 +1196,11 @@ mod tests {
         assert_eq!(browser_window.address_bar().editing_tab(), Some(first));
         assert_eq!(browser_window.address_bar_text(), "unfinished edit");
         assert_eq!(
-            browser_window.tabs().iter().map(Tab::id).collect::<Vec<_>>(),
+            browser_window
+                .tabs()
+                .iter()
+                .map(Tab::id)
+                .collect::<Vec<_>>(),
             vec![second, first]
         );
     }
