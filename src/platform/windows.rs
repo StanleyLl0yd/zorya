@@ -1,8 +1,8 @@
 use super::RunMode;
-use crate::branding::{application_icon_rgba, application_icon_size};
 use crate::async_lifecycle::{
     AsyncRequestSequence, AsyncTarget, CancellationToken, PendingRequest,
 };
+use crate::branding::{application_icon_rgba, application_icon_size};
 use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
 use crate::{BrowserApp, BrowserWindowId, NavigationId, TabId};
 use pollster::block_on;
