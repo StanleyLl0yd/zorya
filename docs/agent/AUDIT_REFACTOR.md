@@ -113,7 +113,26 @@ For each dependency, ask whether it has a concrete current responsibility and wh
 
 Keep the Rarog revision exact. Keep GitHub Actions pinned to immutable SHAs. Keep Cargo.lock synchronized.
 
-## 9. Verification
+## 9. Repository and supply-chain security
+
+A repository-wide audit must also inspect:
+
+- repository rulesets and default-branch protection;
+- release-tag immutability;
+- exact required status-check names;
+- GitHub Actions full-SHA pinning;
+- workflow token permissions and triggers;
+- Dependabot coverage;
+- Dependency Review;
+- RustSec dependency audit;
+- Gitleaks;
+- Rust CodeQL;
+- release provenance, checksums and artifact attestations;
+- secret/signing-material exclusions.
+
+Do not add unrelated scanners merely to increase the number of checks. Preserve stronger existing controls and prefer stack-native controls when they provide better signal.
+
+## 10. Verification
 
 At minimum:
 
@@ -121,12 +140,14 @@ At minimum:
     cargo check --locked --all-targets
     cargo clippy --locked --all-targets -- -D warnings
     cargo test --locked --all-targets
+    cargo audit
+    python3 scripts/verify_ci_supply_chain.py
 
 Also verify the affected Windows behavior for changes to native UI, platform integration, permissions, downloads, persistence or presentation.
 
 Never describe a check as passing unless it actually ran.
 
-## 10. Finish with evidence
+## 11. Finish with evidence
 
 A full audit should end with:
 
