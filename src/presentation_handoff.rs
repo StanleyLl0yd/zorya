@@ -329,9 +329,11 @@ impl TabPresentationHandoff {
         tab: TabId,
     ) -> Result<CurrentFramePermit, PresentationHandoffError> {
         if let Some(intent) = self.pending_activation {
-            return Err(PresentationHandoffError::PendingActivationBlocksCurrentFrame {
-                activation: intent.id(),
-            });
+            return Err(
+                PresentationHandoffError::PendingActivationBlocksCurrentFrame {
+                    activation: intent.id(),
+                },
+            );
         }
         if tab != self.represented_tab {
             return Err(PresentationHandoffError::CurrentFrameTabMismatch {
@@ -592,9 +594,11 @@ mod tests {
 
         assert_eq!(
             handoff.authorize_current_frame(first),
-            Err(PresentationHandoffError::PendingActivationBlocksCurrentFrame {
-                activation: intent.id(),
-            })
+            Err(
+                PresentationHandoffError::PendingActivationBlocksCurrentFrame {
+                    activation: intent.id(),
+                }
+            )
         );
         assert_ne!(initial.generation(), handoff.generation());
     }
