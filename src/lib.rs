@@ -10,6 +10,7 @@ mod navigation;
 mod platform;
 mod presentation_handoff;
 mod tab_activation;
+mod tab_close;
 mod tab_strip;
 
 pub use app::{
@@ -27,6 +28,9 @@ pub use presentation_handoff::{
 };
 pub use tab_activation::{
     TabActivationId, TabActivationIntent, TabActivationStart, TabCycleDirection,
+};
+pub use tab_close::{
+    ActiveTabCloseHandoff, LastTabCloseHandoff, TabCloseCommitError, TabCloseStart,
 };
 pub use tab_strip::{TabStripItemSnapshot, TabStripSnapshot};
 
