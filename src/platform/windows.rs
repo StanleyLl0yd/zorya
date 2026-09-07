@@ -40,11 +40,6 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         .window(browser_window)
         .and_then(|window| window.active_tab_id())
         .expect("browser bootstrap creates one active tab");
-    let activation_smoke_target = if mode == RunMode::ExitAfterTabActivation {
-        Some(browser.create_tab(browser_window)?)
-    } else {
-        None
-    };
     let event_loop = EventLoop::<WorkerEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let initial_navigation = browser
@@ -56,7 +51,6 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         browser,
         browser_window,
         tab,
-        activation_smoke_target,
         initial_navigation,
         proxy,
         mode,
@@ -128,7 +122,6 @@ impl WorkerHandle {
     fn spawn(
         target: AsyncTarget,
         generation: PresentationGeneration,
-        additional_tabs: Vec<TabId>,
         proxy: EventLoopProxy<WorkerEvent>,
     ) -> Result<Self, String> {
         let (sender, receiver) = sync_channel(1);
@@ -137,14 +130,7 @@ impl WorkerHandle {
         let thread = thread::Builder::new()
             .name("zorya-render".into())
             .spawn(move || {
-                render_worker_main(
-                    target,
-                    generation,
-                    additional_tabs,
-                    receiver,
-                    proxy,
-                    worker_cancellation,
-                )
+                render_worker_main(target, generation, receiver, proxy, worker_cancellation)
             })
             .map_err(|error| format!("failed to start render worker: {error}"))?;
 
@@ -216,7 +202,6 @@ struct NativeShell {
     browser: BrowserApp,
     browser_window: BrowserWindowId,
     tab: TabId,
-    activation_smoke_target: Option<TabId>,
     presentation: TabPresentationHandoff,
     pending_target_permit: Option<TargetFramePermit>,
     surface_recovery_permit: Option<PresentationFramePermit>,
@@ -243,7 +228,6 @@ impl NativeShell {
         browser: BrowserApp,
         browser_window: BrowserWindowId,
         tab: TabId,
-        activation_smoke_target: Option<TabId>,
         initial_navigation: NavigationId,
         proxy: EventLoopProxy<WorkerEvent>,
         run_mode: RunMode,
@@ -252,7 +236,6 @@ impl NativeShell {
             browser,
             browser_window,
             tab,
-            activation_smoke_target,
             presentation: TabPresentationHandoff::new(tab),
             pending_target_permit: None,
             surface_recovery_permit: None,
@@ -307,12 +290,8 @@ impl NativeShell {
             .begin(target)
             .map_err(|error| error.to_string())?;
 
-        let worker = match WorkerHandle::spawn(
-            target,
-            self.presentation.generation(),
-            self.activation_smoke_target.into_iter().collect(),
-            self.proxy.clone(),
-        ) {
+        let worker =
+            match WorkerHandle::spawn(target, self.presentation.generation(), self.proxy.clone()) {
             Ok(worker) => worker,
             Err(error) => {
                 self.pending_init.complete_if_current(target);
@@ -519,18 +498,6 @@ impl NativeShell {
         self.tab = committed;
         self.pending_target_permit = Some(permit);
         self.dispatch_pending_target_frame()
-    }
-
-    fn start_tab_activation_smoke(&mut self) -> Result<(), String> {
-        let target = self
-            .activation_smoke_target
-            .take()
-            .ok_or_else(|| "native tab activation smoke target is unavailable".to_string())?;
-        let start = self
-            .browser
-            .begin_tab_activation(self.browser_window, target)
-            .map_err(|error| format!("failed to begin product tab activation: {error}"))?;
-        self.begin_native_tab_activation(start)
     }
 
     fn start_new_tab(&mut self) -> Result<(), String> {
@@ -843,10 +810,8 @@ impl NativeShell {
 
                         if self.run_mode == RunMode::ExitAfterFirstPresentation {
                             self.shutdown(event_loop);
-                        } else if self.run_mode == RunMode::ExitAfterTabActivation
-                            && self.activation_smoke_target.is_some()
-                        {
-                            if let Err(error) = self.start_tab_activation_smoke() {
+                        } else if self.run_mode == RunMode::ExitAfterTabActivation {
+                            if let Err(error) = self.start_new_tab() {
                                 self.fail(event_loop, error);
                             }
                         } else if self.needs_redraw {
@@ -1041,17 +1006,12 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
 fn render_worker_main(
     init_target: AsyncTarget,
     initial_generation: PresentationGeneration,
-    additional_tabs: Vec<TabId>,
     receiver: Receiver<WorkerCommand>,
     proxy: EventLoopProxy<WorkerEvent>,
     cancellation: CancellationToken,
 ) {
-    let mut worker = match RenderWorker::initialize(
-        init_target,
-        initial_generation,
-        additional_tabs,
-        cancellation.clone(),
-    ) {
+    let mut worker =
+        match RenderWorker::initialize(init_target, initial_generation, cancellation.clone()) {
         Ok(worker) => worker,
         Err(error) => {
             let _ = proxy.send_event(WorkerEvent::GpuReady {
@@ -1146,7 +1106,6 @@ impl RenderWorker {
     fn initialize(
         init_target: AsyncTarget,
         initial_generation: PresentationGeneration,
-        additional_tabs: Vec<TabId>,
         cancellation: CancellationToken,
     ) -> Result<Self, String> {
         let window = init_target.window();
@@ -1159,22 +1118,6 @@ impl RenderWorker {
         engine
             .load_local_html(tab, START_PAGE)
             .map_err(|error| format!("failed to load Z1 start fixture: {error}"))?;
-        for additional_tab in additional_tabs {
-            engine.create_view(additional_tab).map_err(|error| {
-                format!(
-                    "failed to create Rarog View for tab {}: {error}",
-                    additional_tab.get()
-                )
-            })?;
-            engine
-                .load_local_html(additional_tab, START_PAGE)
-                .map_err(|error| {
-                    format!(
-                        "failed to load native smoke fixture for tab {}: {error}",
-                        additional_tab.get()
-                    )
-                })?;
-        }
 
         if cancellation.is_cancelled() {
             return Err("render worker initialization was cancelled".into());
