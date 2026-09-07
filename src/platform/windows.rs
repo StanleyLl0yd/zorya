@@ -2,6 +2,7 @@ use super::RunMode;
 use crate::async_lifecycle::{
     AsyncRequestSequence, AsyncTarget, CancellationToken, PendingRequest,
 };
+use crate::branding::{application_icon_rgba, application_icon_size};
 use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
 use crate::{BrowserApp, BrowserWindowId, NavigationId, TabId};
 use pollster::block_on;
@@ -18,7 +19,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::window::{Window, WindowId};
+use winit::window::{Icon, Window, WindowId};
 
 const START_LOCATION: &str = "about:blank";
 const START_PAGE: &str = include_str!("../../assets/z1-start.html");
@@ -214,8 +215,12 @@ impl NativeShell {
             return Ok(());
         }
 
+        let icon_size = application_icon_size();
+        let icon = Icon::from_rgba(application_icon_rgba(), icon_size, icon_size)
+            .map_err(|error| format!("failed to build Zorya application icon: {error}"))?;
         let attributes = Window::default_attributes()
-            .with_title("Zorya Developer Build")
+            .with_title("Zorya")
+            .with_window_icon(Some(icon))
             .with_inner_size(LogicalSize::new(1100.0, 760.0));
         let window = Arc::new(
             event_loop
