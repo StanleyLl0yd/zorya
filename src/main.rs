@@ -10,6 +10,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         (Some(argument), None) if argument == "--native-smoke" => finish(zorya::run_native_smoke()),
+        (Some(argument), None) if argument == "--native-tab-activation-smoke" => {
+            finish(zorya::run_native_tab_activation_smoke())
+        }
         (None, None) => finish(zorya::run()),
         _ => {
             eprintln!("zorya: unsupported command-line arguments");
