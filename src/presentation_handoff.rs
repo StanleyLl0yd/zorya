@@ -69,6 +69,13 @@ pub enum PresentationHandoffError {
         represented: TabId,
         content: TabId,
     },
+    CurrentNeutralTabMismatch {
+        represented: TabId,
+        actual: TabId,
+    },
+    PendingActivationBlocksCurrentNeutral {
+        activation: TabActivationId,
+    },
     StaleActivation {
         expected: Option<TabActivationId>,
         actual: TabActivationId,
@@ -121,6 +128,20 @@ impl fmt::Display for PresentationHandoffError {
                 "Web content for tab {} cannot remain visible while chrome represents tab {}",
                 content.get(),
                 represented.get()
+            ),
+            Self::CurrentNeutralTabMismatch {
+                represented,
+                actual,
+            } => write!(
+                formatter,
+                "cannot confirm neutral content for tab {} while privileged chrome represents tab {}",
+                actual.get(),
+                represented.get()
+            ),
+            Self::PendingActivationBlocksCurrentNeutral { activation } => write!(
+                formatter,
+                "cannot confirm current-tab neutral content while activation {} remains pending",
+                activation.get()
             ),
             Self::StaleActivation { expected, actual } => match expected {
                 Some(expected) => write!(
@@ -222,6 +243,38 @@ impl TabPresentationHandoff {
 
     pub const fn generation(&self) -> PresentationGeneration {
         self.generation
+    }
+
+    pub fn confirm_current_tab_neutral(
+        &mut self,
+        tab: TabId,
+    ) -> Result<PresentationGeneration, PresentationHandoffError> {
+        if tab != self.represented_tab {
+            return Err(PresentationHandoffError::CurrentNeutralTabMismatch {
+                represented: self.represented_tab,
+                actual: tab,
+            });
+        }
+        if let Some(intent) = self.pending_activation {
+            return Err(
+                PresentationHandoffError::PendingActivationBlocksCurrentNeutral {
+                    activation: intent.id(),
+                },
+            );
+        }
+        if let WebContentPresentation::Tab(content) = self.content
+            && content != self.represented_tab
+        {
+            return Err(PresentationHandoffError::ContentOwnerMismatch {
+                represented: self.represented_tab,
+                content,
+            });
+        }
+
+        let generation = self.next_generation()?;
+        self.content = WebContentPresentation::Neutral;
+        self.generation = generation;
+        Ok(generation)
     }
 
     pub fn begin_activation(

@@ -69,6 +69,16 @@ The platform-independent `TabPresentationHandoff` guard models the other side of
 
 This is the browser-model half of the native presentation-safety rule tracked in issue #20. The current Windows shell still presents one Web View. It must not wire multi-tab selection until worker/compositor handoff resets retained presentation state and provides an explicit browser-owned neutral content phase. Without an atomic surface/chrome swap, the safe sequence is source chrome/source pixels, confirmed neutral content, target chrome/neutral content, then the first target Web frame. Presenting target pixels before chrome commit is also unsafe because the worker-to-UI acknowledgement is not atomic with GPU presentation. Closing the currently presented active tab likewise needs an explicit safe handoff or neutral-content transition; synchronous product neighbor selection by itself is not a native presentation protocol.
 
+### Presentation-aware tab closing
+
+`begin_tab_close` distinguishes close operations that can mutate immediately from those that would change the identity represented by privileged chrome. Closing a background tab completes synchronously because it does not change the committed active tab. Closing the active tab while a neighbor survives starts a normal stable-ID `TabActivationId` transition to the same neighbor that direct product removal would select, but leaves the source tab present and committed until a neutral presentation state is confirmed.
+
+`commit_active_tab_close_after_neutral` accepts only a presentation handoff that still represents the closing source tab, is explicitly neutral and carries the exact pending activation identity. It commits the fallback activation and removes the now-background source tab as one product operation. The platform must then acknowledge target chrome in the presentation handoff before any target Web frame can receive a permit. Closing the final active tab has no fallback activation; it similarly requires a neutral handoff with no pending activation, and the commit is rejected if another tab appears before removal.
+
+`TabPresentationHandoff::confirm_current_tab_neutral` exists for this neutral-only final-tab/window transition. It advances presentation generation and refuses to run while an activation remains unresolved. It records that a browser-owned neutral state has already been made observable; it does not itself create, draw or synthesize that state.
+
+These coordinator APIs make the product-side ordering testable, but they do not provide the native neutral cover required by issue #20. Platform code must not treat method invocation as proof that pixels have been hidden; only the reviewed native/compositor implementation may call the corresponding confirmation after the neutral state is actually established.
+
 ### Browser navigation model
 
 Each `Tab` owns a platform-independent `TabNavigation` product state. Navigation work uses monotonically allocated `NavigationId` values; committed browser-history entries use separate monotonic `HistoryEntryId` values. Ordering stays in vectors, but current/back/forward targets are stable entry identities rather than array indices.

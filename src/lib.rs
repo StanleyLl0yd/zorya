@@ -10,6 +10,7 @@ mod navigation;
 mod platform;
 mod presentation_handoff;
 mod tab_activation;
+mod tab_close;
 
 pub use app::{
     BrowserApp, BrowserModelError, BrowserWindow, BrowserWindowId, Tab, TabCloseResult, TabId,
@@ -26,6 +27,9 @@ pub use presentation_handoff::{
 };
 pub use tab_activation::{
     TabActivationId, TabActivationIntent, TabActivationStart, TabCycleDirection,
+};
+pub use tab_close::{
+    ActiveTabCloseHandoff, LastTabCloseHandoff, TabCloseCommitError, TabCloseStart,
 };
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
