@@ -4,7 +4,10 @@ use crate::async_lifecycle::{
 };
 use crate::branding::application_icon;
 use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
-use crate::{BrowserApp, BrowserWindowId, NavigationId, TabId};
+use crate::{
+    BrowserApp, BrowserWindowId, NavigationId, PresentationFramePermit, PresentationGeneration,
+    TabId, TabPresentationHandoff,
+};
 use pollster::block_on;
 use rarog_compositor::{
     CompositorBackend, FrameDecision, FramePlanner, FrameSubmission, SurfaceId, SurfaceSize,
@@ -70,6 +73,7 @@ enum WorkerEvent {
     },
     FrameFinished {
         target: AsyncTarget,
+        permit: PresentationFramePermit,
         result: Result<FrameOutcome, String>,
     },
     SurfaceReplaced {
@@ -85,6 +89,7 @@ enum WorkerCommand {
     },
     Render {
         target: AsyncTarget,
+        permit: PresentationFramePermit,
         viewport: Viewport,
     },
     ReplaceSurface {
@@ -105,13 +110,25 @@ struct WorkerHandle {
 }
 
 impl WorkerHandle {
-    fn spawn(target: AsyncTarget, proxy: EventLoopProxy<WorkerEvent>) -> Result<Self, String> {
+    fn spawn(
+        target: AsyncTarget,
+        generation: PresentationGeneration,
+        proxy: EventLoopProxy<WorkerEvent>,
+    ) -> Result<Self, String> {
         let (sender, receiver) = sync_channel(1);
         let cancellation = CancellationToken::new();
         let worker_cancellation = cancellation.clone();
         let thread = thread::Builder::new()
             .name("zorya-render".into())
-            .spawn(move || render_worker_main(target, receiver, proxy, worker_cancellation))
+            .spawn(move || {
+                render_worker_main(
+                    target,
+                    generation,
+                    receiver,
+                    proxy,
+                    worker_cancellation,
+                )
+            })
             .map_err(|error| format!("failed to start render worker: {error}"))?;
 
         Ok(Self {
@@ -129,8 +146,17 @@ impl WorkerHandle {
         self.send(WorkerCommand::AttachInitialSurface { target, surface })
     }
 
-    fn render(&self, target: AsyncTarget, viewport: Viewport) -> Result<(), String> {
-        self.send(WorkerCommand::Render { target, viewport })
+    fn render(
+        &self,
+        target: AsyncTarget,
+        permit: PresentationFramePermit,
+        viewport: Viewport,
+    ) -> Result<(), String> {
+        self.send(WorkerCommand::Render {
+            target,
+            permit,
+            viewport,
+        })
     }
 
     fn replace_surface(
@@ -163,6 +189,7 @@ struct NativeShell {
     browser: BrowserApp,
     browser_window: BrowserWindowId,
     tab: TabId,
+    presentation: TabPresentationHandoff,
     initial_navigation: Option<NavigationId>,
     proxy: EventLoopProxy<WorkerEvent>,
     window: Option<Arc<Window>>,
@@ -191,6 +218,7 @@ impl NativeShell {
             browser,
             browser_window,
             tab,
+            presentation: TabPresentationHandoff::new(tab),
             initial_navigation: Some(initial_navigation),
             proxy,
             window: None,
@@ -231,6 +259,11 @@ impl NativeShell {
                 .create_window(attributes)
                 .map_err(|error| format!("failed to create native window: {error}"))?,
         );
+        let permit = self
+            .presentation
+            .authorize_current_frame(self.tab)
+            .map(PresentationFramePermit::from)
+            .map_err(|error| error.to_string())?;
         let target = self
             .requests
             .allocate(self.browser_window, self.tab)
@@ -239,7 +272,11 @@ impl NativeShell {
             .begin(target)
             .map_err(|error| error.to_string())?;
 
-        let worker = match WorkerHandle::spawn(target, self.proxy.clone()) {
+        let worker = match WorkerHandle::spawn(
+            target,
+            self.presentation.generation(),
+            self.proxy.clone(),
+        ) {
             Ok(worker) => worker,
             Err(error) => {
                 self.pending_init.complete_if_current(target);
@@ -320,7 +357,7 @@ impl NativeShell {
             .worker
             .as_ref()
             .ok_or_else(|| "render worker is unavailable".to_string())
-            .and_then(|worker| worker.render(target, viewport));
+            .and_then(|worker| worker.render(target, permit, viewport));
         if let Err(error) = render_result {
             self.pending_frame.complete_if_current(target);
             return Err(error);
@@ -398,8 +435,15 @@ impl NativeShell {
                     Err(error) => self.fail(event_loop, error),
                 }
             }
-            WorkerEvent::FrameFinished { target, result } => {
-                if !self.pending_frame.complete_if_current(target) || !self.target_alive(target) {
+            WorkerEvent::FrameFinished {
+                target,
+                permit,
+                result,
+            } => {
+                if permit.tab() != target.tab()
+                    || !self.pending_frame.complete_if_current(target)
+                    || !self.target_alive(target)
+                {
                     return;
                 }
 
@@ -569,11 +613,16 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
 
 fn render_worker_main(
     init_target: AsyncTarget,
+    initial_generation: PresentationGeneration,
     receiver: Receiver<WorkerCommand>,
     proxy: EventLoopProxy<WorkerEvent>,
     cancellation: CancellationToken,
 ) {
-    let mut worker = match RenderWorker::initialize(init_target, cancellation.clone()) {
+    let mut worker = match RenderWorker::initialize(
+        init_target,
+        initial_generation,
+        cancellation.clone(),
+    ) {
         Ok(worker) => worker,
         Err(error) => {
             let _ = proxy.send_event(WorkerEvent::GpuReady {
@@ -613,10 +662,18 @@ fn render_worker_main(
                     return;
                 }
             }
-            WorkerCommand::Render { target, viewport } => {
-                let result = worker.render(target, viewport);
+            WorkerCommand::Render {
+                target,
+                permit,
+                viewport,
+            } => {
+                let result = worker.render(target, permit, viewport);
                 if proxy
-                    .send_event(WorkerEvent::FrameFinished { target, result })
+                    .send_event(WorkerEvent::FrameFinished {
+                        target,
+                        permit,
+                        result,
+                    })
                     .is_err()
                 {
                     return;
@@ -638,6 +695,7 @@ fn render_worker_main(
 struct RenderWorker {
     window: BrowserWindowId,
     tab: TabId,
+    presentation_generation: PresentationGeneration,
     engine: EngineHost,
     gpu: Arc<WindowsGpuDevice>,
     content: Option<WebContentSurface>,
@@ -649,6 +707,7 @@ struct RenderWorker {
 impl RenderWorker {
     fn initialize(
         init_target: AsyncTarget,
+        initial_generation: PresentationGeneration,
         cancellation: CancellationToken,
     ) -> Result<Self, String> {
         let window = init_target.window();
@@ -677,6 +736,7 @@ impl RenderWorker {
         Ok(Self {
             window,
             tab,
+            presentation_generation: initial_generation,
             engine,
             gpu,
             content: None,
@@ -716,21 +776,34 @@ impl RenderWorker {
         surface: WindowsGpuSurface,
     ) -> Result<(), String> {
         self.ensure_active()?;
-        self.validate_new_target(target)?;
+        self.validate_new_request(target)?;
+        if target.tab() != self.tab {
+            return Err(format!(
+                "surface recovery targeted tab {} while presentation belongs to tab {}",
+                target.tab().get(),
+                self.tab.get()
+            ));
+        }
         let content = self
             .content
             .as_mut()
             .ok_or_else(|| "Web content surface is not initialized".to_string())?;
-        content.replace_surface(surface);
+        content.replace_surface(self.gpu.as_ref(), surface);
         self.last_viewport = None;
         self.engine
             .request_frame(self.tab, EngineFrameCause::Explicit)
             .map_err(|error| format!("failed to schedule recovery frame: {error}"))
     }
 
-    fn render(&mut self, target: AsyncTarget, viewport: Viewport) -> Result<FrameOutcome, String> {
+    fn render(
+        &mut self,
+        target: AsyncTarget,
+        permit: PresentationFramePermit,
+        viewport: Viewport,
+    ) -> Result<FrameOutcome, String> {
         self.ensure_active()?;
-        self.validate_new_target(target)?;
+        self.validate_new_request(target)?;
+        self.prepare_presentation(target, permit)?;
 
         if viewport.is_suspended() {
             return Ok(FrameOutcome::Presented);
@@ -838,11 +911,8 @@ impl RenderWorker {
         }
     }
 
-    fn validate_new_target(&mut self, target: AsyncTarget) -> Result<(), String> {
-        if target.window() != self.window
-            || target.tab() != self.tab
-            || target.request().get() <= self.last_request_id
-        {
+    fn validate_new_request(&mut self, target: AsyncTarget) -> Result<(), String> {
+        if target.window() != self.window || target.request().get() <= self.last_request_id {
             return Err(format!(
                 "stale worker request {} targeted window {} tab {}",
                 target.request().get(),
@@ -852,6 +922,83 @@ impl RenderWorker {
         }
 
         self.last_request_id = target.request().get();
+        Ok(())
+    }
+
+    fn prepare_presentation(
+        &mut self,
+        target: AsyncTarget,
+        permit: PresentationFramePermit,
+    ) -> Result<(), String> {
+        if permit.tab() != target.tab() {
+            return Err(format!(
+                "presentation permit for tab {} was used with worker target tab {}",
+                permit.tab().get(),
+                target.tab().get()
+            ));
+        }
+
+        match permit {
+            PresentationFramePermit::Current(current) => {
+                if current.tab() != self.tab
+                    || current.generation() != self.presentation_generation
+                {
+                    return Err(format!(
+                        "stale current-frame permit for tab {} generation {} while worker presents tab {} generation {}",
+                        current.tab().get(),
+                        current.generation().get(),
+                        self.tab.get(),
+                        self.presentation_generation.get()
+                    ));
+                }
+            }
+            PresentationFramePermit::Target(target_permit) => {
+                if target_permit.generation() < self.presentation_generation {
+                    return Err(format!(
+                        "stale target-frame permit for tab {} generation {}; worker generation is {}",
+                        target_permit.tab().get(),
+                        target_permit.generation().get(),
+                        self.presentation_generation.get()
+                    ));
+                }
+
+                if target_permit.generation() == self.presentation_generation {
+                    if target_permit.tab() != self.tab {
+                        return Err(format!(
+                            "target-frame permit generation {} names tab {} while worker presents tab {}",
+                            target_permit.generation().get(),
+                            target_permit.tab().get(),
+                            self.tab.get()
+                        ));
+                    }
+                    return Ok(());
+                }
+
+                if !self.engine.has_view(target_permit.tab()) {
+                    return Err(format!(
+                        "target-frame permit names tab {} without a live Rarog View",
+                        target_permit.tab().get()
+                    ));
+                }
+
+                self.engine
+                    .request_frame(target_permit.tab(), EngineFrameCause::Explicit)
+                    .map_err(|error| {
+                        format!(
+                            "failed to schedule first presentation frame for tab {}: {error}",
+                            target_permit.tab().get()
+                        )
+                    })?;
+                self.content
+                    .as_mut()
+                    .ok_or_else(|| "Web content surface is not initialized".to_string())?
+                    .reset_for_view_switch(self.gpu.as_ref());
+                self.tab = target_permit.tab();
+                self.presentation_generation = target_permit.generation();
+                self.last_viewport = None;
+            }
+        }
+
         Ok(())
     }
 }
@@ -884,8 +1031,13 @@ impl WebContentSurface {
         }
     }
 
-    fn replace_surface(&mut self, surface: WindowsGpuSurface) {
+    fn replace_surface(&mut self, gpu: &WindowsGpuDevice, surface: WindowsGpuSurface) {
         self.surface = surface;
+        self.reset_for_view_switch(gpu);
+    }
+
+    fn reset_for_view_switch(&mut self, gpu: &WindowsGpuDevice) {
+        self.backend = gpu.compositor_backend();
         self.planner = Self::new_planner();
     }
 
