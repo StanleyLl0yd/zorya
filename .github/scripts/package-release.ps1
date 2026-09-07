@@ -263,22 +263,28 @@ function Assert-LicenseInventoryBaseline {
         }
     }
 
-    if ([string]$baseline["format"] -ne "1") {
-        throw "unsupported license inventory baseline format: $($baseline["format"])"
+    $baselineFormat = $baseline["format"].ToString()
+    $baselineTarget = $baseline["target"].ToString()
+    $baselineDependencies = $baseline["dependencies"].ToString()
+    $baselineEvidenceFiles = $baseline["evidence-files"].ToString()
+    $baselineSha256 = $baseline["sha256"].ToString()
+
+    if ($baselineFormat -ne "1") {
+        throw "unsupported license inventory baseline format: $baselineFormat"
     }
-    if ([string]$baseline["target"] -ne $Target) {
-        throw "license inventory baseline target $($baseline["target"]) does not match $Target"
+    if ($baselineTarget -ne $Target) {
+        throw "license inventory baseline target $baselineTarget does not match $Target"
     }
 
     $expectedDependencies = 0
-    if (-not [int]::TryParse([string]$baseline["dependencies"], [ref]$expectedDependencies)) {
+    if (-not [int]::TryParse($baselineDependencies, [ref]$expectedDependencies)) {
         throw "invalid dependency count in license inventory baseline"
     }
     $expectedEvidenceFiles = 0
-    if (-not [int]::TryParse([string]$baseline["evidence-files"], [ref]$expectedEvidenceFiles)) {
+    if (-not [int]::TryParse($baselineEvidenceFiles, [ref]$expectedEvidenceFiles)) {
         throw "invalid evidence-file count in license inventory baseline"
     }
-    $expectedSha256 = ([string]$baseline["sha256"]).ToLowerInvariant()
+    $expectedSha256 = $baselineSha256.ToLowerInvariant()
     if ($expectedSha256.Length -ne 64 -or $expectedSha256 -match '[^0-9a-f]') {
         throw "invalid SHA-256 in license inventory baseline"
     }
