@@ -259,11 +259,6 @@ impl NativeShell {
                 .create_window(attributes)
                 .map_err(|error| format!("failed to create native window: {error}"))?,
         );
-        let permit = self
-            .presentation
-            .authorize_current_frame(self.tab)
-            .map(PresentationFramePermit::from)
-            .map_err(|error| error.to_string())?;
         let target = self
             .requests
             .allocate(self.browser_window, self.tab)
@@ -345,6 +340,11 @@ impl NativeShell {
             return Ok(());
         }
 
+        let permit = self
+            .presentation
+            .authorize_current_frame(self.tab)
+            .map(PresentationFramePermit::from)
+            .map_err(|error| error.to_string())?;
         let target = self
             .requests
             .allocate(self.browser_window, self.tab)
