@@ -45,7 +45,6 @@ impl WindowChromeSnapshot {
     }
 }
 
-
 impl BrowserWindow {
     pub fn chrome_snapshot(&self) -> Option<WindowChromeSnapshot> {
         let active_tab = self.active_tab()?;
@@ -199,13 +198,8 @@ mod tests {
             .expect("begin committed navigation")
             .intent()
             .id();
-        app.commit_navigation(
-            window,
-            tab,
-            committed,
-            "https://committed.example/final",
-        )
-        .expect("commit navigation");
+        app.commit_navigation(window, tab, committed, "https://committed.example/final")
+            .expect("commit navigation");
 
         let pending = app
             .begin_navigation(window, tab, "https://pending.example/")
@@ -221,10 +215,7 @@ mod tests {
         assert_eq!(snapshot.address_text(), "https://pending.example/");
         assert!(!snapshot.address_bar_editing());
         assert!(snapshot.is_loading());
-        assert_eq!(
-            snapshot.navigation_controls().reload(),
-            ReloadControl::Stop
-        );
+        assert_eq!(snapshot.navigation_controls().reload(), ReloadControl::Stop);
 
         app.fail_navigation(window, tab, pending, "fixture failure")
             .expect("fail navigation");
@@ -233,10 +224,7 @@ mod tests {
             .window(window)
             .and_then(BrowserWindow::chrome_snapshot)
             .expect("chrome snapshot after failure");
-        assert_eq!(
-            snapshot.address_text(),
-            "https://committed.example/final"
-        );
+        assert_eq!(snapshot.address_text(), "https://committed.example/final");
         assert!(!snapshot.is_loading());
         assert_eq!(
             snapshot.navigation_controls().reload(),
@@ -299,13 +287,8 @@ mod tests {
             .expect("second navigation")
             .intent()
             .id();
-        app.commit_navigation(
-            window,
-            second,
-            second_navigation,
-            "https://second.example/",
-        )
-        .expect("second commit");
+        app.commit_navigation(window, second, second_navigation, "https://second.example/")
+            .expect("second commit");
 
         let activation = app
             .begin_tab_activation(window, second)
@@ -327,9 +310,6 @@ mod tests {
             .and_then(BrowserWindow::chrome_snapshot)
             .expect("committed snapshot");
         assert_eq!(committed_snapshot.active_tab(), second);
-        assert_eq!(
-            committed_snapshot.address_text(),
-            "https://second.example/"
-        );
+        assert_eq!(committed_snapshot.address_text(), "https://second.example/");
     }
 }
