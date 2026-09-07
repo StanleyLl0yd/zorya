@@ -67,7 +67,6 @@ The repository is expected to preserve:
 - least-privilege workflow permissions;
 - locked Cargo dependency resolution and exact Rarog Git revisions;
 - CI, RustSec dependency audit, Gitleaks and CodeQL security gates;
-- Dependency Review for pull requests;
 - fail-closed release packaging and third-party license inventory checks;
 - release artifact checksums and GitHub artifact attestations;
 - immutable `v*` release tags once repository rules permit enforcement.
