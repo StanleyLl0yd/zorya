@@ -1,4 +1,4 @@
-use crate::app::TabId;
+use crate::app::{BrowserWindow, TabId};
 use crate::navigation::{NavigationControls, ReloadControl};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +45,20 @@ impl WindowChromeSnapshot {
     }
 }
 
+
+impl BrowserWindow {
+    pub fn chrome_snapshot(&self) -> Option<WindowChromeSnapshot> {
+        let active_tab = self.active_tab()?;
+        let active_tab_id = active_tab.id();
+
+        Some(WindowChromeSnapshot::new(
+            active_tab_id,
+            self.address_bar_text().to_owned(),
+            self.address_bar().editing_tab() == Some(active_tab_id),
+            active_tab.navigation().controls(),
+        ))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddressBarEdit {
