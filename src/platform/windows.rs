@@ -22,6 +22,7 @@ use winit::window::{Window, WindowId};
 
 const START_LOCATION: &str = "about:blank";
 const START_PAGE: &str = include_str!("../../assets/z1-start.html");
+const WINDOW_TITLE: &str = concat!("Zorya ", env!("CARGO_PKG_VERSION"), " Technical Preview");
 
 pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
     let mut browser = BrowserApp::bootstrap()?;
@@ -215,7 +216,7 @@ impl NativeShell {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("Zorya Developer Build")
+            .with_title(WINDOW_TITLE)
             .with_inner_size(LogicalSize::new(1100.0, 760.0));
         let window = Arc::new(
             event_loop
@@ -651,7 +652,7 @@ impl RenderWorker {
             .map_err(|error| format!("failed to create Rarog View: {error}"))?;
         engine
             .load_local_html(tab, START_PAGE)
-            .map_err(|error| format!("failed to load Z1 start fixture: {error}"))?;
+            .map_err(|error| format!("failed to load Technical Preview start document: {error}"))?;
 
         if cancellation.is_cancelled() {
             return Err("render worker initialization was cancelled".into());
