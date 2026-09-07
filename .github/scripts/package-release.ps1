@@ -125,7 +125,188 @@ function Get-LicenseEvidence {
     }
 }
 
-if ($Version -notmatch '^[0-9]+[.][0-9]+[.][0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {
+
+function Assert-InventoryField {
+    param(
+        [string]$Name,
+        [string]$Value
+    )
+
+    if ($Value.Contains("`t") -or $Value.Contains("`r") -or $Value.Contains("`n")) {
+        throw "license inventory field $Name contains unsupported control characters"
+    }
+}
+
+function Get-LowerSha256 {
+    param([string]$Path)
+
+    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-TextSha256 {
+    param([string]$Text)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($Text)
+        $hashBytes = $sha256.ComputeHash($bytes)
+        ([System.BitConverter]::ToString($hashBytes)).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Get-CanonicalLicenseInventory {
+    param(
+        [object[]]$Evidence,
+        [string]$Target
+    )
+
+    $body = [System.Collections.Generic.List[string]]::new()
+    $evidenceFileCount = 0
+
+    foreach ($item in $Evidence) {
+        $package = $item.Package
+        $packageName = [string]$package.name
+        $packageVersion = [string]$package.version
+        $displayLicense = [string]$item.DisplayLicense
+        $displaySource = [string]$item.DisplaySource
+        $evidenceKind = [string]$item.EvidenceKind
+
+        Assert-InventoryField -Name "package name" -Value $packageName
+        Assert-InventoryField -Name "package version" -Value $packageVersion
+        Assert-InventoryField -Name "declared license" -Value $displayLicense
+        Assert-InventoryField -Name "Cargo source" -Value $displaySource
+        Assert-InventoryField -Name "evidence kind" -Value $evidenceKind
+
+        $body.Add("package`t$packageName`t$packageVersion`t$displayLicense`t$displaySource`t$evidenceKind")
+
+        $filesByName = @{}
+        $evidencePaths = [System.Collections.Generic.List[string]]::new()
+        foreach ($candidate in $item.Candidates) {
+            $evidencePaths.Add([string]$candidate)
+        }
+        if ($null -ne $item.OverrideOrigin) {
+            $evidencePaths.Add([string]$item.OverrideOrigin)
+        }
+
+        foreach ($path in $evidencePaths) {
+            $fileName = [System.IO.Path]::GetFileName($path)
+            Assert-InventoryField -Name "evidence file name" -Value $fileName
+            $fileHash = Get-LowerSha256 -Path $path
+
+            if ($filesByName.ContainsKey($fileName)) {
+                if ([string]$filesByName[$fileName] -ne $fileHash) {
+                    throw "dependency $packageName $packageVersion has conflicting license evidence named $fileName"
+                }
+                continue
+            }
+
+            $filesByName[$fileName] = $fileHash
+        }
+
+        foreach ($entry in @($filesByName.GetEnumerator() | Sort-Object Name)) {
+            $body.Add("file`t$packageName`t$packageVersion`t$displaySource`t$($entry.Name)`t$($entry.Value)")
+            $evidenceFileCount += 1
+        }
+    }
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("zorya-license-inventory-v1")
+    $lines.Add("target`t$Target")
+    $lines.Add("dependencies`t$($Evidence.Count)")
+    $lines.Add("evidence-files`t$evidenceFileCount")
+    foreach ($line in $body) {
+        $lines.Add($line)
+    }
+
+    $text = ($lines -join "`n") + "`n"
+    [pscustomobject]@{
+        Lines = @($lines)
+        Text = $text
+        DependencyCount = $Evidence.Count
+        EvidenceFileCount = $evidenceFileCount
+        Sha256 = Get-TextSha256 -Text $text
+    }
+}
+
+function Assert-LicenseInventoryBaseline {
+    param(
+        [object]$Inventory,
+        [string]$Target
+    )
+
+    $baselinePath = Join-Path "third_party/licenses/inventory" "$Target.baseline"
+    if (-not (Test-Path -LiteralPath $baselinePath -PathType Leaf)) {
+        throw "license inventory baseline is missing: $baselinePath"
+    }
+
+    $baseline = @{}
+    foreach ($line in Get-Content -LiteralPath $baselinePath) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        $parts = $line -split "=", 2
+        if ($parts.Count -ne 2 -or [string]::IsNullOrWhiteSpace($parts[0])) {
+            throw "invalid license inventory baseline line: $line"
+        }
+        if ($baseline.ContainsKey($parts[0])) {
+            throw "duplicate license inventory baseline key: $($parts[0])"
+        }
+        $baseline[$parts[0]] = $parts[1]
+    }
+
+    foreach ($requiredKey in @("format", "target", "dependencies", "evidence-files", "sha256")) {
+        if (-not $baseline.ContainsKey($requiredKey)) {
+            throw "license inventory baseline is missing key: $requiredKey"
+        }
+    }
+
+    $baselineFormat = $baseline["format"].ToString()
+    $baselineTarget = $baseline["target"].ToString()
+    $baselineDependencies = $baseline["dependencies"].ToString()
+    $baselineEvidenceFiles = $baseline["evidence-files"].ToString()
+    $baselineSha256 = $baseline["sha256"].ToString()
+
+    if ($baselineFormat -ne "1") {
+        throw "unsupported license inventory baseline format: $baselineFormat"
+    }
+    if ($baselineTarget -ne $Target) {
+        throw "license inventory baseline target $baselineTarget does not match $Target"
+    }
+
+    if ($baselineDependencies -notmatch '^[0-9]+\z') {
+        throw "invalid dependency count in license inventory baseline"
+    }
+    if ($baselineEvidenceFiles -notmatch '^[0-9]+\z') {
+        throw "invalid evidence-file count in license inventory baseline"
+    }
+
+    $expectedDependencies = [int]$baselineDependencies
+    $expectedEvidenceFiles = [int]$baselineEvidenceFiles
+    $expectedSha256 = $baselineSha256.ToLowerInvariant()
+    if ($expectedSha256.Length -ne 64 -or $expectedSha256 -match '[^0-9a-f]') {
+        throw "invalid SHA-256 in license inventory baseline"
+    }
+
+    Write-Output "license-inventory-dependencies=$($Inventory.DependencyCount)"
+    Write-Output "license-inventory-evidence-files=$($Inventory.EvidenceFileCount)"
+    Write-Output "license-inventory-sha256=$($Inventory.Sha256)"
+
+    $inventoryMatches = (
+        $Inventory.DependencyCount -eq $expectedDependencies -and
+        $Inventory.EvidenceFileCount -eq $expectedEvidenceFiles -and
+        $Inventory.Sha256 -eq $expectedSha256
+    )
+    if (-not $inventoryMatches) {
+        Write-Host "expected license inventory: dependencies=$expectedDependencies evidence-files=$expectedEvidenceFiles sha256=$expectedSha256"
+        Write-Host "actual license inventory: dependencies=$($Inventory.DependencyCount) evidence-files=$($Inventory.EvidenceFileCount) sha256=$($Inventory.Sha256)"
+        throw "Windows release license inventory differs from the reviewed source-controlled baseline"
+    }
+}
+
+if ($Version -notmatch '^[0-9]+[.][0-9]+[.][0-9]+(?:[-+][0-9A-Za-z.-]+)?\z') {
     throw "invalid release version: $Version"
 }
 
@@ -250,6 +431,9 @@ if ($licenseEvidence.Count -ne $dependencies.Count) {
     throw "license evidence is incomplete: expected $($dependencies.Count), found $($licenseEvidence.Count)"
 }
 
+$licenseInventory = Get-CanonicalLicenseInventory -Evidence $licenseEvidence -Target $TargetTriple
+Assert-LicenseInventoryBaseline -Inventory $licenseInventory -Target $TargetTriple
+
 if ($LicensePreflight) {
     Write-Output "license-preflight=success"
     Write-Output "resolved-non-dev-packages=$($resolvedPackages.Count)"
@@ -361,6 +545,13 @@ foreach ($evidence in $licenseEvidence) {
 
 $indexPath = Join-Path $licenseDirectory "README.md"
 Set-Content -LiteralPath $indexPath -Value $index -Encoding utf8
+
+$inventoryPath = Join-Path $licenseDirectory "INVENTORY.tsv"
+[System.IO.File]::WriteAllText(
+    $inventoryPath,
+    $licenseInventory.Text,
+    [System.Text.UTF8Encoding]::new($false)
+)
 
 $archivePath = Join-Path $DistDirectory "$packageName.zip"
 Compress-Archive -Path $stageDirectory -DestinationPath $archivePath -CompressionLevel Optimal -Force
