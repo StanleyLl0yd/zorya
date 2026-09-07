@@ -16,7 +16,7 @@ rarog-types = { git = "https://github.com/StanleyLl0yd/rarog", rev = "b330f94fd4
 
 [target.'cfg(target_os = "windows")'.dependencies]
 png = { version = "0.17", default-features = false }
-pollster = { version = "=0.4.0", default-features = false }
+pollster = { version = "=1.0.1", default-features = false }
 rarog-compositor-wgpu = { git = "https://github.com/StanleyLl0yd/rarog", rev = "b330f94fd43b6b809ec0d784f6d0d7f2cce44989" }
 rarog-platform-windows = { git = "https://github.com/StanleyLl0yd/rarog", rev = "b330f94fd43b6b809ec0d784f6d0d7f2cce44989" }
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
