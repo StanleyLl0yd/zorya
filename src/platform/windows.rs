@@ -5,8 +5,9 @@ use crate::async_lifecycle::{
 use crate::branding::application_icon;
 use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
 use crate::{
-    BrowserApp, BrowserWindowId, NavigationId, PresentationFramePermit, PresentationGeneration,
-    TabId, TabPresentationHandoff,
+    BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserWindowId, NavigationId,
+    PresentationFramePermit, PresentationGeneration, PresentationHandoffError, TabActivationStart,
+    TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -20,8 +21,9 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Icon, Window, WindowId};
 
 const START_LOCATION: &str = "about:blank";
@@ -77,6 +79,10 @@ enum WorkerEvent {
         target: AsyncTarget,
         result: Result<(), String>,
     },
+    ViewCreated {
+        target: AsyncTarget,
+        result: Result<(), String>,
+    },
     FrameFinished {
         target: AsyncTarget,
         permit: PresentationFramePermit,
@@ -92,6 +98,9 @@ enum WorkerCommand {
     AttachInitialSurface {
         target: AsyncTarget,
         surface: WindowsGpuSurface,
+    },
+    CreateView {
+        target: AsyncTarget,
     },
     Render {
         target: AsyncTarget,
@@ -154,6 +163,10 @@ impl WorkerHandle {
         self.send(WorkerCommand::AttachInitialSurface { target, surface })
     }
 
+    fn create_view(&self, target: AsyncTarget) -> Result<(), String> {
+        self.send(WorkerCommand::CreateView { target })
+    }
+
     fn render(
         &self,
         target: AsyncTarget,
@@ -191,6 +204,12 @@ impl WorkerHandle {
         drop(self.sender);
         drop(self.thread);
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingNativeTabCreate {
+    target: AsyncTarget,
+    navigation: NavigationId,
 }
 
 struct NativeShell {
@@ -778,6 +797,15 @@ fn render_worker_main(
                     return;
                 }
             }
+            WorkerCommand::CreateView { target } => {
+                let result = worker.create_view(target);
+                if proxy
+                    .send_event(WorkerEvent::ViewCreated { target, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             WorkerCommand::Render {
                 target,
                 permit,
@@ -900,6 +928,34 @@ impl RenderWorker {
         }
 
         self.content = Some(WebContentSurface::new(self.gpu.as_ref(), surface));
+        Ok(())
+    }
+
+    fn create_view(&mut self, target: AsyncTarget) -> Result<(), String> {
+        self.ensure_active()?;
+        self.validate_new_request(target)?;
+        if self.engine.has_view(target.tab()) {
+            return Err(format!(
+                "tab {} already has a live Rarog View",
+                target.tab().get()
+            ));
+        }
+
+        self.engine
+            .create_view(target.tab())
+            .map_err(|error| {
+                format!(
+                    "failed to create Rarog View for tab {}: {error}",
+                    target.tab().get()
+                )
+            })?;
+        if let Err(error) = self.engine.load_local_html(target.tab(), START_PAGE) {
+            self.engine.close_view(target.tab());
+            return Err(format!(
+                "failed to load start document for tab {}: {error}",
+                target.tab().get()
+            ));
+        }
         Ok(())
     }
 
