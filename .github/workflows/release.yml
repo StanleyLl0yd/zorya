@@ -106,8 +106,14 @@ jobs:
             throw "release tag already exists: $tag"
           }
 
-          & gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $releases = gh api -H "Accept: application/vnd.github+json" "/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to query existing GitHub Releases"
+          }
+          $existingRelease = @(
+            $releases | Where-Object { [string]$_.tag_name -eq $tag }
+          )
+          if ($existingRelease.Count -ne 0) {
             throw "GitHub Release already exists: $tag"
           }
 
