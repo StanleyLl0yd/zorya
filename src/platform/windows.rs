@@ -292,12 +292,12 @@ impl NativeShell {
 
         let worker =
             match WorkerHandle::spawn(target, self.presentation.generation(), self.proxy.clone()) {
-            Ok(worker) => worker,
-            Err(error) => {
-                self.pending_init.complete_if_current(target);
-                return Err(error);
-            }
-        };
+                Ok(worker) => worker,
+                Err(error) => {
+                    self.pending_init.complete_if_current(target);
+                    return Err(error);
+                }
+            };
 
         self.window = Some(window);
         self.worker = Some(worker);
@@ -517,16 +517,17 @@ impl NativeShell {
         let BrowserCommandEffect::TabCreated(tab) = effect else {
             return Err("new-tab command returned an unexpected effect".into());
         };
-        let navigation = match self
-            .browser
-            .begin_navigation(self.browser_window, tab, START_LOCATION)
-        {
-            Ok(start) => start.intent().id(),
-            Err(error) => {
-                let _ = self.browser.close_tab(self.browser_window, tab);
-                return Err(format!("failed to begin new-tab navigation: {error}"));
-            }
-        };
+        let navigation =
+            match self
+                .browser
+                .begin_navigation(self.browser_window, tab, START_LOCATION)
+            {
+                Ok(start) => start.intent().id(),
+                Err(error) => {
+                    let _ = self.browser.close_tab(self.browser_window, tab);
+                    return Err(format!("failed to begin new-tab navigation: {error}"));
+                }
+            };
         let target = match self.requests.allocate(self.browser_window, tab) {
             Ok(target) => target,
             Err(error) => {
@@ -595,17 +596,13 @@ impl NativeShell {
         if is_synthetic || event.state != ElementState::Pressed || event.repeat {
             return Ok(());
         }
-        if !self.modifiers.control_key()
-            || self.modifiers.alt_key()
-            || self.modifiers.super_key()
-        {
+        if !self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key() {
             return Ok(());
         }
 
         match event.logical_key {
             Key::Character(character)
-                if !self.modifiers.shift_key()
-                    && character.as_str().eq_ignore_ascii_case("t") =>
+                if !self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("t") =>
             {
                 self.handle_browser_command(BrowserCommand::NewTab)
             }
@@ -762,11 +759,9 @@ impl NativeShell {
                                     PresentationHandoffError::StaleActivation { .. }
                                     | PresentationHandoffError::StaleTargetFramePermit { .. },
                                 ) => {
-                                    let hidden = self
-                                        .window
-                                        .as_ref()
-                                        .and_then(|window| window.is_visible())
-                                        == Some(false);
+                                    let hidden =
+                                        self.window.as_ref().and_then(|window| window.is_visible())
+                                            == Some(false);
                                     if self.presentation.content()
                                         != WebContentPresentation::Neutral
                                         || !hidden
@@ -1012,15 +1007,15 @@ fn render_worker_main(
 ) {
     let mut worker =
         match RenderWorker::initialize(init_target, initial_generation, cancellation.clone()) {
-        Ok(worker) => worker,
-        Err(error) => {
-            let _ = proxy.send_event(WorkerEvent::GpuReady {
-                target: init_target,
-                result: Err(error),
-            });
-            return;
-        }
-    };
+            Ok(worker) => worker,
+            Err(error) => {
+                let _ = proxy.send_event(WorkerEvent::GpuReady {
+                    target: init_target,
+                    result: Err(error),
+                });
+                return;
+            }
+        };
 
     if cancellation.is_cancelled() {
         return;
@@ -1178,14 +1173,12 @@ impl RenderWorker {
             ));
         }
 
-        self.engine
-            .create_view(target.tab())
-            .map_err(|error| {
-                format!(
-                    "failed to create Rarog View for tab {}: {error}",
-                    target.tab().get()
-                )
-            })?;
+        self.engine.create_view(target.tab()).map_err(|error| {
+            format!(
+                "failed to create Rarog View for tab {}: {error}",
+                target.tab().get()
+            )
+        })?;
         if let Err(error) = self.engine.load_local_html(target.tab(), START_PAGE) {
             self.engine.close_view(target.tab());
             return Err(format!(
