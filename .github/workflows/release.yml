@@ -262,6 +262,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          git fetch origin main --depth=1
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to re-fetch origin/main before publication"
+          }
+          $headSha = (git rev-parse HEAD | Out-String).Trim().ToLowerInvariant()
+          $mainSha = (git rev-parse origin/main | Out-String).Trim().ToLowerInvariant()
+          if ($headSha -ne $mainSha) {
+            throw "origin/main advanced during release verification; refusing to publish stale commit $headSha"
+          }
+
           $packageName = "zorya-$env:ZORYA_RELEASE_VERSION-windows-x86_64"
           $archive = Join-Path "dist" "$packageName.zip"
           $hashFile = "$archive.sha256"
