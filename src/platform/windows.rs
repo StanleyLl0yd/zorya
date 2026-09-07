@@ -687,6 +687,49 @@ impl NativeShell {
         Ok(())
     }
 
+    fn complete_native_tab_create(
+        &mut self,
+        target: AsyncTarget,
+        result: Result<(), String>,
+    ) -> Result<(), String> {
+        let Some(pending) = self.pending_tab_create else {
+            return Ok(());
+        };
+        if pending.target != target {
+            return Ok(());
+        }
+        self.pending_tab_create = None;
+
+        if !self.target_alive(target) {
+            return Ok(());
+        }
+
+        if let Err(error) = result {
+            let _ = self.browser.fail_navigation(
+                self.browser_window,
+                target.tab(),
+                pending.navigation,
+                &error,
+            );
+            let _ = self.browser.close_tab(self.browser_window, target.tab());
+            return Err(error);
+        }
+
+        self.browser
+            .commit_navigation(
+                self.browser_window,
+                target.tab(),
+                pending.navigation,
+                START_LOCATION,
+            )
+            .map_err(|error| format!("failed to commit new-tab navigation: {error}"))?;
+        let start = self
+            .browser
+            .begin_tab_activation(self.browser_window, target.tab())
+            .map_err(|error| format!("failed to activate newly created tab: {error}"))?;
+        self.begin_native_tab_activation(start)
+    }
+
     fn handle_worker_event(&mut self, event_loop: &ActiveEventLoop, event: WorkerEvent) {
         match event {
             WorkerEvent::GpuReady { target, result } => {
@@ -725,6 +768,11 @@ impl NativeShell {
                     Err(error) => self.fail(event_loop, error),
                 }
             }
+            WorkerEvent::ViewCreated { target, result } => {
+                if let Err(error) = self.complete_native_tab_create(target, result) {
+                    self.fail(event_loop, error);
+                }
+            }
             WorkerEvent::FrameFinished {
                 target,
                 permit,
@@ -739,16 +787,57 @@ impl NativeShell {
 
                 match result {
                     Ok(FrameOutcome::Presented) => {
+                        let mut completed_target = false;
                         if let PresentationFramePermit::Target(target_permit) = permit {
-                            if let Err(error) =
-                                self.presentation.present_target_frame(target_permit)
-                            {
-                                self.fail(event_loop, error);
-                                return;
+                            match self.presentation.present_target_frame(target_permit) {
+                                Ok(_) => completed_target = true,
+                                Err(
+                                    PresentationHandoffError::StaleActivation { .. }
+                                    | PresentationHandoffError::StaleTargetFramePermit { .. },
+                                ) => {
+                                    let hidden = self
+                                        .window
+                                        .as_ref()
+                                        .and_then(|window| window.is_visible())
+                                        == Some(false);
+                                    if self.presentation.content()
+                                        != WebContentPresentation::Neutral
+                                        || !hidden
+                                    {
+                                        self.fail(
+                                            event_loop,
+                                            "stale target frame completed outside a confirmed neutral native state",
+                                        );
+                                        return;
+                                    }
+                                }
+                                Err(error) => {
+                                    self.fail(event_loop, error);
+                                    return;
+                                }
                             }
+                        }
+
+                        if self.pending_target_permit.is_some() {
+                            if let Err(error) = self.dispatch_pending_target_frame() {
+                                self.fail(event_loop, error);
+                            }
+                            return;
+                        }
+
+                        if completed_target {
                             if self.run_mode == RunMode::ExitAfterTabActivation {
                                 self.shutdown(event_loop);
                                 return;
+                            }
+                            if self.presentation.pending_activation().is_none()
+                                && self.presentation.content()
+                                    == WebContentPresentation::Tab(self.tab)
+                            {
+                                if let Err(error) = self.leave_native_neutral() {
+                                    self.fail(event_loop, error);
+                                    return;
+                                }
                             }
                         }
 
@@ -766,8 +855,7 @@ impl NativeShell {
                     }
                     Ok(FrameOutcome::SurfaceRecoveryNeeded(error)) => {
                         self.needs_redraw = true;
-                        self.surface_recovery_permit = Some(permit);
-                        if let Err(recovery) = self.start_surface_recovery() {
+                        if let Err(recovery) = self.start_surface_recovery(permit) {
                             self.fail(
                                 event_loop,
                                 format!("{error}; surface recovery failed: {recovery}"),
@@ -785,7 +873,12 @@ impl NativeShell {
                 match result {
                     Ok(()) => {
                         self.needs_redraw = true;
-                        if let Some(permit) = self.surface_recovery_permit.take() {
+                        let recovered = self.surface_recovery_permit.take();
+                        if self.pending_target_permit.is_some() {
+                            if let Err(error) = self.dispatch_pending_target_frame() {
+                                self.fail(event_loop, error);
+                            }
+                        } else if let Some(permit) = recovered {
                             if let Err(error) = self.start_frame_with_permit(permit) {
                                 self.fail(event_loop, error);
                             }
@@ -793,7 +886,10 @@ impl NativeShell {
                             self.request_redraw();
                         }
                     }
-                    Err(error) => self.fail(event_loop, error),
+                    Err(error) => {
+                        self.surface_recovery_permit = None;
+                        self.fail(event_loop, error);
+                    }
                 }
             }
         }
