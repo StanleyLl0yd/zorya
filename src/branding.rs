@@ -17,12 +17,7 @@ pub(crate) fn application_icon_rgba() -> Vec<u8> {
             draw_horizon(&mut color, px, py);
             draw_orbit_marker(&mut color, px, py);
 
-            pixels.extend([
-                channel(color[0]),
-                channel(color[1]),
-                channel(color[2]),
-                255,
-            ]);
+            pixels.extend([channel(color[0]), channel(color[1]), channel(color[2]), 255]);
         }
     }
 
@@ -61,7 +56,11 @@ fn draw_orbit(color: &mut [f32; 3], x: f32, y: f32) {
     let dx = (x - 0.5) / 0.39;
     let dy = (y - 0.53) / 0.39;
     let distance = ((dx * dx + dy * dy).sqrt() - 1.0).abs() * 0.39;
-    add(color, [116.0, 76.0, 255.0], glow(distance, 0.0028, 0.015) * 0.9);
+    add(
+        color,
+        [116.0, 76.0, 255.0],
+        glow(distance, 0.0028, 0.015) * 0.9,
+    );
 }
 
 fn draw_rays(color: &mut [f32; 3], x: f32, y: f32) {
@@ -122,16 +121,8 @@ fn draw_horizon(color: &mut [f32; 3], x: f32, y: f32) {
         *color = mix3(*color, [7.0, 16.0, 59.0], 0.94);
     }
 
-    add(
-        color,
-        [255.0, 116.0, 67.0],
-        glow(distance, 0.0034, 0.018),
-    );
-    add(
-        color,
-        [255.0, 244.0, 166.0],
-        glow(distance, 0.0017, 0.006),
-    );
+    add(color, [255.0, 116.0, 67.0], glow(distance, 0.0034, 0.018));
+    add(color, [255.0, 244.0, 166.0], glow(distance, 0.0017, 0.006));
 }
 
 fn draw_orbit_marker(color: &mut [f32; 3], x: f32, y: f32) {
@@ -196,7 +187,8 @@ fn add(color: &mut [f32; 3], source: [f32; 3], strength: f32) {
     }
 
     for channel in 0..3 {
-        color[channel] = color[channel] + (source[channel] - color[channel]) * strength.clamp(0.0, 1.0);
+        color[channel] =
+            color[channel] + (source[channel] - color[channel]) * strength.clamp(0.0, 1.0);
     }
 }
 
@@ -221,7 +213,9 @@ mod tests {
     fn application_icon_has_expected_rgba_shape() {
         let pixels = application_icon_rgba();
 
-        assert_eq!(pixels.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
+        let icon_size = application_icon_size();
+
+        assert_eq!(pixels.len(), (icon_size * icon_size * 4) as usize);
         assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
     }
 
