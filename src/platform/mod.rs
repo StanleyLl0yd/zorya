@@ -7,6 +7,7 @@ use std::fmt;
 pub(crate) enum RunMode {
     Interactive,
     ExitAfterFirstPresentation,
+    ExitAfterTabActivation,
 }
 
 #[cfg(target_os = "windows")]
