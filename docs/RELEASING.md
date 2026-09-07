@@ -90,6 +90,27 @@ Before creating a public GitHub Release:
 
 For Technical Preview releases, use prerelease status while the product remains intentionally incomplete.
 
+## Publication procedure
+
+Technical Preview publication uses an explicit short-lived `release-publish/v<version>` branch.
+
+The publication branch must be created from the exact current `main` commit after both normal CI and the release-candidate workflow have succeeded for that same commit. The publication workflow rejects a branch whose commit differs from current `main`, whose version differs from Cargo metadata, whose release notes are missing, or whose tag/release already exists.
+
+After those guards pass, the publication workflow:
+
+1. verifies the successful normal-CI and release-candidate runs for the exact `main` SHA;
+2. fetches the locked Windows x86-64 dependency graph;
+3. runs the same fail-closed license preflight used by the candidate;
+4. builds the release executable offline from the locked graph;
+5. verifies `--version` and runs the native-window/Rarog/DX12 smoke;
+6. packages with the same source-controlled packager;
+7. verifies the ZIP digest, extracted executable, native smoke, provenance and third-party license index;
+8. retains the package as a workflow artifact;
+9. creates the `v<version>` Git tag and GitHub prerelease with the ZIP and SHA-256 file only after every prior step succeeds;
+10. verifies that the published prerelease contains both required assets.
+
+Do not create the public version tag manually before this workflow runs. The tag is a publication result, not an input that bypasses the publication gate.
+
 ## Signing and installer status
 
 The 0.1.0 Technical Preview is an unsigned ZIP package. It is not an installer and does not contain an updater.
