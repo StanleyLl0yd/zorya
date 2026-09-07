@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/branding/zorya-icon.svg" alt="Zorya" width="160" height="160">
+  <img src="assets/branding/zorya-icon.png" alt="Zorya" width="160" height="160">
 </p>
 
 <h1 align="center">Zorya 0.1.0 Technical Preview</h1>
