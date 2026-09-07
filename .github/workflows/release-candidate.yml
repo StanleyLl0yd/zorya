@@ -5,10 +5,12 @@ on:
     paths:
       - ".github/scripts/package-release.ps1"
       - ".github/workflows/release-candidate.yml"
+      - ".github/workflows/release.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "LICENSE"
       - "README-TECHNICAL-PREVIEW.md"
+      - "docs/releases/**"
       - "third_party/licenses/**"
       - "src/main.rs"
   push:
@@ -17,10 +19,12 @@ on:
     paths:
       - ".github/scripts/package-release.ps1"
       - ".github/workflows/release-candidate.yml"
+      - ".github/workflows/release.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "LICENSE"
       - "README-TECHNICAL-PREVIEW.md"
+      - "docs/releases/**"
       - "third_party/licenses/**"
       - "src/main.rs"
 
