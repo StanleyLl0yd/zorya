@@ -1,4 +1,50 @@
 use crate::app::TabId;
+use crate::navigation::{NavigationControls, ReloadControl};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowChromeSnapshot {
+    active_tab: TabId,
+    address_text: String,
+    address_bar_editing: bool,
+    navigation_controls: NavigationControls,
+}
+
+impl WindowChromeSnapshot {
+    pub(crate) fn new(
+        active_tab: TabId,
+        address_text: String,
+        address_bar_editing: bool,
+        navigation_controls: NavigationControls,
+    ) -> Self {
+        Self {
+            active_tab,
+            address_text,
+            address_bar_editing,
+            navigation_controls,
+        }
+    }
+
+    pub const fn active_tab(&self) -> TabId {
+        self.active_tab
+    }
+
+    pub fn address_text(&self) -> &str {
+        &self.address_text
+    }
+
+    pub const fn address_bar_editing(&self) -> bool {
+        self.address_bar_editing
+    }
+
+    pub const fn navigation_controls(&self) -> NavigationControls {
+        self.navigation_controls
+    }
+
+    pub const fn is_loading(&self) -> bool {
+        matches!(self.navigation_controls.reload(), ReloadControl::Stop)
+    }
+}
+
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddressBarEdit {
