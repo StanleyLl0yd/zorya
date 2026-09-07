@@ -1,0 +1,18 @@
+Package: hexf-parse
+Version: 0.2.1
+Cargo license: CC0-1.0
+Cargo repository: https://github.com/lifthrasiir/hexf
+Upstream tag: 0.2.1
+Upstream tag commit: 4225763d744183d720f575ae96d04161b4d08ea0
+Upstream package tag contains no LICENSE file.
+
+Canonical license text source:
+Repository: https://github.com/spdx/license-list-data
+Commit: 3ac5a9c241d97f95b22a5e366c9c841404a35639
+Path: text/CC0-1.0.txt
+Blob SHA: 0e259d42c996742e9e3cba14c677129b2c1b6311
+
+Reason for source-controlled copy:
+hexf-parse 0.2.1 declares CC0-1.0, but the matching upstream source tag
+contains no license text. This file preserves the canonical SPDX CC0-1.0
+text with exact provenance.

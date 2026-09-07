@@ -1,0 +1,18 @@
+Package: dwrote
+Version: 0.11.5
+Cargo license: MPL-2.0
+Cargo repository: https://github.com/servo/dwrote-rs
+Upstream tag: v0.11.5
+Upstream tag commit: 5bbe910f7156213cdbaca4e1addfe85ea8b421ef
+Upstream package tag contains no LICENSE file.
+
+Canonical license text source:
+Repository: https://github.com/spdx/license-list-data
+Commit: 3ac5a9c241d97f95b22a5e366c9c841404a35639
+Path: text/MPL-2.0.txt
+Blob SHA: ee6256cdb62a765749a71aae3abea32884301cd1
+
+Reason for source-controlled copy:
+dwrote 0.11.5 declares MPL-2.0, but neither the crates.io package nor
+the matching upstream v0.11.5 source tag contains the license text.
+This file preserves the canonical SPDX MPL-2.0 text with exact provenance.
