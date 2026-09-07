@@ -4,6 +4,7 @@ mod async_lifecycle;
 #[cfg(target_os = "windows")]
 mod branding;
 mod chrome;
+mod commands;
 pub mod engine;
 mod navigation;
 mod platform;
@@ -13,6 +14,7 @@ pub use app::{
     BrowserApp, BrowserModelError, BrowserWindow, BrowserWindowId, Tab, TabCloseResult, TabId,
 };
 pub use chrome::{AddressBarEdit, AddressBarState, AddressBarSubmission, WindowChromeSnapshot};
+pub use commands::{BrowserCommand, BrowserCommandEffect};
 pub use navigation::{
     HistoryEntry, HistoryEntryId, NavigationControls, NavigationFailure, NavigationId,
     NavigationIntent, NavigationIntentKind, NavigationStart, ReloadControl, TabNavigation,
