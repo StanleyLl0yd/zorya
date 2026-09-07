@@ -44,7 +44,7 @@ Application lockfile changes are committed.
 
 ## Automated dependency security
 
-Dependabot covers both Cargo and GitHub Actions dependencies on a weekly schedule.
+Dependabot covers both Cargo and GitHub Actions dependencies on a weekly schedule. Rarog crates and the exact `winit`/`pollster` platform-coupled versions remain manual-review dependencies, and `png` is kept on the reviewed 0.17 line until a deliberate compatibility update.
 
 The Security workflow runs RustSec `cargo audit` against the committed `Cargo.lock`, so dependency vulnerability detection does not rely on Dependabot alone. GitHub Dependency Review is intentionally not a required gate while the repository Dependency Graph is unavailable.
 
