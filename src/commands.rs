@@ -95,12 +95,7 @@ mod tests {
         )
     }
 
-    fn commit_location(
-        app: &mut BrowserApp,
-        window: BrowserWindowId,
-        tab: TabId,
-        location: &str,
-    ) {
+    fn commit_location(app: &mut BrowserApp, window: BrowserWindowId, tab: TabId, location: &str) {
         let navigation = app
             .begin_navigation(window, tab, location)
             .expect("begin navigation")
@@ -208,7 +203,10 @@ mod tests {
             start.intent().kind(),
             NavigationIntentKind::Reload { .. }
         ));
-        assert_eq!(start.intent().requested_location(), "https://committed.example/");
+        assert_eq!(
+            start.intent().requested_location(),
+            "https://committed.example/"
+        );
     }
 
     #[test]
@@ -220,10 +218,7 @@ mod tests {
         let third = app.create_tab(window).expect("third");
 
         let first_effect = app
-            .dispatch_browser_command(
-                window,
-                BrowserCommand::CycleTab(TabCycleDirection::Next),
-            )
+            .dispatch_browser_command(window, BrowserCommand::CycleTab(TabCycleDirection::Next))
             .expect("first cycle");
         let BrowserCommandEffect::TabActivationStarted(first_start) = first_effect else {
             panic!("first cycle should start activation");
@@ -232,10 +227,7 @@ mod tests {
         assert_eq!(first_start.intent().to(), second);
 
         let second_effect = app
-            .dispatch_browser_command(
-                window,
-                BrowserCommand::CycleTab(TabCycleDirection::Next),
-            )
+            .dispatch_browser_command(window, BrowserCommand::CycleTab(TabCycleDirection::Next))
             .expect("second cycle");
         let BrowserCommandEffect::TabActivationStarted(second_start) = second_effect else {
             panic!("second cycle should supersede activation");
