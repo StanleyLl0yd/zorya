@@ -11,6 +11,7 @@ mod platform;
 mod presentation_handoff;
 mod tab_activation;
 mod tab_close;
+mod tab_strip;
 
 pub use app::{
     BrowserApp, BrowserModelError, BrowserWindow, BrowserWindowId, Tab, TabCloseResult, TabId,
@@ -31,6 +32,7 @@ pub use tab_activation::{
 pub use tab_close::{
     ActiveTabCloseHandoff, LastTabCloseHandoff, TabCloseCommitError, TabCloseStart,
 };
+pub use tab_strip::{TabStripItemSnapshot, TabStripSnapshot};
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     platform::run(platform::RunMode::Interactive)

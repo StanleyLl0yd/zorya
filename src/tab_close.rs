@@ -210,11 +210,7 @@ impl BrowserApp {
         presentation: &TabPresentationHandoff,
     ) -> Result<TabCloseResult, TabCloseCommitError> {
         let intent = close.activation().intent();
-        validate_neutral_presentation(
-            presentation,
-            close.closing_tab(),
-            Some(intent.id()),
-        )?;
+        validate_neutral_presentation(presentation, close.closing_tab(), Some(intent.id()))?;
 
         let active = self
             .window(window)
@@ -559,9 +555,11 @@ mod tests {
 
         assert_eq!(
             presentation.confirm_current_tab_neutral(first),
-            Err(PresentationHandoffError::PendingActivationBlocksCurrentNeutral {
-                activation: intent.id(),
-            })
+            Err(
+                PresentationHandoffError::PendingActivationBlocksCurrentNeutral {
+                    activation: intent.id(),
+                }
+            )
         );
     }
 }

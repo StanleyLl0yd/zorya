@@ -39,7 +39,7 @@ The existing rarog-window binary remains a small engine reference host. Product 
 - stable-ID multi-tab create/close/reorder product model plus two-phase TabActivationId selection lifecycle, an identity/generation-bound neutral presentation handoff guard and presentation-aware active-tab close coordination; native neutral-cover/compositor handoff wiring remains tracked in issue #20 before multi-tab chrome is wired;
 - window-owned address bar edit/display model with stable TabId-bound raw submissions;
 - back/forward/reload/stop engine wiring and general HTTP(S) navigation completion are blocked on the supported Rarog Fetch/View contract tracked in issue #13;
-- page-title observation is blocked on a supported Rarog View title contract tracked in issue #18;
+- derived tab-strip chrome projects stable tab order, committed selection, pending activation target, per-tab loading and current browser display location without treating address-bar edit text as tab metadata; page-title observation remains blocked on a supported Rarog View title contract tracked in issue #18;
 - keyboard-first browser commands are modeled and atomically dispatched against committed active-tab identity, including pending-aware tab cycling and reload/stop behavior; native shortcut mapping and Web-content input dispatch remain separate and Web dispatch is blocked on issue #16;
 - loading-state chrome is projected through a derived committed-tab snapshot with pending-navigation Reload/Stop state; native chrome rendering remains separate.
 
