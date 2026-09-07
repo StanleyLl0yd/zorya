@@ -77,6 +77,10 @@ The packager traverses non-development edges reachable from Zorya in Cargo's Win
 
 Some registry packages deliberately omit license files from the published crate even though their Cargo metadata declares a license. For those cases only, `third_party/licenses/<name>-<version>/` may contain an exact upstream license copy plus mandatory `ORIGIN.txt` provenance. The override is used only after normal package-source discovery found no text and is itself shipped in the package. Do not replace a real missing license obligation with a manually invented attribution.
 
+The Windows release inventory is also guarded against silent drift. The packager derives a canonical target-specific manifest containing dependency identity/source/license metadata plus the filename and SHA-256 of every packaged license, notice and override-origin evidence file. A compact reviewed baseline lives under `third_party/licenses/inventory/`. License preflight fails when the dependency count, evidence-file count or complete canonical-manifest digest changes, so dependency/license changes require an explicit baseline review rather than silently altering the release bundle.
+
+The complete canonical manifest is packaged as `THIRD_PARTY_LICENSES/INVENTORY.tsv` for inspection. The baseline is a review gate, not a substitute for fail-closed evidence discovery: a dependency with missing or conflicting evidence still fails before baseline comparison.
+
 ## Publication gate
 
 Before creating a public GitHub Release:
