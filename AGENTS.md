@@ -306,3 +306,21 @@ When behavior, architecture, persistent formats, dependency requirements, suppor
 For a full repository audit, cleanup, optimization, simplification or deep-refactoring task, read and follow docs/agent/AUDIT_REFACTOR.md in full before editing.
 
 The Zorya-specific ownership, trust, privacy and lifecycle invariants in this file remain mandatory and take precedence over generic simplification goals.
+
+## GitHub and release security baseline
+
+Repository automation is part of the product trust boundary.
+
+- Keep every non-local GitHub Action pinned to an immutable full 40-character commit SHA.
+- Keep checkout credentials non-persistent unless a reviewed job explicitly requires otherwise.
+- Default workflow permissions to `permissions: {}` and grant only the minimum job-local scopes.
+- Never use `pull_request_target` for normal validation or execute untrusted pull-request code with write permissions, secrets or release credentials.
+- Keep `Cargo.lock` committed and use `--locked` for CI and release dependency resolution.
+- Keep Rarog dependencies pinned to exact Git commits.
+- Keep the aggregate `Verify`, aggregate `Security`, Rust CodeQL, Gitleaks and RustSec dependency-audit checks healthy.
+- Run `python3 scripts/verify_ci_supply_chain.py` after changes under `.github/workflows/**` or `.github/actions/**`.
+- Do not weaken or bypass release integrity checks to publish around a failing gate.
+- Public binary releases require exact source provenance, SHA-256 verification and artifact attestation when the platform supports it.
+- Keep `v*` release tags immutable once repository ruleset enforcement is available.
+- Signing material, when introduced, must live outside the repository and be exposed only to the narrow signing job.
+- Perform a repository security audit before major milestones and public releases, including a second review of `.github/**`, dependency changes and release permissions.

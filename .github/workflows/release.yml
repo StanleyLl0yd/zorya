@@ -5,24 +5,31 @@ on:
     branches:
       - "release-publish/v*"
 
-permissions:
-  actions: read
-  contents: write
+permissions: {}
 
 concurrency:
   group: zorya-release-publish
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Publish Windows Technical Preview
+  build:
+    name: Build and verify Windows Technical Preview
     runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
     env:
       ZORYA_BUILD_COMMIT: ${{ github.sha }}
       ZORYA_SOURCE_COMMIT: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
 
       - name: Validate publication ref and main gates
         shell: pwsh
@@ -72,30 +79,19 @@ jobs:
             throw "release notes are missing: $notes"
           }
 
-          $candidateRuns = gh api -H "Accept: application/vnd.github+json" "/repos/$env:GITHUB_REPOSITORY/actions/workflows/release-candidate.yml/runs?branch=main&status=success&per_page=100" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) {
-            throw "failed to inspect release-candidate workflow history"
-          }
-          $candidateMatch = @(
-            $candidateRuns.workflow_runs | Where-Object {
-              ([string]$_.head_sha).ToLowerInvariant() -eq $mainSha -and $_.conclusion -eq "success"
+          foreach ($workflow in @("ci.yml", "release-candidate.yml", "security.yml", "codeql.yml")) {
+            $runs = gh api -H "Accept: application/vnd.github+json" "/repos/$env:GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&status=success&per_page=100" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) {
+              throw "failed to inspect $workflow workflow history"
             }
-          )
-          if ($candidateMatch.Count -eq 0) {
-            throw "no successful release-candidate run exists for main commit $mainSha"
-          }
-
-          $ciRuns = gh api -H "Accept: application/vnd.github+json" "/repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=100" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) {
-            throw "failed to inspect CI workflow history"
-          }
-          $ciMatch = @(
-            $ciRuns.workflow_runs | Where-Object {
-              ([string]$_.head_sha).ToLowerInvariant() -eq $mainSha -and $_.conclusion -eq "success"
+            $match = @(
+              $runs.workflow_runs | Where-Object {
+                ([string]$_.head_sha).ToLowerInvariant() -eq $mainSha -and $_.conclusion -eq "success"
+              }
+            )
+            if ($match.Count -eq 0) {
+              throw "no successful $workflow run exists for main commit $mainSha"
             }
-          )
-          if ($ciMatch.Count -eq 0) {
-            throw "no successful normal CI run exists for main commit $mainSha"
           }
 
           $existingTag = git ls-remote --tags origin "refs/tags/$tag"
@@ -260,9 +256,9 @@ jobs:
           }
 
       - name: Retain publication artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: zorya-${{ env.ZORYA_RELEASE_VERSION }}-windows-x86_64-publish
+          name: zorya-publish-${{ github.sha }}
           path: |
             dist/zorya-${{ env.ZORYA_RELEASE_VERSION }}-windows-x86_64.zip
             dist/zorya-${{ env.ZORYA_RELEASE_VERSION }}-windows-x86_64.zip.sha256
@@ -270,44 +266,124 @@ jobs:
           retention-days: 90
           compression-level: 0
 
-      - name: Publish GitHub prerelease
-        shell: pwsh
+  attest:
+    name: Attest Windows Technical Preview
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download verified publication artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: zorya-publish-${{ github.sha }}
+          path: dist
+
+      - name: Verify downloaded archive hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$(find dist -maxdepth 1 -type f -name 'zorya-*-windows-x86_64.zip' -print -quit)"
+          checksum="${archive}.sha256"
+          test -n "$archive"
+          test -f "$checksum"
+          (cd dist && sha256sum --check "$(basename "$checksum")")
+
+      - name: Attest release artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/zorya-*-windows-x86_64.zip
+            dist/zorya-*-windows-x86_64.zip.sha256
+
+  publish:
+    name: Publish Windows Technical Preview
+    needs: [build, attest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    steps:
+      - name: Checkout release metadata
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download attested publication artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: zorya-publish-${{ github.sha }}
+          path: dist
+
+      - name: Verify artifact integrity and attestation
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          archive="$(find dist -maxdepth 1 -type f -name 'zorya-*-windows-x86_64.zip' -print -quit)"
+          checksum="${archive}.sha256"
+          test -n "$archive"
+          test -f "$checksum"
+          (cd dist && sha256sum --check "$(basename "$checksum")")
+          gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"
+          gh attestation verify "$checksum" --repo "$GITHUB_REPOSITORY"
+
+      - name: Revalidate release target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^release-publish/v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]
+          version="${GITHUB_REF_NAME#release-publish/v}"
+          tag="v$version"
+          notes="docs/releases/$version.md"
+          test -f "$notes"
           git fetch origin main --depth=1
-          if ($LASTEXITCODE -ne 0) {
-            throw "failed to re-fetch origin/main before publication"
-          }
-          $headSha = (git rev-parse HEAD | Out-String).Trim().ToLowerInvariant()
-          $mainSha = (git rev-parse origin/main | Out-String).Trim().ToLowerInvariant()
-          if ($headSha -ne $mainSha) {
-            throw "origin/main advanced during release verification; refusing to publish stale commit $headSha"
-          }
+          head_sha="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          main_sha="$(git rev-parse origin/main | tr '[:upper:]' '[:lower:]')"
+          test "$head_sha" = "$main_sha"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "release tag already exists: $tag" >&2
+            exit 1
+          fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub Release already exists: $tag" >&2
+            exit 1
+          fi
+          echo "ZORYA_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "ZORYA_RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "ZORYA_RELEASE_NOTES=$notes" >> "$GITHUB_ENV"
 
-          $packageName = "zorya-$env:ZORYA_RELEASE_VERSION-windows-x86_64"
-          $archive = Join-Path "dist" "$packageName.zip"
-          $hashFile = "$archive.sha256"
-          $title = "Zorya $env:ZORYA_RELEASE_VERSION Technical Preview"
-
-          gh release create $env:ZORYA_RELEASE_TAG $archive $hashFile --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title $title --notes-file $env:ZORYA_RELEASE_NOTES --prerelease
-          if ($LASTEXITCODE -ne 0) {
-            throw "GitHub prerelease publication failed with exit code $LASTEXITCODE"
-          }
-
-          $release = gh release view $env:ZORYA_RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json tagName,isDraft,isPrerelease,assets | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) {
-            throw "failed to verify published GitHub prerelease"
-          }
-          if ($release.tagName -ne $env:ZORYA_RELEASE_TAG -or $release.isDraft -or -not $release.isPrerelease) {
-            throw "published release metadata is invalid"
-          }
-          $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
-          foreach ($requiredAsset in @(
-            "$packageName.zip",
-            "$packageName.zip.sha256"
-          )) {
-            if ($assetNames -notcontains $requiredAsset) {
-              throw "published release is missing asset $requiredAsset"
-            }
-          }
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          package_name="zorya-$ZORYA_RELEASE_VERSION-windows-x86_64"
+          archive="dist/$package_name.zip"
+          checksum="$archive.sha256"
+          title="Zorya $ZORYA_RELEASE_VERSION Technical Preview"
+          test -f "$archive"
+          test -f "$checksum"
+          gh release create "$ZORYA_RELEASE_TAG" "$archive" "$checksum" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$title" \
+            --notes-file "$ZORYA_RELEASE_NOTES" \
+            --prerelease
+          release_json="$(gh release view "$ZORYA_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease,assets)"
+          test "$(jq -r '.tagName' <<< "$release_json")" = "$ZORYA_RELEASE_TAG"
+          test "$(jq -r '.isDraft' <<< "$release_json")" = "false"
+          test "$(jq -r '.isPrerelease' <<< "$release_json")" = "true"
+          jq -e --arg zip "$package_name.zip" --arg sum "$package_name.zip.sha256" '
+            [.assets[].name] as $names |
+            ($names | index($zip)) != null and ($names | index($sum)) != null
+          ' <<< "$release_json" >/dev/null

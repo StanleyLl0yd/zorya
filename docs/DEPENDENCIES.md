@@ -29,7 +29,7 @@ Do not copy Rarog source into this repository to work around an API limitation. 
 
 ## GitHub Actions
 
-Third-party actions must be pinned to immutable full commit SHAs. Do not use moving tags such as v4 in committed workflow files.
+Third-party actions must be pinned to immutable full commit SHAs. Do not use moving tags such as v4 in committed workflow files. Checkout credentials must not persist by default, workflow permissions must be explicit and least-privilege, and `scripts/verify_ci_supply_chain.py` must remain a merge gate for workflow changes.
 
 Windows CI uses GitHub's `actions/upload-artifact` at an immutable commit to retain the developer `zorya.exe` after the full Windows verification sequence and explicit binary build. The artifact is CI output only and is not a release, installer or signed distribution package.
 
@@ -40,3 +40,12 @@ The release-candidate workflow reuses the same immutable checkout/toolchain/uplo
 Add a dependency only for a concrete product requirement. Prefer small adapters around replaceable platform, UI and storage implementations and avoid allowing third-party types to become the browser authoritative cross-module state model.
 
 Application lockfile changes are committed.
+
+
+## Automated dependency security
+
+Dependabot covers both Cargo and GitHub Actions dependencies on a weekly schedule.
+
+The Security workflow runs RustSec `cargo audit` against the committed `Cargo.lock`, so dependency vulnerability detection does not rely on Dependabot alone. GitHub Dependency Review is intentionally not a required gate while the repository Dependency Graph is unavailable.
+
+Rust CodeQL and Gitleaks provide source and secret-scanning layers. These controls are intentionally stack-specific; Zorya does not add Android/Gradle or other unrelated scanners.
