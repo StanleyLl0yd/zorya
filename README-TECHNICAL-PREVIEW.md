@@ -1,4 +1,12 @@
-# Zorya 0.1.0 Technical Preview
+<p align="center">
+  <img src="assets/branding/zorya-icon.svg" alt="Zorya" width="160" height="160">
+</p>
+
+<h1 align="center">Zorya 0.1.0 Technical Preview</h1>
+
+<p align="center">
+  Early Windows technical preview powered by the Rarog Web Engine.
+</p>
 
 This package is an early Windows technical preview of Zorya, a desktop browser powered by the Rarog Web Engine.
 
