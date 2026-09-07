@@ -317,7 +317,7 @@ Repository automation is part of the product trust boundary.
 - Never use `pull_request_target` for normal validation or execute untrusted pull-request code with write permissions, secrets or release credentials.
 - Keep `Cargo.lock` committed and use `--locked` for CI and release dependency resolution.
 - Keep Rarog dependencies pinned to exact Git commits.
-- Keep the aggregate `Verify`, aggregate `Security`, Rust CodeQL, Gitleaks, RustSec dependency audit checks healthy.
+- Keep the aggregate `Verify`, aggregate `Security`, Rust CodeQL, Gitleaks and RustSec dependency-audit checks healthy.
 - Run `python3 scripts/verify_ci_supply_chain.py` after changes under `.github/workflows/**` or `.github/actions/**`.
 - Do not weaken or bypass release integrity checks to publish around a failing gate.
 - Public binary releases require exact source provenance, SHA-256 verification and artifact attestation when the platform supports it.
