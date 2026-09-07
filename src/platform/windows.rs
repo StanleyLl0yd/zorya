@@ -7,7 +7,7 @@ use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserWindowId, NavigationId,
     PresentationFramePermit, PresentationGeneration, PresentationHandoffError, TabActivationStart,
-    TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
+    TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -218,7 +218,11 @@ struct NativeShell {
     tab: TabId,
     activation_smoke_target: Option<TabId>,
     presentation: TabPresentationHandoff,
+    pending_target_permit: Option<TargetFramePermit>,
     surface_recovery_permit: Option<PresentationFramePermit>,
+    pending_tab_create: Option<PendingNativeTabCreate>,
+    restore_focus_after_activation: bool,
+    modifiers: ModifiersState,
     initial_navigation: Option<NavigationId>,
     proxy: EventLoopProxy<WorkerEvent>,
     window: Option<Arc<Window>>,
@@ -250,7 +254,11 @@ impl NativeShell {
             tab,
             activation_smoke_target,
             presentation: TabPresentationHandoff::new(tab),
+            pending_target_permit: None,
             surface_recovery_permit: None,
+            pending_tab_create: None,
+            restore_focus_after_activation: false,
+            modifiers: ModifiersState::empty(),
             initial_navigation: Some(initial_navigation),
             proxy,
             window: None,
@@ -671,7 +679,9 @@ impl NativeShell {
         self.pending_init.invalidate();
         self.pending_frame.invalidate();
         self.pending_surface.invalidate();
+        self.pending_target_permit = None;
         self.surface_recovery_permit = None;
+        self.pending_tab_create = None;
         self.worker_ready = false;
         if let Some(worker) = self.worker.take() {
             worker.shutdown();
