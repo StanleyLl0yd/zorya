@@ -276,14 +276,15 @@ function Assert-LicenseInventoryBaseline {
         throw "license inventory baseline target $baselineTarget does not match $Target"
     }
 
-    $expectedDependencies = 0
-    if (-not [int]::TryParse($baselineDependencies, [ref]$expectedDependencies)) {
+    if ($baselineDependencies -notmatch '^[0-9]+\z') {
         throw "invalid dependency count in license inventory baseline"
     }
-    $expectedEvidenceFiles = 0
-    if (-not [int]::TryParse($baselineEvidenceFiles, [ref]$expectedEvidenceFiles)) {
+    if ($baselineEvidenceFiles -notmatch '^[0-9]+\z') {
         throw "invalid evidence-file count in license inventory baseline"
     }
+
+    $expectedDependencies = [int]$baselineDependencies
+    $expectedEvidenceFiles = [int]$baselineEvidenceFiles
     $expectedSha256 = $baselineSha256.ToLowerInvariant()
     if ($expectedSha256.Length -ne 64 -or $expectedSha256 -match '[^0-9a-f]') {
         throw "invalid SHA-256 in license inventory baseline"
@@ -293,11 +294,12 @@ function Assert-LicenseInventoryBaseline {
     Write-Output "license-inventory-evidence-files=$($Inventory.EvidenceFileCount)"
     Write-Output "license-inventory-sha256=$($Inventory.Sha256)"
 
-    if (
-        $Inventory.DependencyCount -ne $expectedDependencies -or
-        $Inventory.EvidenceFileCount -ne $expectedEvidenceFiles -or
-        $Inventory.Sha256 -ne $expectedSha256
-    ) {
+    $inventoryMatches = (
+        $Inventory.DependencyCount -eq $expectedDependencies -and
+        $Inventory.EvidenceFileCount -eq $expectedEvidenceFiles -and
+        $Inventory.Sha256 -eq $expectedSha256
+    )
+    if (-not $inventoryMatches) {
         Write-Host "expected license inventory: dependencies=$expectedDependencies evidence-files=$expectedEvidenceFiles sha256=$expectedSha256"
         Write-Host "actual license inventory: dependencies=$($Inventory.DependencyCount) evidence-files=$($Inventory.EvidenceFileCount) sha256=$($Inventory.Sha256)"
         throw "Windows release license inventory differs from the reviewed source-controlled baseline"
