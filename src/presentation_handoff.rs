@@ -441,7 +441,9 @@ mod tests {
             .expect("target frame permit");
 
         assert_eq!(
-            handoff.present_target_frame(permit).expect("present target"),
+            handoff
+                .present_target_frame(permit)
+                .expect("present target"),
             second
         );
         assert_eq!(handoff.represented_tab(), second);

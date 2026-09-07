@@ -133,7 +133,9 @@ jobs:
             [ref]$parseErrors
           ) | Out-Null
           if ($parseErrors.Count -ne 0) {
-            $parseErrors | ForEach-Object { Write-Error $_.Message }
+            $parseErrors | ForEach-Object {
+              Write-Error ("line {0}, column {1}: {2} :: {3}" -f $_.Extent.StartLineNumber, $_.Extent.StartColumnNumber, $_.Message, $_.Extent.Text)
+            }
             throw "release packaging script contains PowerShell parse errors"
           }
 
@@ -247,9 +249,14 @@ jobs:
             }
           }
 
-          $licenseIndex = Join-Path $packageRoot "THIRD_PARTY_LICENSES/README.md"
+          $licenseRoot = Join-Path $packageRoot "THIRD_PARTY_LICENSES"
+          $licenseIndex = Join-Path $licenseRoot "README.md"
           if (-not (Test-Path -LiteralPath $licenseIndex -PathType Leaf)) {
             throw "packaged third-party license index is missing"
+          }
+          $licenseInventory = Join-Path $licenseRoot "INVENTORY.tsv"
+          if (-not (Test-Path -LiteralPath $licenseInventory -PathType Leaf)) {
+            throw "packaged canonical third-party license inventory is missing"
           }
 
       - name: Retain publication artifact
