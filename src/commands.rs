@@ -4,6 +4,7 @@ use crate::tab_activation::{TabActivationStart, TabCycleDirection};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrowserCommand {
+    NewTab,
     FocusAddressBar,
     Back,
     Forward,
@@ -13,6 +14,7 @@ pub enum BrowserCommand {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowserCommandEffect {
+    TabCreated(TabId),
     AddressBarEditStarted(TabId),
     NavigationStarted(NavigationStart),
     NavigationStopped(NavigationIntent),
@@ -26,6 +28,12 @@ impl BrowserApp {
         window: BrowserWindowId,
         command: BrowserCommand,
     ) -> Result<BrowserCommandEffect, BrowserModelError> {
+        if command == BrowserCommand::NewTab {
+            return self
+                .create_tab(window)
+                .map(BrowserCommandEffect::TabCreated);
+        }
+
         if let BrowserCommand::CycleTab(direction) = command {
             return Ok(self
                 .begin_tab_cycle(window, direction)?
@@ -40,6 +48,9 @@ impl BrowserApp {
             .ok_or(BrowserModelError::NoActiveTab { window })?;
 
         match command {
+            BrowserCommand::NewTab => {
+                unreachable!("new-tab commands are handled before active-tab routing")
+            }
             BrowserCommand::FocusAddressBar => {
                 let edited_tab = self
                     .begin_address_bar_edit(window)?
@@ -103,6 +114,43 @@ mod tests {
             .id();
         app.commit_navigation(window, tab, navigation, location)
             .expect("commit navigation");
+    }
+
+    #[test]
+    fn new_tab_command_allocates_stable_identity_without_switching_existing_active_tab() {
+        let mut app = BrowserApp::bootstrap().expect("bootstrap");
+        let (window, first) = bootstrap_ids(&app);
+
+        let effect = app
+            .dispatch_browser_command(window, BrowserCommand::NewTab)
+            .expect("new-tab command");
+        let BrowserCommandEffect::TabCreated(second) = effect else {
+            panic!("new-tab command should return the created identity");
+        };
+
+        assert_ne!(second, first);
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(browser_window.active_tab_id(), Some(first));
+        assert_eq!(browser_window.tabs().len(), 2);
+        assert_eq!(browser_window.tabs()[1].id(), second);
+    }
+
+    #[test]
+    fn new_tab_command_can_create_the_first_active_tab_in_an_empty_window() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+
+        let effect = app
+            .dispatch_browser_command(window, BrowserCommand::NewTab)
+            .expect("new-tab command");
+        let BrowserCommandEffect::TabCreated(tab) = effect else {
+            panic!("new-tab command should return the created identity");
+        };
+
+        assert_eq!(
+            app.window(window).and_then(|window| window.active_tab_id()),
+            Some(tab)
+        );
     }
 
     #[test]
