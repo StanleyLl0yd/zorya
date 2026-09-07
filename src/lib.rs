@@ -1,4 +1,5 @@
 mod app;
+mod branding;
 #[cfg(any(target_os = "windows", test))]
 mod async_lifecycle;
 mod chrome;
