@@ -1000,6 +1000,18 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
 
         match event {
             WindowEvent::CloseRequested => self.shutdown(event_loop),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
+                if let Err(error) = self.handle_keyboard_input(event, is_synthetic) {
+                    self.fail(event_loop, error);
+                }
+            }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 self.needs_redraw = true;
                 if self.worker_ready
