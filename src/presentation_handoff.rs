@@ -38,6 +38,22 @@ impl PresentationTransitionStart {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CurrentFramePermit {
+    tab: TabId,
+    generation: PresentationGeneration,
+}
+
+impl CurrentFramePermit {
+    pub const fn tab(self) -> TabId {
+        self.tab
+    }
+
+    pub const fn generation(self) -> PresentationGeneration {
+        self.generation
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TargetFramePermit {
     activation: TabActivationId,
     tab: TabId,
@@ -59,6 +75,40 @@ impl TargetFramePermit {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentationFramePermit {
+    Current(CurrentFramePermit),
+    Target(TargetFramePermit),
+}
+
+impl PresentationFramePermit {
+    pub const fn tab(self) -> TabId {
+        match self {
+            Self::Current(permit) => permit.tab(),
+            Self::Target(permit) => permit.tab(),
+        }
+    }
+
+    pub const fn generation(self) -> PresentationGeneration {
+        match self {
+            Self::Current(permit) => permit.generation(),
+            Self::Target(permit) => permit.generation(),
+        }
+    }
+}
+
+impl From<CurrentFramePermit> for PresentationFramePermit {
+    fn from(permit: CurrentFramePermit) -> Self {
+        Self::Current(permit)
+    }
+}
+
+impl From<TargetFramePermit> for PresentationFramePermit {
+    fn from(permit: TargetFramePermit) -> Self {
+        Self::Target(permit)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PresentationHandoffError {
     GenerationExhausted,
     ActivationSourceMismatch {
@@ -75,6 +125,16 @@ pub enum PresentationHandoffError {
     },
     PendingActivationBlocksCurrentNeutral {
         activation: TabActivationId,
+    },
+    PendingActivationBlocksCurrentFrame {
+        activation: TabActivationId,
+    },
+    CurrentFrameTabMismatch {
+        represented: TabId,
+        actual: TabId,
+    },
+    CurrentFrameContentNeutral {
+        tab: TabId,
     },
     StaleActivation {
         expected: Option<TabActivationId>,
@@ -142,6 +202,25 @@ impl fmt::Display for PresentationHandoffError {
                 formatter,
                 "cannot confirm current-tab neutral content while activation {} remains pending",
                 activation.get()
+            ),
+            Self::PendingActivationBlocksCurrentFrame { activation } => write!(
+                formatter,
+                "cannot authorize a current-tab frame while activation {} remains pending",
+                activation.get()
+            ),
+            Self::CurrentFrameTabMismatch {
+                represented,
+                actual,
+            } => write!(
+                formatter,
+                "cannot authorize a frame for tab {} while privileged chrome represents tab {}",
+                actual.get(),
+                represented.get()
+            ),
+            Self::CurrentFrameContentNeutral { tab } => write!(
+                formatter,
+                "cannot authorize a current frame for tab {} while Web content is neutral",
+                tab.get()
             ),
             Self::StaleActivation { expected, actual } => match expected {
                 Some(expected) => write!(
@@ -243,6 +322,41 @@ impl TabPresentationHandoff {
 
     pub const fn generation(&self) -> PresentationGeneration {
         self.generation
+    }
+
+    pub fn authorize_current_frame(
+        &self,
+        tab: TabId,
+    ) -> Result<CurrentFramePermit, PresentationHandoffError> {
+        if let Some(intent) = self.pending_activation {
+            return Err(
+                PresentationHandoffError::PendingActivationBlocksCurrentFrame {
+                    activation: intent.id(),
+                },
+            );
+        }
+        if tab != self.represented_tab {
+            return Err(PresentationHandoffError::CurrentFrameTabMismatch {
+                represented: self.represented_tab,
+                actual: tab,
+            });
+        }
+
+        match self.content {
+            WebContentPresentation::Tab(content) if content == tab => Ok(CurrentFramePermit {
+                tab,
+                generation: self.generation,
+            }),
+            WebContentPresentation::Tab(content) => {
+                Err(PresentationHandoffError::ContentOwnerMismatch {
+                    represented: self.represented_tab,
+                    content,
+                })
+            }
+            WebContentPresentation::Neutral => {
+                Err(PresentationHandoffError::CurrentFrameContentNeutral { tab })
+            }
+        }
     }
 
     pub fn confirm_current_tab_neutral(
@@ -449,6 +563,61 @@ mod tests {
         app.window(window)
             .and_then(BrowserWindow::active_tab_id)
             .expect("active tab")
+    }
+
+    #[test]
+    fn current_frame_permit_is_bound_to_visible_committed_tab_and_generation() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first tab");
+        let second = app.create_tab(window).expect("second tab");
+        let mut handoff = TabPresentationHandoff::new(first);
+
+        let initial = handoff
+            .authorize_current_frame(first)
+            .expect("initial current-frame permit");
+        assert_eq!(initial.tab(), first);
+        assert_eq!(initial.generation(), handoff.generation());
+        assert_eq!(
+            handoff.authorize_current_frame(second),
+            Err(PresentationHandoffError::CurrentFrameTabMismatch {
+                represented: first,
+                actual: second,
+            })
+        );
+
+        let intent = app
+            .begin_tab_activation(window, second)
+            .expect("activation")
+            .intent();
+        handoff.begin_activation(intent).expect("handoff");
+
+        assert_eq!(
+            handoff.authorize_current_frame(first),
+            Err(
+                PresentationHandoffError::PendingActivationBlocksCurrentFrame {
+                    activation: intent.id(),
+                }
+            )
+        );
+        assert_ne!(initial.generation(), handoff.generation());
+    }
+
+    #[test]
+    fn neutral_content_blocks_current_frame_authorization() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first tab");
+        let mut handoff = TabPresentationHandoff::new(first);
+
+        handoff
+            .confirm_current_tab_neutral(first)
+            .expect("neutral content");
+
+        assert_eq!(
+            handoff.authorize_current_frame(first),
+            Err(PresentationHandoffError::CurrentFrameContentNeutral { tab: first })
+        );
     }
 
     #[test]

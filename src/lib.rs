@@ -23,8 +23,8 @@ pub use navigation::{
     NavigationIntent, NavigationIntentKind, NavigationStart, ReloadControl, TabNavigation,
 };
 pub use presentation_handoff::{
-    PresentationGeneration, PresentationHandoffError, PresentationTransitionStart,
-    TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
+    CurrentFramePermit, PresentationFramePermit, PresentationGeneration, PresentationHandoffError,
+    PresentationTransitionStart, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 pub use tab_activation::{
     TabActivationId, TabActivationIntent, TabActivationStart, TabCycleDirection,
