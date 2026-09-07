@@ -25,6 +25,10 @@ Before a change is considered complete, run the relevant checks:
     cargo clippy --locked --all-targets -- -D warnings
     cargo test --locked --all-targets
 
+Dependency or repository-security changes must also pass the RustSec dependency audit, Gitleaks, CodeQL and Dependency Review gates provided by GitHub Actions. Changes under `.github/workflows/**` or `.github/actions/**` must pass:
+
+    python3 scripts/verify_ci_supply_chain.py
+
 For Windows native-shell changes, also build the actual application binary:
 
     cargo build --locked --bin zorya
