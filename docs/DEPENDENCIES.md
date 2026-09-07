@@ -46,6 +46,6 @@ Application lockfile changes are committed.
 
 Dependabot covers both Cargo and GitHub Actions dependencies on a weekly schedule.
 
-Pull requests use GitHub Dependency Review to reject newly introduced high-severity known vulnerabilities. The Security workflow independently runs RustSec `cargo audit` against the committed `Cargo.lock`, so dependency vulnerability detection does not rely on Dependabot alone.
+The Security workflow runs RustSec `cargo audit` against the committed `Cargo.lock`, so dependency vulnerability detection does not rely on Dependabot alone. GitHub Dependency Review is intentionally not a required gate while the repository Dependency Graph is unavailable.
 
 Rust CodeQL and Gitleaks provide source and secret-scanning layers. These controls are intentionally stack-specific; Zorya does not add Android/Gradle or other unrelated scanners.
