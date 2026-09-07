@@ -1,0 +1,13 @@
+Package: profiling
+Version: 1.0.18
+Cargo license: MIT OR Apache-2.0
+Cargo repository: https://github.com/aclysma/profiling
+Verified upstream revision: da44bd1c5497c665c0f00e5d70594fc14d390b4b
+Verified Cargo path: profiling/Cargo.toml
+LICENSE-APACHE blob SHA: 139dce95d473c201a8561ef17536314d8b8cda65
+LICENSE-MIT blob SHA: 6a84e059ad8b43e03c2b06bc2af4dc1d8442808d
+
+Reason for source-controlled copy:
+profiling 1.0.18 declares MIT OR Apache-2.0 but its registry package does
+not expose discoverable license text. The verified upstream revision
+declares exactly version 1.0.18 and carries these root licenses.

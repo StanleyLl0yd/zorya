@@ -1,0 +1,13 @@
+Package: pathfinder_simd
+Version: 0.5.6
+Cargo license: MIT OR Apache-2.0
+Cargo repository: https://github.com/servo/pathfinder
+Verified upstream revision: 6c3c0466f451c5bd2007087728cd168798cd64e8
+Verified Cargo path: simd/Cargo.toml
+LICENSE-APACHE blob SHA: 16fe87b06e802f094b3fbb0894b137bca2b16ef1
+LICENSE-MIT blob SHA: 25597d5838fa4cd7ff5c3c2bb1d1b4c3731eda7f
+
+Reason for source-controlled copy:
+pathfinder_simd 0.5.6 declares MIT OR Apache-2.0 but its registry package
+does not expose discoverable license text. The verified upstream revision
+still declares exactly version 0.5.6 and carries these root licenses.

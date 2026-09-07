@@ -1,0 +1,14 @@
+Package: wgpu-core-deps-windows-linux-android
+Version: 26.0.0
+Cargo license: MIT OR Apache-2.0
+Cargo repository: https://github.com/gfx-rs/wgpu
+Upstream tag: v26.0.0
+Annotated tag object: 7af3337491c90debba24dff5d0f8bf1716a0c662
+Upstream tag commit: 03f1b535ca2356d4d490540e76480b0116cf7d7f
+LICENSE.APACHE blob SHA: d9a10c0d8e868ebf8da0b3dc95bb0be634c34bfe
+LICENSE.MIT blob SHA: 4699691b8ed37738afcbcd591c91f7759472c3d0
+
+Reason for source-controlled copy:
+wgpu-core-deps-windows-linux-android 26.0.0 inherits MIT OR Apache-2.0
+from the wgpu workspace, but its registry package does not include the
+workspace-root license files. These are exact copies from signed v26.0.0.
