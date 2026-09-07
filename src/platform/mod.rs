@@ -23,7 +23,7 @@ struct UnsupportedPlatform;
 impl fmt::Display for UnsupportedPlatform {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .write_str("the Zorya native developer shell is currently available only on Windows")
+            .write_str("the Zorya native application is currently available only on Windows")
     }
 }
 
