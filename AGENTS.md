@@ -105,6 +105,8 @@ Zorya has a single source-controlled visual identity defined in `docs/BRANDING.m
 
 Use the canonical sunrise/orbit mark and midnight/violet/sunrise palette for repository artwork, application-shell presentation and future public release graphics. Do not introduce unrelated temporary browser icons or a competing color system.
 
+The user-supplied canonical image asset is immutable unless the project owner explicitly requests an image transformation. Do not re-encode, resize, crop, trace, redraw, vectorize, recolor or replace the canonical PNG as an implementation convenience. In particular, do not substitute an SVG or a reconstructed approximation. Platform-specific derivatives are allowed only when technically required; they must be generated from the canonical PNG and must not replace or modify it.
+
 Branding is presentation, not Web-engine semantics. Keep Zorya-specific iconography and palette out of Rarog.
 
 ## Browser chrome and untrusted Web content

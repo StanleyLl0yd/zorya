@@ -2,7 +2,7 @@ use super::RunMode;
 use crate::async_lifecycle::{
     AsyncRequestSequence, AsyncTarget, CancellationToken, PendingRequest,
 };
-use crate::branding::{application_icon_rgba, application_icon_size};
+use crate::branding::application_icon;
 use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
 use crate::{BrowserApp, BrowserWindowId, NavigationId, TabId};
 use pollster::block_on;
@@ -215,9 +215,13 @@ impl NativeShell {
             return Ok(());
         }
 
-        let icon_size = application_icon_size();
-        let icon = Icon::from_rgba(application_icon_rgba(), icon_size, icon_size)
-            .map_err(|error| format!("failed to build Zorya application icon: {error}"))?;
+        let application_icon = application_icon()?;
+        let icon = Icon::from_rgba(
+            application_icon.rgba,
+            application_icon.width,
+            application_icon.height,
+        )
+        .map_err(|error| format!("failed to build Zorya application icon: {error}"))?;
         let attributes = Window::default_attributes()
             .with_title("Zorya")
             .with_window_icon(Some(icon))

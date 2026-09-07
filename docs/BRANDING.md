@@ -4,13 +4,24 @@ Zorya uses one visual identity across the repository, documentation and applicat
 
 ## Canonical mark
 
-The canonical repository asset is:
+The canonical repository asset is the original user-supplied PNG:
 
-`assets/branding/zorya-icon.svg`
+`assets/branding/zorya-icon.png`
 
-The mark is a sunrise over a dark horizon inside a rounded midnight-blue field, framed by a violet orbit and warm solar light. Platform-specific renditions may change raster size or padding, but must preserve that composition.
+Canonical-source properties:
 
-The Windows shell derives its native window icon from the same geometry in `src/branding.rs`; this keeps the app icon dependency-free and reproducible from source.
+- format: PNG;
+- dimensions: 1254 × 1254;
+- SHA-256: `88542ff96677888710940ba37fdf5fa8c99ca5ffb2a0c073c355838f0d6404fd`;
+- the repository copy is stored byte-for-byte unchanged from the supplied source.
+
+Do not re-encode, resize, crop, trace, redraw, vectorize, recolor or otherwise transform the canonical PNG unless the project owner explicitly asks for that change. Do not replace it with an SVG or with a visual reconstruction.
+
+The Windows shell embeds this PNG and decodes those original bytes at runtime for the native window icon. The application therefore uses the canonical artwork itself rather than a separately redrawn icon.
+
+If a platform later strictly requires a different icon container or raster size, that file is a technical derivative only. The original PNG remains the canonical source, must remain present unchanged, and must not be silently replaced by the derivative.
+
+The mark is a sunrise over a dark horizon inside a rounded midnight-blue field, framed by a violet orbit and warm solar light.
 
 ## Palette
 
@@ -68,9 +79,9 @@ The branding palette is a product presentation rule, not a Web-engine rendering 
 
 ## Release assets
 
-Future installers, shortcuts, store imagery, screenshots and release graphics should be derived from the canonical mark. Do not substitute temporary generic browser icons in public release assets.
+Future installers, shortcuts, store imagery, screenshots and release graphics should use the canonical artwork and the visual language around it. Do not substitute temporary generic browser icons or independently redrawn variants in public release assets.
 
-If an OS requires a different format such as ICO or PNG, generate it from the canonical mark and preserve the source asset in the repository.
+Do not modify the canonical PNG merely to satisfy a platform export requirement. When a technically required derivative is unavoidable, generate it from the canonical PNG, identify it as a derivative, and keep the canonical PNG unchanged.
 
 ## Tone
 

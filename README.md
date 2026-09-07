@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/branding/zorya-icon.svg" alt="Zorya" width="192" height="192">
+  <img src="assets/branding/zorya-icon.png" alt="Zorya" width="192" height="192">
 </p>
 
 <h1 align="center">Zorya</h1>

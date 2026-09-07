@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="../assets/branding/zorya-icon.svg" alt="Zorya" width="112" height="112">
+  <img src="../assets/branding/zorya-icon.png" alt="Zorya" width="112" height="112">
 </p>
 
 <h1 align="center">Zorya Documentation</h1>
@@ -25,4 +25,4 @@ Zorya documentation follows the same principle as the browser architecture: prod
 - [Security](../SECURITY.md)
 - [Technical Preview](../README-TECHNICAL-PREVIEW.md)
 
-The canonical Zorya mark lives at `assets/branding/zorya-icon.svg`. Browser-product visuals belong in Zorya; Rarog remains visually and architecturally independent.
+The canonical Zorya mark lives at `assets/branding/zorya-icon.png`. Browser-product visuals belong in Zorya; Rarog remains visually and architecturally independent.
