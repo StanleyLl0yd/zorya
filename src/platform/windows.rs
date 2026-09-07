@@ -121,13 +121,7 @@ impl WorkerHandle {
         let thread = thread::Builder::new()
             .name("zorya-render".into())
             .spawn(move || {
-                render_worker_main(
-                    target,
-                    generation,
-                    receiver,
-                    proxy,
-                    worker_cancellation,
-                )
+                render_worker_main(target, generation, receiver, proxy, worker_cancellation)
             })
             .map_err(|error| format!("failed to start render worker: {error}"))?;
 
@@ -267,17 +261,14 @@ impl NativeShell {
             .begin(target)
             .map_err(|error| error.to_string())?;
 
-        let worker = match WorkerHandle::spawn(
-            target,
-            self.presentation.generation(),
-            self.proxy.clone(),
-        ) {
-            Ok(worker) => worker,
-            Err(error) => {
-                self.pending_init.complete_if_current(target);
-                return Err(error);
-            }
-        };
+        let worker =
+            match WorkerHandle::spawn(target, self.presentation.generation(), self.proxy.clone()) {
+                Ok(worker) => worker,
+                Err(error) => {
+                    self.pending_init.complete_if_current(target);
+                    return Err(error);
+                }
+            };
 
         self.window = Some(window);
         self.worker = Some(worker);
@@ -618,20 +609,17 @@ fn render_worker_main(
     proxy: EventLoopProxy<WorkerEvent>,
     cancellation: CancellationToken,
 ) {
-    let mut worker = match RenderWorker::initialize(
-        init_target,
-        initial_generation,
-        cancellation.clone(),
-    ) {
-        Ok(worker) => worker,
-        Err(error) => {
-            let _ = proxy.send_event(WorkerEvent::GpuReady {
-                target: init_target,
-                result: Err(error),
-            });
-            return;
-        }
-    };
+    let mut worker =
+        match RenderWorker::initialize(init_target, initial_generation, cancellation.clone()) {
+            Ok(worker) => worker,
+            Err(error) => {
+                let _ = proxy.send_event(WorkerEvent::GpuReady {
+                    target: init_target,
+                    result: Err(error),
+                });
+                return;
+            }
+        };
 
     if cancellation.is_cancelled() {
         return;
@@ -940,8 +928,7 @@ impl RenderWorker {
 
         match permit {
             PresentationFramePermit::Current(current) => {
-                if current.tab() != self.tab
-                    || current.generation() != self.presentation_generation
+                if current.tab() != self.tab || current.generation() != self.presentation_generation
                 {
                     return Err(format!(
                         "stale current-frame permit for tab {} generation {} while worker presents tab {} generation {}",
