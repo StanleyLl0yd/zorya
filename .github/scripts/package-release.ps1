@@ -279,7 +279,26 @@ function Assert-LicenseInventoryBaseline {
         throw "invalid evidence-file count in license inventory baseline"
     }
     $expectedSha256 = ([string]$baseline["sha256"]).ToLowerInvariant()
-    if ($expectedSha256 -notmatch '^[0-9a-f]{64}
+    if ($expectedSha256.Length -ne 64 -or $expectedSha256 -match '[^0-9a-f]') {
+        throw "invalid SHA-256 in license inventory baseline"
+    }
+
+    Write-Output "license-inventory-dependencies=$($Inventory.DependencyCount)"
+    Write-Output "license-inventory-evidence-files=$($Inventory.EvidenceFileCount)"
+    Write-Output "license-inventory-sha256=$($Inventory.Sha256)"
+
+    if (
+        $Inventory.DependencyCount -ne $expectedDependencies -or
+        $Inventory.EvidenceFileCount -ne $expectedEvidenceFiles -or
+        $Inventory.Sha256 -ne $expectedSha256
+    ) {
+        Write-Host "expected license inventory: dependencies=$expectedDependencies evidence-files=$expectedEvidenceFiles sha256=$expectedSha256"
+        Write-Host "actual license inventory: dependencies=$($Inventory.DependencyCount) evidence-files=$($Inventory.EvidenceFileCount) sha256=$($Inventory.Sha256)"
+        throw "Windows release license inventory differs from the reviewed source-controlled baseline"
+    }
+}
+
+if ($Version -notmatch '^[0-9]+[.][0-9]+[.][0-9]+(?:[-+][0-9A-Za-z.-]+)?\z') {
     throw "invalid release version: $Version"
 }
 
