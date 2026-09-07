@@ -209,7 +209,10 @@ mod tests {
             .find(|item| item.tab() == second)
             .expect("second item");
 
-        assert_eq!(first_item.display_location(), Some("https://first.example/"));
+        assert_eq!(
+            first_item.display_location(),
+            Some("https://first.example/")
+        );
         assert!(!first_item.loading());
         assert_eq!(
             second_item.display_location(),
