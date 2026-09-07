@@ -67,4 +67,6 @@ Never commit credentials, signing keys, private user data, real browsing profile
 
 ## Visual changes
 
-Keep new application-shell, documentation and release visuals consistent with the canonical Zorya mark and palette in `docs/BRANDING.md`. Platform-specific icon exports must be derived from the canonical mark rather than designed independently.
+Keep new application-shell, documentation and release visuals consistent with the canonical Zorya mark and palette in `docs/BRANDING.md`.
+
+The canonical user-supplied PNG must stay byte-for-byte unchanged unless the project owner explicitly requests an image transformation. Do not re-encode, resize, crop, trace, redraw, vectorize, recolor or replace it with an SVG or approximation. Platform-specific icon exports are allowed only when technically required, must be derived from the canonical PNG, and must not replace the canonical source.
