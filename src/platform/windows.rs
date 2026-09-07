@@ -353,10 +353,7 @@ impl NativeShell {
         self.start_frame_with_permit(permit)
     }
 
-    fn start_frame_with_permit(
-        &mut self,
-        permit: PresentationFramePermit,
-    ) -> Result<(), String> {
+    fn start_frame_with_permit(&mut self, permit: PresentationFramePermit) -> Result<(), String> {
         if !self.worker_ready {
             return Err("render worker is not ready".into());
         }
@@ -540,7 +537,8 @@ impl NativeShell {
                 match result {
                     Ok(FrameOutcome::Presented) => {
                         if let PresentationFramePermit::Target(target_permit) = permit {
-                            if let Err(error) = self.presentation.present_target_frame(target_permit)
+                            if let Err(error) =
+                                self.presentation.present_target_frame(target_permit)
                             {
                                 self.fail(event_loop, error);
                                 return;
@@ -735,22 +733,21 @@ fn render_worker_main(
     proxy: EventLoopProxy<WorkerEvent>,
     cancellation: CancellationToken,
 ) {
-    let mut worker =
-        match RenderWorker::initialize(
-            init_target,
-            initial_generation,
-            additional_tabs,
-            cancellation.clone(),
-        ) {
-            Ok(worker) => worker,
-            Err(error) => {
-                let _ = proxy.send_event(WorkerEvent::GpuReady {
-                    target: init_target,
-                    result: Err(error),
-                });
-                return;
-            }
-        };
+    let mut worker = match RenderWorker::initialize(
+        init_target,
+        initial_generation,
+        additional_tabs,
+        cancellation.clone(),
+    ) {
+        Ok(worker) => worker,
+        Err(error) => {
+            let _ = proxy.send_event(WorkerEvent::GpuReady {
+                target: init_target,
+                result: Err(error),
+            });
+            return;
+        }
+    };
 
     if cancellation.is_cancelled() {
         return;
@@ -841,14 +838,12 @@ impl RenderWorker {
             .load_local_html(tab, START_PAGE)
             .map_err(|error| format!("failed to load Z1 start fixture: {error}"))?;
         for additional_tab in additional_tabs {
-            engine
-                .create_view(additional_tab)
-                .map_err(|error| {
-                    format!(
-                        "failed to create Rarog View for tab {}: {error}",
-                        additional_tab.get()
-                    )
-                })?;
+            engine.create_view(additional_tab).map_err(|error| {
+                format!(
+                    "failed to create Rarog View for tab {}: {error}",
+                    additional_tab.get()
+                )
+            })?;
             engine
                 .load_local_html(additional_tab, START_PAGE)
                 .map_err(|error| {
