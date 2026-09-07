@@ -123,7 +123,6 @@ A repository-wide audit must also inspect:
 - GitHub Actions full-SHA pinning;
 - workflow token permissions and triggers;
 - Dependabot coverage;
-- Dependency Review;
 - RustSec dependency audit;
 - Gitleaks;
 - Rust CodeQL;
