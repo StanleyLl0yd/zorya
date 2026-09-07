@@ -85,6 +85,14 @@ Outside edit mode, the displayed location follows the active tab's browser navig
 
 Submitting the address bar returns an `AddressBarSubmission` containing the stable target `TabId` and the user's verbatim text, then leaves edit mode. Submission deliberately does not parse, normalize or start navigation. Search-vs-URL interpretation, canonical Web URL/origin semantics and HTTP navigation execution must cross reviewed browser/Rarog policy boundaries rather than being hidden inside chrome state.
 
+### Derived tab-strip state
+
+`TabStripSnapshot` is a read-only projection of authoritative `BrowserWindow` state for future privileged native tab chrome. Items preserve current product order and carry their stable `TabId`, committed-active flag, pending-activation-target flag, per-tab loading state and browser display location. A pending target is presentation intent only and is never reported as the committed active tab.
+
+The current location is a temporary browser-owned display fallback, not a security identity or a substitute for document title. Unfinished address-bar edit text is intentionally excluded so private or mistyped privileged input cannot become another tab's label source. Document-title observation remains blocked on the supported Rarog View contract tracked in issue #18; once available, title text must still be treated as untrusted Web-controlled display data.
+
+The snapshot does not commit activation, create Views or authorize Web presentation. Native tab-strip rendering must continue to obey the neutral presentation handoff required by issue #20.
+
 ### Rarog engine host
 
 `engine::EngineHost` is the Zorya-owned adapter around the public Rarog embedder API. It owns the shared `rarog_engine::Engine` and maps each product `TabId` to one live Rarog `View` without exposing Rarog identifiers as browser identity.
