@@ -42,3 +42,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 pub fn run_native_smoke() -> Result<(), Box<dyn std::error::Error>> {
     platform::run(platform::RunMode::ExitAfterFirstPresentation)
 }
+
+#[doc(hidden)]
+pub fn run_native_tab_activation_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    platform::run(platform::RunMode::ExitAfterTabActivation)
+}

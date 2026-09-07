@@ -119,6 +119,18 @@ jobs:
           if ($process.ExitCode -ne 0) {
             throw "release native shell smoke test failed with exit code $($process.ExitCode)"
           }
+      - name: Smoke test release tab activation handoff
+        shell: pwsh
+        run: |
+          $executable = Join-Path "target/release" "zorya.exe"
+          $process = Start-Process -FilePath $executable -ArgumentList "--native-tab-activation-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "release tab activation smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "release tab activation smoke test failed with exit code $($process.ExitCode)"
+          }
 
       - name: Package release candidate
         shell: pwsh
@@ -170,6 +182,15 @@ jobs:
           }
           if ($process.ExitCode -ne 0) {
             throw "packaged native shell smoke test failed with exit code $($process.ExitCode)"
+          }
+
+          $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-tab-activation-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "packaged tab activation smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "packaged tab activation smoke test failed with exit code $($process.ExitCode)"
           }
 
           $buildInfoPath = Join-Path $packageRoot "BUILD-INFO.txt"
