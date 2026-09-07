@@ -24,3 +24,17 @@ Thumbs.db
 # IDE-local state
 .idea/
 .vscode/
+
+# Local secrets and signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+local.properties
+.cargo/credentials
+.cargo/credentials.toml
