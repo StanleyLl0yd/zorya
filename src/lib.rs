@@ -8,6 +8,7 @@ mod commands;
 pub mod engine;
 mod navigation;
 mod platform;
+mod presentation_handoff;
 mod tab_activation;
 
 pub use app::{
@@ -18,6 +19,10 @@ pub use commands::{BrowserCommand, BrowserCommandEffect};
 pub use navigation::{
     HistoryEntry, HistoryEntryId, NavigationControls, NavigationFailure, NavigationId,
     NavigationIntent, NavigationIntentKind, NavigationStart, ReloadControl, TabNavigation,
+};
+pub use presentation_handoff::{
+    PresentationGeneration, PresentationHandoffError, PresentationTransitionStart,
+    TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 pub use tab_activation::{
     TabActivationId, TabActivationIntent, TabActivationStart, TabCycleDirection,
