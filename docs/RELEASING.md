@@ -87,7 +87,8 @@ Before creating a public GitHub Release:
 
 - the release candidate workflow must be green on the exact `main` commit to publish;
 - normal CI must be green on that commit;
-- package hash and provenance must be available;
+- the aggregate Security workflow and Rust CodeQL workflow must be green on that commit;
+- package hash, source provenance and GitHub artifact attestation must be available;
 - release notes must accurately describe current limitations;
 - signing status must be stated accurately;
 - no open issue may be silently represented as implemented.
@@ -102,16 +103,19 @@ The publication branch must be created from the exact current `main` commit afte
 
 After those guards pass, the publication workflow:
 
-1. verifies the successful normal-CI and release-candidate runs for the exact `main` SHA;
+1. verifies successful normal CI, release-candidate, Security and CodeQL runs for the exact `main` SHA;
 2. fetches the locked Windows x86-64 dependency graph;
 3. runs the same fail-closed license preflight used by the candidate;
 4. builds the release executable offline from the locked graph;
 5. verifies `--version` and runs the native-window/Rarog/DX12 smoke;
-6. packages with the same source-controlled packager;
-7. verifies the ZIP digest, extracted executable, native smoke, provenance and third-party license index;
-8. retains the package as a workflow artifact;
-9. creates the `v<version>` Git tag and GitHub prerelease with the ZIP and SHA-256 file only after every prior step succeeds;
-10. verifies that the published prerelease contains both required assets.
+6. packages with the same source-controlled packager and verifies the ZIP digest, extracted executable, native smoke, provenance and third-party license index;
+7. uploads only the verified ZIP and SHA-256 file as an internal workflow artifact;
+8. in a separate least-privilege job with OIDC attestation permission, downloads and re-verifies those exact files and creates GitHub artifact attestations;
+9. in a separate publication job with `contents: write`, downloads the already-built artifacts, verifies their checksum and attestations, re-checks that the source commit is still current `main`, and refuses an existing tag/release;
+10. creates the `v<version>` Git tag and GitHub prerelease without rebuilding product code under a write-capable token;
+11. verifies that the published prerelease contains both required assets.
+
+The build job never receives `contents: write`. The attestation job does not check out or execute repository code and is the only release job with `id-token: write`/`attestations: write`.
 
 Do not create the public version tag manually before this workflow runs. The tag is a publication result, not an input that bypasses the publication gate.
 
