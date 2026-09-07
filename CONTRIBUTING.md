@@ -9,7 +9,8 @@ Read:
 - AGENTS.md;
 - docs/ARCHITECTURE.md;
 - docs/ROADMAP.md;
-- docs/DEPENDENCIES.md when changing dependencies.
+- docs/DEPENDENCIES.md when changing dependencies;
+- docs/BRANDING.md when changing icons, browser chrome or other visual presentation.
 
 The core ownership rule is simple: browser-product behavior belongs in Zorya; Web-engine semantics belong in Rarog.
 
@@ -62,3 +63,8 @@ Do not claim checks or platform behavior that were not actually verified.
 Keep comments minimal, necessary, current and English-only. Prefer clear ownership and names over explanatory narration.
 
 Never commit credentials, signing keys, private user data, real browsing profiles, crash dumps containing private data, or generated secrets.
+
+
+## Visual changes
+
+Keep new application-shell, documentation and release visuals consistent with the canonical Zorya mark and palette in `docs/BRANDING.md`. Platform-specific icon exports must be derived from the canonical mark rather than designed independently.
