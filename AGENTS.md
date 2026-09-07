@@ -28,7 +28,8 @@ Before changing durable product architecture, inspect:
 - docs/ARCHITECTURE.md;
 - docs/ROADMAP.md;
 - docs/DEPENDENCIES.md when dependency or Rarog integration changes;
-- CONTRIBUTING.md.
+- CONTRIBUTING.md;
+- docs/BRANDING.md when changing browser chrome, icons, screenshots, release graphics or other visual presentation.
 
 Update architecture documentation in the same work when a durable ownership, trust, persistence or platform decision changes.
 
@@ -97,6 +98,14 @@ Rendered chrome, transient menu state, cached labels, thumbnails, layout measure
 Do not use vector positions, widget handles or transient UI indices as durable identities across asynchronous work.
 
 A stale completion must never silently apply to a new tab, window or profile that happens to reuse a position or handle.
+
+## Visual identity
+
+Zorya has a single source-controlled visual identity defined in `docs/BRANDING.md`.
+
+Use the canonical sunrise/orbit mark and midnight/violet/sunrise palette for repository artwork, application-shell presentation and future public release graphics. Do not introduce unrelated temporary browser icons or a competing color system.
+
+Branding is presentation, not Web-engine semantics. Keep Zorya-specific iconography and palette out of Rarog.
 
 ## Browser chrome and untrusted Web content
 
