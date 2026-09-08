@@ -526,10 +526,7 @@ impl NativeShell {
         self.start_new_tab_with_activation(true)
     }
 
-    fn start_new_tab_with_activation(
-        &mut self,
-        activate_after_create: bool,
-    ) -> Result<(), String> {
+    fn start_new_tab_with_activation(&mut self, activate_after_create: bool) -> Result<(), String> {
         if !self.worker_ready
             || self.pending_tab_create.is_some()
             || self.pending_frame.is_pending()
@@ -664,7 +661,9 @@ impl NativeShell {
             || self.presentation.content() != WebContentPresentation::Neutral
             || !self.native_neutral_confirmed()
         {
-            return Err("rapid supersession did not leave only C committed over neutral content".into());
+            return Err(
+                "rapid supersession did not leave only C committed over neutral content".into(),
+            );
         }
 
         Ok(())
