@@ -9,6 +9,7 @@ pub mod engine;
 mod navigation;
 mod platform;
 mod presentation_handoff;
+mod profile;
 mod tab_activation;
 mod tab_close;
 mod tab_strip;
@@ -25,6 +26,11 @@ pub use navigation::{
 pub use presentation_handoff::{
     CurrentFramePermit, PresentationFramePermit, PresentationGeneration, PresentationHandoffError,
     PresentationTransitionStart, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
+};
+pub use profile::{
+    MAX_SETTING_KEY_BYTES, MAX_SETTING_VALUE_BYTES, MAX_SETTINGS_ENTRIES,
+    MAX_SETTINGS_RECORD_BYTES, ProfileStorageError, ProfileStore, SETTINGS_SCHEMA_VERSION,
+    SettingsCleanupWarning, SettingsLoad, SettingsRecovery, SettingsSave, SettingsSnapshot,
 };
 pub use tab_activation::{
     TabActivationId, TabActivationIntent, TabActivationStart, TabCycleDirection,
