@@ -472,6 +472,15 @@ impl NativeShell {
         Ok(())
     }
 
+    fn native_neutral_confirmed(&self) -> bool {
+        self.presentation.content() == WebContentPresentation::Neutral
+            && self
+                .window
+                .as_ref()
+                .and_then(|window| window.is_visible())
+                == Some(false)
+    }
+
     fn begin_native_tab_activation(&mut self, start: TabActivationStart) -> Result<(), String> {
         let intent = start.intent();
         if intent.from() == intent.to() {
@@ -576,6 +585,96 @@ impl NativeShell {
         Ok(())
     }
 
+    fn start_close_tab(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
+        if !self.worker_ready
+            || self.pending_tab_create.is_some()
+            || self.pending_surface.is_pending()
+            || self.pending_view_close.is_some()
+            || self.pending_target_permit.is_some()
+            || self.presentation.pending_activation().is_some()
+        {
+            return Ok(());
+        }
+
+        let effect = self
+            .browser
+            .dispatch_browser_command(self.browser_window, BrowserCommand::CloseTab)
+            .map_err(|error| format!("failed to begin browser tab close: {error}"))?;
+        let BrowserCommandEffect::TabCloseStarted(start) = effect else {
+            return Err("close-tab command returned an unexpected effect".into());
+        };
+
+        match start {
+            TabCloseStart::Closed(result) => {
+                let closed = result.tab().id();
+                if closed == self.tab {
+                    return Err("active native tab closed without a presentation handoff".into());
+                }
+                self.worker
+                    .as_ref()
+                    .ok_or_else(|| "render worker is unavailable".to_string())?
+                    .close_view(closed)
+            }
+            TabCloseStart::ActiveWithFallback(close) => {
+                let intent = close.activation().intent();
+                self.presentation
+                    .begin_activation(intent)
+                    .map_err(|error| format!("failed to begin close presentation handoff: {error}"))?;
+                self.enter_native_neutral()?;
+                self.presentation
+                    .confirm_neutral(intent.id())
+                    .map_err(|error| format!("failed to confirm close neutral state: {error}"))?;
+
+                let result = self
+                    .browser
+                    .commit_active_tab_close_after_neutral(
+                        self.browser_window,
+                        close,
+                        &self.presentation,
+                    )
+                    .map_err(|error| format!("failed to commit active tab close: {error}"))?;
+                let committed = result
+                    .active_tab()
+                    .ok_or_else(|| "active close lost its fallback tab".to_string())?;
+                if committed != close.fallback_tab() {
+                    return Err(format!(
+                        "active close committed fallback tab {} instead of {}",
+                        committed.get(),
+                        close.fallback_tab().get()
+                    ));
+                }
+
+                self.presentation
+                    .acknowledge_chrome_commit(intent.id(), committed)
+                    .map_err(|error| format!("failed to acknowledge fallback chrome: {error}"))?;
+                let permit = self
+                    .presentation
+                    .authorize_target_frame(intent.id(), committed)
+                    .map_err(|error| format!("failed to authorize fallback frame: {error}"))?;
+
+                self.tab = committed;
+                self.pending_view_close = Some(close.closing_tab());
+                self.pending_target_permit = Some(permit);
+                self.dispatch_pending_target_frame()
+            }
+            TabCloseStart::ActiveLast(close) => {
+                self.enter_native_neutral()?;
+                self.presentation
+                    .confirm_current_tab_neutral(close.closing_tab())
+                    .map_err(|error| format!("failed to confirm last-tab neutral state: {error}"))?;
+                self.browser
+                    .commit_last_tab_close_after_neutral(
+                        self.browser_window,
+                        close,
+                        &self.presentation,
+                    )
+                    .map_err(|error| format!("failed to commit last-tab close: {error}"))?;
+                self.shutdown(event_loop);
+                Ok(())
+            }
+        }
+    }
+
     fn handle_browser_command(&mut self, command: BrowserCommand) -> Result<(), String> {
         match command {
             BrowserCommand::NewTab => self.start_new_tab(),
@@ -604,6 +703,7 @@ impl NativeShell {
 
     fn handle_keyboard_input(
         &mut self,
+        event_loop: &ActiveEventLoop,
         event: winit::event::KeyEvent,
         is_synthetic: bool,
     ) -> Result<(), String> {
@@ -619,6 +719,11 @@ impl NativeShell {
                 if !self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("t") =>
             {
                 self.handle_browser_command(BrowserCommand::NewTab)
+            }
+            Key::Character(character)
+                if !self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("w") =>
+            {
+                self.start_close_tab(event_loop)
             }
             Key::Named(NamedKey::Tab) => {
                 let direction = if self.modifiers.shift_key() {
@@ -983,7 +1088,7 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
                 is_synthetic,
                 ..
             } => {
-                if let Err(error) = self.handle_keyboard_input(event, is_synthetic) {
+                if let Err(error) = self.handle_keyboard_input(event_loop, event, is_synthetic) {
                     self.fail(event_loop, error);
                 }
             }
