@@ -308,9 +308,8 @@ impl ProfileStore {
             .map(|recovery| recovery.skipped_generations())
             .unwrap_or(&[]);
         let generations = self.discover_generations()?;
-        if let Some(&unexpected) = generations
-            .iter()
-            .find(|&&generation| generation > current_generation && !recovered.contains(&generation))
+        if let Some(unexpected) =
+            unexpected_generation(current_generation, recovered, &generations)
         {
             return Err(ProfileStorageError::ConcurrentSettingsWrite {
                 generation: unexpected,
@@ -461,6 +460,17 @@ fn validate_setting_value(value: &str) -> Result<(), ProfileStorageError> {
             limit: MAX_SETTING_VALUE_BYTES,
         })
     }
+}
+
+fn unexpected_generation(
+    current: u64,
+    recovered: &[u64],
+    generations: &[u64],
+) -> Option<u64> {
+    generations
+        .iter()
+        .find(|&&generation| generation > current && !recovered.contains(&generation))
+        .copied()
 }
 
 fn settings_file_name(generation: u64) -> String {
@@ -861,17 +871,22 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_generation_after_load_is_a_concurrent_write_conflict() {
+    fn unexpected_generation_detection_distinguishes_recovery_from_concurrency() {
+        assert_eq!(unexpected_generation(4, &[6, 5], &[6, 5, 4, 3]), None);
+        assert_eq!(
+            unexpected_generation(4, &[5], &[6, 5, 4, 3]),
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn stale_snapshot_cannot_overwrite_a_concurrent_generation() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
         let first = store
             .save_settings(&snapshot_with("browser.mode", "first"))
             .unwrap()
             .into_snapshot();
-
-        let loaded = store.load_settings().unwrap();
-        assert_eq!(loaded.snapshot().generation(), first.generation());
-
         let concurrent_generation = first.generation() + 1;
         fs::write(
             store.settings_path(concurrent_generation),
@@ -882,19 +897,6 @@ mod tests {
             ),
         )
         .unwrap();
-
-        let recovered = loaded
-            .recovery()
-            .map(|recovery| recovery.skipped_generations())
-            .unwrap_or(&[]);
-        let generations = store.discover_generations().unwrap();
-        let unexpected = generations
-            .iter()
-            .find(|&&generation| {
-                generation > loaded.snapshot().generation() && !recovered.contains(&generation)
-            })
-            .copied();
-        assert_eq!(unexpected, Some(concurrent_generation));
 
         assert!(matches!(
             store.save_settings(&first),
