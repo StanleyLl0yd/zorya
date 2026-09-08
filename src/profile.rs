@@ -379,7 +379,8 @@ impl ProfileStore {
 
         let mut saved = snapshot.clone();
         saved.generation = generation;
-        let failed_generations = self.cleanup_generations(generation, &generations);
+        let failed_generations =
+            self.cleanup_generations(current_generation, &generations);
         let cleanup_warning =
             (!failed_generations.is_empty() || !pending_cleanup.is_empty()).then_some(
                 SettingsCleanupWarning {
@@ -448,15 +449,22 @@ impl ProfileStore {
 
     fn cleanup_generations(
         &self,
-        current_generation: u64,
+        previous_current_generation: u64,
         previous_generations: &[u64],
     ) -> Vec<u64> {
-        let mut failed = Vec::new();
-        for &generation in previous_generations
+        let older_backup = previous_generations
             .iter()
-            .skip(SETTINGS_RETAINED_GENERATIONS.saturating_sub(1))
-            .rev()
-        {
+            .copied()
+            .find(|&generation| generation < previous_current_generation);
+        let mut failed = Vec::new();
+
+        for &generation in previous_generations {
+            let retain = generation == previous_current_generation
+                || Some(generation) == older_backup;
+            if retain {
+                continue;
+            }
+
             let path = self.settings_path(generation);
             if let Err(error) = fs::remove_file(&path) {
                 if error.kind() != io::ErrorKind::NotFound {
@@ -465,7 +473,6 @@ impl ProfileStore {
             }
         }
 
-        debug_assert!(!failed.contains(&current_generation));
         failed
     }
 
@@ -1067,6 +1074,45 @@ mod tests {
 
         assert_eq!(saved.generation(), corrupt_generation + 1);
         assert_eq!(saved.get("browser.mode"), Some("third"));
+        assert_eq!(
+            store.discover_generations().unwrap(),
+            vec![saved.generation(), first.generation()]
+        );
+    }
+
+    #[test]
+    fn recovery_save_keeps_the_last_confirmed_valid_generation() {
+        let directory = TestDirectory::new();
+        let store = ProfileStore::open(directory.path()).expect("open profile");
+        let first = store
+            .save_settings(&snapshot_with("browser.mode", "valid"))
+            .unwrap()
+            .into_snapshot();
+
+        for generation in (first.generation() + 1)..=(first.generation() + 4) {
+            fs::write(store.settings_path(generation), b"corrupt").unwrap();
+        }
+
+        let loaded = store.load_settings().expect("recover valid generation");
+        assert_eq!(loaded.snapshot().generation(), first.generation());
+        assert_eq!(
+            loaded.recovery().unwrap().skipped_generations(),
+            &[5, 4, 3, 2]
+        );
+
+        let mut next = loaded.into_snapshot();
+        next.set("browser.mode", "recovered").unwrap();
+        let saved = store.save_settings(&next).unwrap().into_snapshot();
+
+        assert_eq!(saved.generation(), 6);
+        assert_eq!(
+            store.discover_generations().unwrap(),
+            vec![6, first.generation()]
+        );
+        assert_eq!(
+            store.load_settings().unwrap().snapshot().get("browser.mode"),
+            Some("recovered")
+        );
     }
 
     #[test]
