@@ -333,8 +333,7 @@ impl ProfileStore {
             .map(|recovery| recovery.skipped_generations())
             .unwrap_or(&[]);
         let generations = self.discover_generations_with_reserve(2)?;
-        if let Some(unexpected) =
-            unexpected_generation(current_generation, recovered, &generations)
+        if let Some(unexpected) = unexpected_generation(current_generation, recovered, &generations)
         {
             return Err(ProfileStorageError::ConcurrentSettingsWrite {
                 generation: unexpected,
@@ -350,11 +349,19 @@ impl ProfileStore {
 
         if let Err(error) = file.write_all(&bytes) {
             let _ = fs::remove_file(&pending_path);
-            return Err(io_error("write pending settings generation", &pending_path, error));
+            return Err(io_error(
+                "write pending settings generation",
+                &pending_path,
+                error,
+            ));
         }
         if let Err(error) = file.sync_all() {
             let _ = fs::remove_file(&pending_path);
-            return Err(io_error("sync pending settings generation", &pending_path, error));
+            return Err(io_error(
+                "sync pending settings generation",
+                &pending_path,
+                error,
+            ));
         }
         drop(file);
 
@@ -379,15 +386,12 @@ impl ProfileStore {
 
         let mut saved = snapshot.clone();
         saved.generation = generation;
-        let failed_generations =
-            self.cleanup_generations(current_generation, &generations);
-        let cleanup_warning =
-            (!failed_generations.is_empty() || !pending_cleanup.is_empty()).then_some(
-                SettingsCleanupWarning {
-                    generations: failed_generations,
-                    pending_files: pending_cleanup,
-                },
-            );
+        let failed_generations = self.cleanup_generations(current_generation, &generations);
+        let cleanup_warning = (!failed_generations.is_empty() || !pending_cleanup.is_empty())
+            .then_some(SettingsCleanupWarning {
+                generations: failed_generations,
+                pending_files: pending_cleanup,
+            });
         Ok(SettingsSave {
             snapshot: saved,
             cleanup_warning,
@@ -403,11 +407,7 @@ impl ProfileStore {
         reserved_entries: usize,
     ) -> Result<Vec<u64>, ProfileStorageError> {
         let entries = fs::read_dir(&self.settings_directory).map_err(|error| {
-            io_error(
-                "read settings directory",
-                &self.settings_directory,
-                error,
-            )
+            io_error("read settings directory", &self.settings_directory, error)
         })?;
         let mut generations = Vec::new();
         let mut entry_count = 0usize;
@@ -501,8 +501,7 @@ impl ProfileStore {
     }
 
     fn settings_path(&self, generation: u64) -> PathBuf {
-        self.settings_directory
-            .join(settings_file_name(generation))
+        self.settings_directory.join(settings_file_name(generation))
     }
 }
 
