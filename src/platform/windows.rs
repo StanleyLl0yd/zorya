@@ -208,6 +208,7 @@ impl WorkerHandle {
 struct PendingNativeTabCreate {
     target: AsyncTarget,
     navigation: NavigationId,
+    activate_after_create: bool,
 }
 
 struct NativeShell {
@@ -219,6 +220,7 @@ struct NativeShell {
     surface_recovery_permit: Option<PresentationFramePermit>,
     pending_tab_create: Option<PendingNativeTabCreate>,
     pending_view_close: Option<TabId>,
+    rapid_smoke_tabs: Vec<TabId>,
     restore_focus_after_activation: bool,
     modifiers: ModifiersState,
     initial_navigation: Option<NavigationId>,
@@ -254,6 +256,7 @@ impl NativeShell {
             surface_recovery_permit: None,
             pending_tab_create: None,
             pending_view_close: None,
+            rapid_smoke_tabs: Vec::new(),
             restore_focus_after_activation: false,
             modifiers: ModifiersState::empty(),
             initial_navigation: Some(initial_navigation),
@@ -520,6 +523,13 @@ impl NativeShell {
     }
 
     fn start_new_tab(&mut self) -> Result<(), String> {
+        self.start_new_tab_with_activation(true)
+    }
+
+    fn start_new_tab_with_activation(
+        &mut self,
+        activate_after_create: bool,
+    ) -> Result<(), String> {
         if !self.worker_ready
             || self.pending_tab_create.is_some()
             || self.pending_frame.is_pending()
@@ -577,7 +587,11 @@ impl NativeShell {
             return Err(error);
         }
 
-        self.pending_tab_create = Some(PendingNativeTabCreate { target, navigation });
+        self.pending_tab_create = Some(PendingNativeTabCreate {
+            target,
+            navigation,
+            activate_after_create,
+        });
         Ok(())
     }
 
@@ -806,11 +820,23 @@ impl NativeShell {
                 START_LOCATION,
             )
             .map_err(|error| format!("failed to commit new-tab navigation: {error}"))?;
-        let start = self
-            .browser
-            .begin_tab_activation(self.browser_window, target.tab())
-            .map_err(|error| format!("failed to activate newly created tab: {error}"))?;
-        self.begin_native_tab_activation(start)
+
+        if pending.activate_after_create {
+            let start = self
+                .browser
+                .begin_tab_activation(self.browser_window, target.tab())
+                .map_err(|error| format!("failed to activate newly created tab: {error}"))?;
+            return self.begin_native_tab_activation(start);
+        }
+
+        self.rapid_smoke_tabs.push(target.tab());
+        match self.rapid_smoke_tabs.len() {
+            1 => self.start_new_tab_with_activation(false),
+            2 => self.start_rapid_tab_activation_smoke(),
+            count => Err(format!(
+                "rapid tab activation smoke created unexpected tab count {count}"
+            )),
+        }
     }
 
     fn handle_worker_event(&mut self, event_loop: &ActiveEventLoop, event: WorkerEvent) {
@@ -1099,6 +1125,7 @@ impl NativeShell {
         self.surface_recovery_permit = None;
         self.pending_tab_create = None;
         self.pending_view_close = None;
+        self.rapid_smoke_tabs.clear();
         self.worker_ready = false;
         if let Some(worker) = self.worker.take() {
             worker.shutdown();
