@@ -7,7 +7,8 @@ use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserWindowId, NavigationId,
     PresentationFramePermit, PresentationGeneration, PresentationHandoffError, TabActivationStart,
-    TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
+    TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit,
+    WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -77,6 +78,10 @@ enum WorkerEvent {
         target: AsyncTarget,
         result: Result<(), String>,
     },
+    ViewClosed {
+        tab: TabId,
+        result: Result<(), String>,
+    },
     FrameFinished {
         target: AsyncTarget,
         permit: PresentationFramePermit,
@@ -95,6 +100,9 @@ enum WorkerCommand {
     },
     CreateView {
         target: AsyncTarget,
+    },
+    CloseView {
+        tab: TabId,
     },
     Render {
         target: AsyncTarget,
@@ -153,6 +161,10 @@ impl WorkerHandle {
         self.send(WorkerCommand::CreateView { target })
     }
 
+    fn close_view(&self, tab: TabId) -> Result<(), String> {
+        self.send(WorkerCommand::CloseView { tab })
+    }
+
     fn render(
         &self,
         target: AsyncTarget,
@@ -206,6 +218,7 @@ struct NativeShell {
     pending_target_permit: Option<TargetFramePermit>,
     surface_recovery_permit: Option<PresentationFramePermit>,
     pending_tab_create: Option<PendingNativeTabCreate>,
+    pending_view_close: Option<TabId>,
     restore_focus_after_activation: bool,
     modifiers: ModifiersState,
     initial_navigation: Option<NavigationId>,
@@ -240,6 +253,7 @@ impl NativeShell {
             pending_target_permit: None,
             surface_recovery_permit: None,
             pending_tab_create: None,
+            pending_view_close: None,
             restore_focus_after_activation: false,
             modifiers: ModifiersState::empty(),
             initial_navigation: Some(initial_navigation),
@@ -458,6 +472,11 @@ impl NativeShell {
         Ok(())
     }
 
+    fn native_neutral_confirmed(&self) -> bool {
+        self.presentation.content() == WebContentPresentation::Neutral
+            && self.window.as_ref().and_then(|window| window.is_visible()) == Some(false)
+    }
+
     fn begin_native_tab_activation(&mut self, start: TabActivationStart) -> Result<(), String> {
         let intent = start.intent();
         if intent.from() == intent.to() {
@@ -562,6 +581,100 @@ impl NativeShell {
         Ok(())
     }
 
+    fn start_close_tab(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
+        if !self.worker_ready
+            || self.pending_tab_create.is_some()
+            || self.pending_surface.is_pending()
+            || self.pending_view_close.is_some()
+            || self.pending_target_permit.is_some()
+            || self.presentation.pending_activation().is_some()
+        {
+            return Ok(());
+        }
+
+        let effect = self
+            .browser
+            .dispatch_browser_command(self.browser_window, BrowserCommand::CloseTab)
+            .map_err(|error| format!("failed to begin browser tab close: {error}"))?;
+        let BrowserCommandEffect::TabCloseStarted(start) = effect else {
+            return Err("close-tab command returned an unexpected effect".into());
+        };
+
+        match start {
+            TabCloseStart::Closed(result) => {
+                let closed = result.tab().id();
+                if closed == self.tab {
+                    return Err("active native tab closed without a presentation handoff".into());
+                }
+                self.worker
+                    .as_ref()
+                    .ok_or_else(|| "render worker is unavailable".to_string())?
+                    .close_view(closed)
+            }
+            TabCloseStart::ActiveWithFallback(close) => {
+                let intent = close.activation().intent();
+                self.presentation
+                    .begin_activation(intent)
+                    .map_err(|error| {
+                        format!("failed to begin close presentation handoff: {error}")
+                    })?;
+                self.enter_native_neutral()?;
+                self.presentation
+                    .confirm_neutral(intent.id())
+                    .map_err(|error| format!("failed to confirm close neutral state: {error}"))?;
+
+                let result = self
+                    .browser
+                    .commit_active_tab_close_after_neutral(
+                        self.browser_window,
+                        close,
+                        &self.presentation,
+                    )
+                    .map_err(|error| format!("failed to commit active tab close: {error}"))?;
+                let committed = result
+                    .active_tab()
+                    .ok_or_else(|| "active close lost its fallback tab".to_string())?;
+                if committed != close.fallback_tab() {
+                    return Err(format!(
+                        "active close committed fallback tab {} instead of {}",
+                        committed.get(),
+                        close.fallback_tab().get()
+                    ));
+                }
+
+                self.presentation
+                    .acknowledge_chrome_commit(intent.id(), committed)
+                    .map_err(|error| format!("failed to acknowledge fallback chrome: {error}"))?;
+                let permit = self
+                    .presentation
+                    .authorize_target_frame(intent.id(), committed)
+                    .map_err(|error| format!("failed to authorize fallback frame: {error}"))?;
+
+                self.tab = committed;
+                self.pending_view_close = Some(close.closing_tab());
+                self.pending_target_permit = Some(permit);
+                self.dispatch_pending_target_frame()
+            }
+            TabCloseStart::ActiveLast(close) => {
+                self.enter_native_neutral()?;
+                self.presentation
+                    .confirm_current_tab_neutral(close.closing_tab())
+                    .map_err(|error| {
+                        format!("failed to confirm last-tab neutral state: {error}")
+                    })?;
+                self.browser
+                    .commit_last_tab_close_after_neutral(
+                        self.browser_window,
+                        close,
+                        &self.presentation,
+                    )
+                    .map_err(|error| format!("failed to commit last-tab close: {error}"))?;
+                self.shutdown(event_loop);
+                Ok(())
+            }
+        }
+    }
+
     fn handle_browser_command(&mut self, command: BrowserCommand) -> Result<(), String> {
         match command {
             BrowserCommand::NewTab => self.start_new_tab(),
@@ -590,6 +703,7 @@ impl NativeShell {
 
     fn handle_keyboard_input(
         &mut self,
+        event_loop: &ActiveEventLoop,
         event: winit::event::KeyEvent,
         is_synthetic: bool,
     ) -> Result<(), String> {
@@ -605,6 +719,11 @@ impl NativeShell {
                 if !self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("t") =>
             {
                 self.handle_browser_command(BrowserCommand::NewTab)
+            }
+            Key::Character(character)
+                if !self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("w") =>
+            {
+                self.start_close_tab(event_loop)
             }
             Key::Named(NamedKey::Tab) => {
                 let direction = if self.modifiers.shift_key() {
@@ -737,15 +856,55 @@ impl NativeShell {
                     self.fail(event_loop, error);
                 }
             }
+            WorkerEvent::ViewClosed { tab, result } => {
+                if self.pending_view_close != Some(tab) {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        self.pending_view_close = None;
+                        if self.run_mode == RunMode::ExitAfterTabClose {
+                            self.shutdown(event_loop);
+                            return;
+                        }
+                        if self.presentation.pending_activation().is_none()
+                            && self.presentation.content() == WebContentPresentation::Tab(self.tab)
+                        {
+                            if let Err(error) = self.leave_native_neutral() {
+                                self.fail(event_loop, error);
+                            }
+                        }
+                    }
+                    Err(error) => self.fail(event_loop, error),
+                }
+            }
             WorkerEvent::FrameFinished {
                 target,
                 permit,
                 result,
             } => {
-                if permit.tab() != target.tab()
-                    || !self.pending_frame.complete_if_current(target)
-                    || !self.target_alive(target)
-                {
+                if permit.tab() != target.tab() || !self.pending_frame.complete_if_current(target) {
+                    return;
+                }
+
+                if !self.target_alive(target) {
+                    let retired_source = self.pending_view_close == Some(target.tab())
+                        && self.native_neutral_confirmed();
+                    if !retired_source {
+                        self.fail(
+                            event_loop,
+                            format!(
+                                "frame for closed tab {} completed outside a confirmed neutral close handoff",
+                                target.tab().get()
+                            ),
+                        );
+                        return;
+                    }
+                    if self.pending_target_permit.is_some() {
+                        if let Err(error) = self.dispatch_pending_target_frame() {
+                            self.fail(event_loop, error);
+                        }
+                    }
                     return;
                 }
 
@@ -792,6 +951,17 @@ impl NativeShell {
                                 self.shutdown(event_loop);
                                 return;
                             }
+                            if let Some(retired) = self.pending_view_close {
+                                let close_result = self
+                                    .worker
+                                    .as_ref()
+                                    .ok_or_else(|| "render worker is unavailable".to_string())
+                                    .and_then(|worker| worker.close_view(retired));
+                                if let Err(error) = close_result {
+                                    self.fail(event_loop, error);
+                                }
+                                return;
+                            }
                             if self.presentation.pending_activation().is_none()
                                 && self.presentation.content()
                                     == WebContentPresentation::Tab(self.tab)
@@ -807,6 +977,20 @@ impl NativeShell {
                             self.shutdown(event_loop);
                         } else if self.run_mode == RunMode::ExitAfterTabActivation {
                             if let Err(error) = self.start_new_tab() {
+                                self.fail(event_loop, error);
+                            }
+                        } else if self.run_mode == RunMode::ExitAfterTabClose {
+                            let tab_count = self
+                                .browser
+                                .window(self.browser_window)
+                                .map(|window| window.tabs().len())
+                                .unwrap_or_default();
+                            let result = if tab_count == 1 {
+                                self.start_new_tab()
+                            } else {
+                                self.start_close_tab(event_loop)
+                            };
+                            if let Err(error) = result {
                                 self.fail(event_loop, error);
                             }
                         } else if self.needs_redraw {
@@ -914,6 +1098,7 @@ impl NativeShell {
         self.pending_target_permit = None;
         self.surface_recovery_permit = None;
         self.pending_tab_create = None;
+        self.pending_view_close = None;
         self.worker_ready = false;
         if let Some(worker) = self.worker.take() {
             worker.shutdown();
@@ -968,7 +1153,7 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
                 is_synthetic,
                 ..
             } => {
-                if let Err(error) = self.handle_keyboard_input(event, is_synthetic) {
+                if let Err(error) = self.handle_keyboard_input(event_loop, event, is_synthetic) {
                     self.fail(event_loop, error);
                 }
             }
@@ -1050,6 +1235,15 @@ fn render_worker_main(
                 let result = worker.create_view(target);
                 if proxy
                     .send_event(WorkerEvent::ViewCreated { target, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            WorkerCommand::CloseView { tab } => {
+                let result = worker.close_view(tab);
+                if proxy
+                    .send_event(WorkerEvent::ViewClosed { tab, result })
                     .is_err()
                 {
                     return;
@@ -1184,6 +1378,23 @@ impl RenderWorker {
             return Err(format!(
                 "failed to load start document for tab {}: {error}",
                 target.tab().get()
+            ));
+        }
+        Ok(())
+    }
+
+    fn close_view(&mut self, tab: TabId) -> Result<(), String> {
+        self.ensure_active()?;
+        if tab == self.tab {
+            return Err(format!(
+                "cannot retire currently presented Rarog View for tab {}",
+                tab.get()
+            ));
+        }
+        if !self.engine.close_view(tab) {
+            return Err(format!(
+                "cannot retire missing Rarog View for tab {}",
+                tab.get()
             ));
         }
         Ok(())

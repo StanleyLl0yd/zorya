@@ -8,6 +8,7 @@ pub(crate) enum RunMode {
     Interactive,
     ExitAfterFirstPresentation,
     ExitAfterTabActivation,
+    ExitAfterTabClose,
 }
 
 #[cfg(target_os = "windows")]

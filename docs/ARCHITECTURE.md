@@ -73,7 +73,9 @@ The Windows shell now uses that contract for real keyboard-driven tabs. `Ctrl+T`
 
 Until native browser chrome owns a dedicated content cover, Windows uses a deliberately conservative neutral fallback: the whole native window is hidden and `Window::is_visible() == Some(false)` must be observed before the handoff marks Web content neutral or commits target chrome identity. The first target frame is allowed to present only while that neutral state remains in force; the window is shown again, and user focus restored when appropriate, only after the current target permit is accepted. Superseded target completions are ignored only while the window is still confirmed hidden and the presentation guard remains neutral. This is less polished than a content-only native cover, but it preserves the required security ordering without synthetic Web display lists, raw wgpu access or UI-thread waiting.
 
-The remaining issue #20 work is presentation-aware native close/invalidation and explicit rapid-supersession integration coverage. A later dedicated chrome cover may replace whole-window hiding for UX quality, but it must preserve the same identity/generation protocol.
+Windows now applies the same ordering to active-tab close. `Ctrl+W` keeps the window hidden while the source tab is removed from the product model, presents the fallback through a generation-bound target permit, and retires the closed source Rarog View only after the fallback frame is accepted. A late source completion after product removal is tolerated only while that exact source is tracked as retired and the native window is still confirmed neutral. The final tab is removed only after current-tab neutral confirmation, then the native window exits.
+
+The remaining issue #20 work is explicit rapid A → B → C supersession/invalidation integration coverage. A later dedicated chrome cover may replace whole-window hiding for UX quality, but it must preserve the same identity/generation protocol.
 
 ### Presentation-aware tab closing
 
@@ -83,7 +85,7 @@ The remaining issue #20 work is presentation-aware native close/invalidation and
 
 `TabPresentationHandoff::confirm_current_tab_neutral` exists for this neutral-only final-tab/window transition. It advances presentation generation and refuses to run while an activation remains unresolved. It records that a browser-owned neutral state has already been made observable; it does not itself create, draw or synthesize that state.
 
-These coordinator APIs make the product-side ordering testable, but they do not provide the native neutral cover required by issue #20. Platform code must not treat method invocation as proof that pixels have been hidden; only the reviewed native/compositor implementation may call the corresponding confirmation after the neutral state is actually established.
+These coordinator APIs make the product-side ordering testable; on Windows the platform now supplies the required observable neutral phase by hiding the native window and verifying `is_visible() == Some(false)` before calling the corresponding presentation confirmation. The coordinator method itself is still never treated as proof that pixels were hidden.
 
 ### Browser navigation model
 
