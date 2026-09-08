@@ -16,6 +16,9 @@ fn main() -> ExitCode {
         (Some(argument), None) if argument == "--native-tab-close-smoke" => {
             finish(zorya::run_native_tab_close_smoke())
         }
+        (Some(argument), None) if argument == "--native-tab-supersession-smoke" => {
+            finish(zorya::run_native_tab_supersession_smoke())
+        }
         (None, None) => finish(zorya::run()),
         _ => {
             eprintln!("zorya: unsupported command-line arguments");
