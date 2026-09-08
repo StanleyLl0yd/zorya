@@ -847,6 +847,52 @@ mod tests {
     }
 
     #[test]
+    fn unpublished_pending_file_is_ignored() {
+        let directory = TestDirectory::new();
+        let store = ProfileStore::open(directory.path()).expect("open profile");
+        let first = store
+            .save_settings(&snapshot_with("browser.mode", "first"))
+            .unwrap()
+            .into_snapshot();
+
+        let pending = store.settings_directory.join(format!(
+            "{PENDING_FILE_PREFIX}{:020}-{:010}-{:020}.tmp",
+            first.generation() + 1,
+            std::process::id(),
+            999_999u64
+        ));
+        fs::write(&pending, b"partial future write").unwrap();
+
+        let loaded = store.load_settings().unwrap();
+        assert_eq!(loaded.snapshot().generation(), first.generation());
+        assert!(loaded.recovery().is_none());
+
+        fs::remove_file(pending).unwrap();
+        let mut next = loaded.into_snapshot();
+        next.set("browser.mode", "second").unwrap();
+        let saved = store.save_settings(&next).unwrap().into_snapshot();
+        assert_eq!(saved.generation(), first.generation() + 1);
+    }
+
+    #[test]
+    fn successful_save_removes_its_pending_publication_file() {
+        let directory = TestDirectory::new();
+        let store = ProfileStore::open(directory.path()).expect("open profile");
+        let saved = store
+            .save_settings(&snapshot_with("browser.mode", "first"))
+            .unwrap();
+        assert!(saved.cleanup_warning().is_none());
+
+        let pending = fs::read_dir(&store.settings_directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with(PENDING_FILE_PREFIX))
+            .collect::<Vec<_>>();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
     fn corrupt_newest_generation_recovers_previous_explicitly() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
