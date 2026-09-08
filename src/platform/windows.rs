@@ -7,7 +7,8 @@ use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserWindowId, NavigationId,
     PresentationFramePermit, PresentationGeneration, PresentationHandoffError, TabActivationStart,
-    TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
+    TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit,
+    WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -77,6 +78,10 @@ enum WorkerEvent {
         target: AsyncTarget,
         result: Result<(), String>,
     },
+    ViewClosed {
+        tab: TabId,
+        result: Result<(), String>,
+    },
     FrameFinished {
         target: AsyncTarget,
         permit: PresentationFramePermit,
@@ -95,6 +100,9 @@ enum WorkerCommand {
     },
     CreateView {
         target: AsyncTarget,
+    },
+    CloseView {
+        tab: TabId,
     },
     Render {
         target: AsyncTarget,
@@ -153,6 +161,10 @@ impl WorkerHandle {
         self.send(WorkerCommand::CreateView { target })
     }
 
+    fn close_view(&self, tab: TabId) -> Result<(), String> {
+        self.send(WorkerCommand::CloseView { tab })
+    }
+
     fn render(
         &self,
         target: AsyncTarget,
@@ -206,6 +218,7 @@ struct NativeShell {
     pending_target_permit: Option<TargetFramePermit>,
     surface_recovery_permit: Option<PresentationFramePermit>,
     pending_tab_create: Option<PendingNativeTabCreate>,
+    pending_view_close: Option<TabId>,
     restore_focus_after_activation: bool,
     modifiers: ModifiersState,
     initial_navigation: Option<NavigationId>,
@@ -240,6 +253,7 @@ impl NativeShell {
             pending_target_permit: None,
             surface_recovery_permit: None,
             pending_tab_create: None,
+            pending_view_close: None,
             restore_focus_after_activation: false,
             modifiers: ModifiersState::empty(),
             initial_navigation: Some(initial_navigation),
@@ -914,6 +928,7 @@ impl NativeShell {
         self.pending_target_permit = None;
         self.surface_recovery_permit = None;
         self.pending_tab_create = None;
+        self.pending_view_close = None;
         self.worker_ready = false;
         if let Some(worker) = self.worker.take() {
             worker.shutdown();
@@ -1055,6 +1070,15 @@ fn render_worker_main(
                     return;
                 }
             }
+            WorkerCommand::CloseView { tab } => {
+                let result = worker.close_view(tab);
+                if proxy
+                    .send_event(WorkerEvent::ViewClosed { tab, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             WorkerCommand::Render {
                 target,
                 permit,
@@ -1184,6 +1208,23 @@ impl RenderWorker {
             return Err(format!(
                 "failed to load start document for tab {}: {error}",
                 target.tab().get()
+            ));
+        }
+        Ok(())
+    }
+
+    fn close_view(&mut self, tab: TabId) -> Result<(), String> {
+        self.ensure_active()?;
+        if tab == self.tab {
+            return Err(format!(
+                "cannot retire currently presented Rarog View for tab {}",
+                tab.get()
+            ));
+        }
+        if !self.engine.close_view(tab) {
+            return Err(format!(
+                "cannot retire missing Rarog View for tab {}",
+                tab.get()
             ));
         }
         Ok(())
