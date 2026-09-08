@@ -519,9 +519,6 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, ProfileStorageErro
     file.take((limit + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|error| io_error("read settings generation", path, error))?;
-    if bytes.len() > limit {
-        return Ok(Vec::new());
-    }
     Ok(bytes)
 }
 
@@ -561,7 +558,7 @@ enum DecodeError {
 }
 
 fn decode_settings(bytes: &[u8], expected_generation: u64) -> Result<SettingsSnapshot, DecodeError> {
-    if bytes.len() < 12 || bytes.len() > MAX_SETTINGS_RECORD_BYTES {
+    if bytes.len() < 12 {
         return Err(DecodeError::Corrupt);
     }
     if bytes[..8] != SETTINGS_MAGIC {
@@ -571,7 +568,7 @@ fn decode_settings(bytes: &[u8], expected_generation: u64) -> Result<SettingsSna
     if schema != SETTINGS_SCHEMA_VERSION {
         return Err(DecodeError::UnsupportedSchema(schema));
     }
-    if bytes.len() < MIN_RECORD_BYTES {
+    if bytes.len() < MIN_RECORD_BYTES || bytes.len() > MAX_SETTINGS_RECORD_BYTES {
         return Err(DecodeError::Corrupt);
     }
 
@@ -846,6 +843,22 @@ mod tests {
             loaded.recovery().unwrap().skipped_generations(),
             &[second.generation()]
         );
+    }
+
+    #[test]
+    fn oversized_newer_schema_still_blocks_fallback() {
+        let mut bytes = raw_record(
+            2,
+            SETTINGS_SCHEMA_VERSION + 1,
+            &[("browser.mode", "future")],
+        );
+        bytes.resize(MAX_SETTINGS_RECORD_BYTES + 1, 0);
+
+        assert!(matches!(
+            decode_settings(&bytes, 2),
+            Err(DecodeError::UnsupportedSchema(schema))
+                if schema == SETTINGS_SCHEMA_VERSION + 1
+        ));
     }
 
     #[test]
