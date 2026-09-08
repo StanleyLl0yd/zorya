@@ -10,20 +10,20 @@ rust-version = "1.85"
 publish = false
 
 [dependencies]
-rarog-compositor = { git = "https://github.com/StanleyLl0yd/rarog", rev = "50fd389a9e62d20f5caa7a686490acef665c7090" }
-rarog-engine = { git = "https://github.com/StanleyLl0yd/rarog", rev = "50fd389a9e62d20f5caa7a686490acef665c7090" }
-rarog-fetch = { git = "https://github.com/StanleyLl0yd/rarog", rev = "50fd389a9e62d20f5caa7a686490acef665c7090" }
-rarog-host = { git = "https://github.com/StanleyLl0yd/rarog", rev = "50fd389a9e62d20f5caa7a686490acef665c7090" }
-rarog-types = { git = "https://github.com/StanleyLl0yd/rarog", rev = "50fd389a9e62d20f5caa7a686490acef665c7090" }
-rarog-url = { git = "https://github.com/StanleyLl0yd/rarog", rev = "50fd389a9e62d20f5caa7a686490acef665c7090" }
+rarog-compositor = { git = "https://github.com/StanleyLl0yd/rarog", rev = "331689e7dff02a556d0b96530178def821056e20" }
+rarog-engine = { git = "https://github.com/StanleyLl0yd/rarog", rev = "331689e7dff02a556d0b96530178def821056e20" }
+rarog-fetch = { git = "https://github.com/StanleyLl0yd/rarog", rev = "331689e7dff02a556d0b96530178def821056e20" }
+rarog-host = { git = "https://github.com/StanleyLl0yd/rarog", rev = "331689e7dff02a556d0b96530178def821056e20" }
+rarog-types = { git = "https://github.com/StanleyLl0yd/rarog", rev = "331689e7dff02a556d0b96530178def821056e20" }
+rarog-url = { git = "https://github.com/StanleyLl0yd/rarog", rev = "331689e7dff02a556d0b96530178def821056e20" }
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls"] }
 tokio = { version = "=1.53.1", default-features = false, features = ["net", "rt", "sync", "time"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 png = { version = "0.17", default-features = false }
 pollster = { version = "=0.4.0", default-features = false }
-rarog-compositor-wgpu = { git = "https://github.com/StanleyLl0yd/rarog", rev = "50fd389a9e62d20f5caa7a686490acef665c7090" }
-rarog-platform-windows = { git = "https://github.com/StanleyLl0yd/rarog", rev = "50fd389a9e62d20f5caa7a686490acef665c7090" }
+rarog-compositor-wgpu = { git = "https://github.com/StanleyLl0yd/rarog", rev = "331689e7dff02a556d0b96530178def821056e20" }
+rarog-platform-windows = { git = "https://github.com/StanleyLl0yd/rarog", rev = "331689e7dff02a556d0b96530178def821056e20" }
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
 
 [lints.rust]
