@@ -5,6 +5,7 @@ mod async_lifecycle;
 mod branding;
 mod chrome;
 mod commands;
+mod http_transport;
 pub mod engine;
 mod navigation;
 mod platform;
