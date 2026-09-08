@@ -176,6 +176,19 @@ jobs:
             throw "release native shell smoke test failed with exit code $($process.ExitCode)"
           }
 
+      - name: Smoke test release real HTTP navigation
+        shell: pwsh
+        run: |
+          $executable = Join-Path "target/release" "zorya.exe"
+          $process = Start-Process -FilePath $executable -ArgumentList "--native-http-navigation-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "release HTTP navigation smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "release HTTP navigation smoke test failed with exit code $($process.ExitCode)"
+          }
+
       - name: Package Technical Preview
         shell: pwsh
         env:
@@ -226,6 +239,15 @@ jobs:
           }
           if ($process.ExitCode -ne 0) {
             throw "packaged native shell smoke test failed with exit code $($process.ExitCode)"
+          }
+
+          $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-http-navigation-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "packaged HTTP navigation smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "packaged HTTP navigation smoke test failed with exit code $($process.ExitCode)"
           }
 
           $buildInfoPath = Join-Path $packageRoot "BUILD-INFO.txt"

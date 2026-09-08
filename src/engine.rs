@@ -1,6 +1,16 @@
 use crate::TabId;
+use crate::http_transport::HttpTransport;
 use rarog_compositor::FrameCause;
-use rarog_engine::{BaseUrl, Engine, EngineError, FrameStatus, View, ViewOptions};
+use rarog_engine::{
+    BaseUrl, Engine, EngineError, FrameStatus, NavigationCompletion,
+    NavigationId as RarogNavigationId, NavigationRequest, NavigationStartOutcome, View,
+    ViewOptions,
+};
+use rarog_fetch::{NetworkCapability, NetworkPoll};
+use rarog_host::{
+    HostControlErrorKind, HostControlPlane, NavigationContextCapability, NavigationContextId,
+    NetworkOperationId,
+};
 use rarog_types::Size;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -58,6 +68,41 @@ impl EngineFrameRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineNavigationRequest {
+    tab: TabId,
+    view_generation: u64,
+    navigation_id: u64,
+}
+
+impl EngineNavigationRequest {
+    pub const fn tab(self) -> TabId {
+        self.tab
+    }
+
+    pub const fn view_generation(self) -> u64 {
+        self.view_generation
+    }
+
+    pub const fn navigation_id(self) -> u64 {
+        self.navigation_id
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EngineNavigationPoll {
+    Pending,
+    Committed {
+        location: String,
+        status: u16,
+        source_bytes: usize,
+    },
+    Failed {
+        message: String,
+    },
+    Stale,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineFrameStatus {
     Initial,
     ViewportRebuild,
@@ -106,12 +151,17 @@ impl EngineRenderedFrame<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineHostError {
     Engine(EngineError),
     DuplicateView(TabId),
     UnknownTab(TabId),
     ViewGenerationExhausted,
+    Host(String),
+    Navigation(String),
+    InconsistentNavigationState {
+        tab: TabId,
+    },
     StaleFrameRequest {
         tab: TabId,
         view_generation: u64,
@@ -132,6 +182,13 @@ impl fmt::Display for EngineHostError {
             Self::ViewGenerationExhausted => {
                 formatter.write_str("engine view generation space is exhausted")
             }
+            Self::Host(message) => write!(formatter, "Rarog Host authority failure: {message}"),
+            Self::Navigation(message) => write!(formatter, "Rarog navigation failure: {message}"),
+            Self::InconsistentNavigationState { tab } => write!(
+                formatter,
+                "engine/Host navigation state diverged for tab {}",
+                tab.get()
+            ),
             Self::StaleFrameRequest {
                 tab,
                 view_generation,
@@ -153,21 +210,40 @@ impl From<EngineError> for EngineHostError {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PendingHostedNavigation {
+    navigation: RarogNavigationId,
+    context: NavigationContextId,
+    capability: NavigationContextCapability,
+    operation: NetworkOperationId,
+}
+
 struct HostedView {
     generation: u64,
     view: View,
+    committed_context: Option<NavigationContextId>,
+    pending_navigation: Option<PendingHostedNavigation>,
 }
 
 pub struct EngineHost {
     engine: Engine,
+    host: HostControlPlane,
+    network: Option<Box<dyn NetworkCapability>>,
     views: BTreeMap<TabId, HostedView>,
     next_view_generation: u64,
 }
 
 impl EngineHost {
     pub fn new() -> Result<Self, EngineHostError> {
+        Self::with_network(None)
+    }
+
+    fn with_network(network: Option<Box<dyn NetworkCapability>>) -> Result<Self, EngineHostError> {
         Ok(Self {
             engine: Engine::builder().build()?,
+            host: HostControlPlane::with_default_limits()
+                .map_err(|error| EngineHostError::Host(error.to_string()))?,
+            network,
             views: BTreeMap::new(),
             next_view_generation: 1,
         })
@@ -180,12 +256,38 @@ impl EngineHost {
 
         let generation = self.allocate_view_generation()?;
         let view = self.engine.create_view(ViewOptions::default())?;
-        self.views.insert(tab, HostedView { generation, view });
+        self.views.insert(
+            tab,
+            HostedView {
+                generation,
+                view,
+                committed_context: None,
+                pending_navigation: None,
+            },
+        );
         Ok(())
     }
 
-    pub fn close_view(&mut self, tab: TabId) -> bool {
-        self.views.remove(&tab).is_some()
+    pub fn close_view(&mut self, tab: TabId) -> Result<bool, EngineHostError> {
+        let Some(hosted) = self.views.remove(&tab) else {
+            return Ok(false);
+        };
+
+        let mut cleanup_error = None;
+        if let Some(pending) = hosted.pending_navigation {
+            if let Err(error) = self.cancel_pending_authority(pending) {
+                cleanup_error = Some(error);
+            }
+        }
+        if let Some(context) = hosted.committed_context {
+            if let Err(error) = self.host.close_navigation_context(context) {
+                cleanup_error.get_or_insert_with(|| EngineHostError::Host(error.to_string()));
+            }
+        }
+        if let Some(error) = cleanup_error {
+            return Err(error);
+        }
+        Ok(true)
     }
 
     pub fn has_view(&self, tab: TabId) -> bool {
@@ -197,10 +299,239 @@ impl EngineHost {
         tab: TabId,
         source: impl Into<String>,
     ) -> Result<(), EngineHostError> {
-        self.view_mut(tab)?
-            .view
-            .load_html(source, BaseUrl::about_blank())?;
+        let (pending, committed) = {
+            let hosted = self.view_mut(tab)?;
+            hosted.view.load_html(source, BaseUrl::about_blank())?;
+            (
+                hosted.pending_navigation.take(),
+                hosted.committed_context.take(),
+            )
+        };
+
+        if let Some(pending) = pending {
+            self.cancel_pending_authority(pending)?;
+        }
+        if let Some(context) = committed {
+            self.host
+                .close_navigation_context(context)
+                .map_err(|error| EngineHostError::Host(error.to_string()))?;
+        }
         Ok(())
+    }
+
+    pub fn begin_navigation(
+        &mut self,
+        tab: TabId,
+        location: impl Into<String>,
+    ) -> Result<Option<EngineNavigationRequest>, EngineHostError> {
+        let location = location.into();
+        let (generation, outcome) = {
+            let hosted = self.view_mut(tab)?;
+            (
+                hosted.generation,
+                hosted
+                    .view
+                    .begin_navigation(NavigationRequest::new(BaseUrl::new(location)))
+                    .map_err(|error| EngineHostError::Navigation(error.to_string()))?,
+            )
+        };
+
+        let NavigationStartOutcome::Started(start) = outcome else {
+            return Ok(None);
+        };
+        let (transport, superseded) = start.into_parts();
+        let (navigation, network_request) = transport.into_parts();
+
+        if let Some(superseded) = superseded {
+            let previous = self.view_mut(tab)?.pending_navigation.take();
+            if previous.map(|pending| pending.navigation) != Some(superseded) {
+                let _ = self.view_mut(tab)?.view.cancel_navigation(navigation);
+                return Err(EngineHostError::InconsistentNavigationState { tab });
+            }
+            if let Some(previous) = previous {
+                if let Err(error) = self.cancel_pending_authority(previous) {
+                    let _ = self.view_mut(tab)?.view.cancel_navigation(navigation);
+                    return Err(error);
+                }
+            }
+        } else if self.view_mut(tab)?.pending_navigation.is_some() {
+            let _ = self.view_mut(tab)?.view.cancel_navigation(navigation);
+            return Err(EngineHostError::InconsistentNavigationState { tab });
+        }
+
+        let context = match self.host.open_navigation_context(network_request.url()) {
+            Ok(context) => context.context(),
+            Err(error) => {
+                let _ = self.view_mut(tab)?.view.cancel_navigation(navigation);
+                return Err(EngineHostError::Host(error.to_string()));
+            }
+        };
+        let capability = match self
+            .host
+            .grant_navigation_context_network_capability(context)
+        {
+            Ok(capability) => capability,
+            Err(error) => {
+                let _ = self.host.close_navigation_context(context);
+                let _ = self.view_mut(tab)?.view.cancel_navigation(navigation);
+                return Err(EngineHostError::Host(error.to_string()));
+            }
+        };
+
+        if self.network.is_none() {
+            match HttpTransport::new() {
+                Ok(network) => self.network = Some(Box::new(network)),
+                Err(error) => {
+                    let _ = self.host.close_navigation_context(context);
+                    let _ = self.view_mut(tab)?.view.cancel_navigation(navigation);
+                    return Err(EngineHostError::Navigation(error.to_string()));
+                }
+            }
+        }
+
+        let operation = {
+            let network = self
+                .network
+                .as_deref_mut()
+                .expect("HTTP transport initialized before Host operation");
+            match self.host.start_navigation_context_network_operation(
+                capability,
+                network_request,
+                network,
+            ) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    let _ = self.host.close_navigation_context(context);
+                    let _ = self.view_mut(tab)?.view.cancel_navigation(navigation);
+                    return Err(EngineHostError::Host(error.to_string()));
+                }
+            }
+        };
+
+        self.view_mut(tab)?.pending_navigation = Some(PendingHostedNavigation {
+            navigation,
+            context,
+            capability,
+            operation,
+        });
+
+        Ok(Some(EngineNavigationRequest {
+            tab,
+            view_generation: generation,
+            navigation_id: navigation.get(),
+        }))
+    }
+
+    pub fn poll_navigation(
+        &mut self,
+        request: EngineNavigationRequest,
+    ) -> Result<EngineNavigationPoll, EngineHostError> {
+        let Some(pending) = self.pending_navigation_for(request)? else {
+            return Ok(EngineNavigationPoll::Stale);
+        };
+        let Some(network) = self.network.as_deref_mut() else {
+            return Err(EngineHostError::InconsistentNavigationState { tab: request.tab });
+        };
+
+        let poll = self.host.poll_navigation_context_network_operation(
+            pending.capability,
+            pending.operation,
+            network,
+        );
+        match poll {
+            Ok(NetworkPoll::Pending) => Ok(EngineNavigationPoll::Pending),
+            Ok(NetworkPoll::Complete(response)) => {
+                if let Err(error) = self
+                    .host
+                    .revoke_navigation_context_capability(pending.capability)
+                {
+                    self.abort_pending_navigation(request, pending);
+                    return Err(EngineHostError::Host(error.to_string()));
+                }
+
+                let completion = self
+                    .view_mut(request.tab)?
+                    .view
+                    .complete_navigation(pending.navigation, response);
+                let removed = self.take_pending_navigation(request)?;
+                if removed.map(|state| state.navigation) != Some(pending.navigation) {
+                    return Err(EngineHostError::InconsistentNavigationState { tab: request.tab });
+                }
+
+                match completion {
+                    NavigationCompletion::Committed(commit) => {
+                        let previous = {
+                            let hosted = self.view_mut(request.tab)?;
+                            hosted.committed_context.replace(pending.context)
+                        };
+                        if let Some(previous) = previous {
+                            self.host
+                                .close_navigation_context(previous)
+                                .map_err(|error| EngineHostError::Host(error.to_string()))?;
+                        }
+                        Ok(EngineNavigationPoll::Committed {
+                            location: commit.url().as_str().to_owned(),
+                            status: commit.status(),
+                            source_bytes: commit.source_bytes(),
+                        })
+                    }
+                    NavigationCompletion::Failed(error) => {
+                        self.host
+                            .close_navigation_context(pending.context)
+                            .map_err(|close| EngineHostError::Host(close.to_string()))?;
+                        Ok(EngineNavigationPoll::Failed {
+                            message: error.to_string(),
+                        })
+                    }
+                    NavigationCompletion::Stale => {
+                        self.host
+                            .close_navigation_context(pending.context)
+                            .map_err(|error| EngineHostError::Host(error.to_string()))?;
+                        Ok(EngineNavigationPoll::Stale)
+                    }
+                }
+            }
+            Err(error) => {
+                let _ = self
+                    .view_mut(request.tab)?
+                    .view
+                    .cancel_navigation(pending.navigation);
+                let removed = self.take_pending_navigation(request)?;
+                if removed.map(|state| state.navigation) != Some(pending.navigation) {
+                    return Err(EngineHostError::InconsistentNavigationState { tab: request.tab });
+                }
+                self.host
+                    .close_navigation_context(pending.context)
+                    .map_err(|close| EngineHostError::Host(close.to_string()))?;
+                if matches!(error.kind, HostControlErrorKind::Fetch(_)) {
+                    Ok(EngineNavigationPoll::Failed {
+                        message: error.to_string(),
+                    })
+                } else {
+                    Err(EngineHostError::Host(error.to_string()))
+                }
+            }
+        }
+    }
+
+    pub fn cancel_navigation(
+        &mut self,
+        request: EngineNavigationRequest,
+    ) -> Result<bool, EngineHostError> {
+        let Some(pending) = self.pending_navigation_for(request)? else {
+            return Ok(false);
+        };
+
+        let _ = self
+            .view_mut(request.tab)?
+            .view
+            .cancel_navigation(pending.navigation);
+        let removed = self.take_pending_navigation(request)?;
+        if removed.map(|state| state.navigation) != Some(pending.navigation) {
+            return Err(EngineHostError::InconsistentNavigationState { tab: request.tab });
+        }
+        self.cancel_pending_authority(pending)?;
+        Ok(true)
     }
 
     pub fn request_frame(
@@ -255,6 +586,76 @@ impl EngineHost {
             .active_frame_request()
             .expect("validated frame request remains active");
         hosted.view.discard_frame_request(active)?;
+        Ok(())
+    }
+
+    fn pending_navigation_for(
+        &self,
+        request: EngineNavigationRequest,
+    ) -> Result<Option<PendingHostedNavigation>, EngineHostError> {
+        let hosted = self
+            .views
+            .get(&request.tab)
+            .ok_or(EngineHostError::UnknownTab(request.tab))?;
+        if hosted.generation != request.view_generation {
+            return Ok(None);
+        }
+        Ok(hosted
+            .pending_navigation
+            .filter(|pending| pending.navigation.get() == request.navigation_id))
+    }
+
+    fn take_pending_navigation(
+        &mut self,
+        request: EngineNavigationRequest,
+    ) -> Result<Option<PendingHostedNavigation>, EngineHostError> {
+        let hosted = self.view_mut(request.tab)?;
+        if hosted.generation != request.view_generation
+            || !hosted
+                .pending_navigation
+                .is_some_and(|pending| pending.navigation.get() == request.navigation_id)
+        {
+            return Ok(None);
+        }
+        Ok(hosted.pending_navigation.take())
+    }
+
+    fn abort_pending_navigation(
+        &mut self,
+        request: EngineNavigationRequest,
+        pending: PendingHostedNavigation,
+    ) {
+        let _ = self
+            .view_mut(request.tab)
+            .map(|hosted| hosted.view.cancel_navigation(pending.navigation));
+        let _ = self.take_pending_navigation(request);
+        let _ = self.host.close_navigation_context(pending.context);
+    }
+
+    fn cancel_pending_authority(
+        &mut self,
+        pending: PendingHostedNavigation,
+    ) -> Result<(), EngineHostError> {
+        let cancel_error = match self.network.as_deref_mut() {
+            Some(network) => self
+                .host
+                .cancel_navigation_context_network_operation(
+                    pending.capability,
+                    pending.operation,
+                    network,
+                )
+                .err()
+                .map(|error| error.to_string()),
+            None => Some("pending network authority exists without a transport".into()),
+        };
+        let close_result = self.host.close_navigation_context(pending.context);
+
+        if let Err(error) = close_result {
+            return Err(EngineHostError::Host(error.to_string()));
+        }
+        if let Some(error) = cancel_error {
+            return Err(EngineHostError::Host(error));
+        }
         Ok(())
     }
 
@@ -321,7 +722,7 @@ mod tests {
             host.create_view(tab),
             Err(EngineHostError::DuplicateView(tab))
         );
-        assert!(host.close_view(tab));
+        assert!(host.close_view(tab).expect("close view"));
         assert!(!host.has_view(tab));
     }
 
@@ -360,7 +761,7 @@ mod tests {
             .expect("first frame")
             .expect("first request");
 
-        assert!(host.close_view(tab));
+        assert!(host.close_view(tab).expect("close view"));
         host.create_view(tab).expect("replacement view");
         host.load_local_html(tab, "<p>replacement</p>")
             .expect("replacement document");
@@ -441,7 +842,7 @@ mod tests {
             assert_eq!(frame.status(), EngineFrameStatus::Initial);
         }
         host.complete_frame(first).expect("complete first");
-        assert!(host.close_view(first_tab));
+        assert!(host.close_view(first_tab).expect("close first view"));
 
         {
             let frame = host
@@ -498,6 +899,326 @@ mod tests {
         host.request_frame(tab, EngineFrameCause::Resize)
             .expect("schedule resize");
         assert!(host.begin_frame(tab).expect("begin resize frame").is_some());
+    }
+
+    use rarog_fetch::{FetchError, FetchResponse, HeaderList, NetworkRequest, NetworkTicket};
+    use std::num::NonZeroU64;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct FixtureNetworkStats {
+        starts: usize,
+        polls: usize,
+        cancels: usize,
+    }
+
+    struct FixtureNetwork {
+        next_ticket: u64,
+        requests: BTreeMap<NetworkTicket, NetworkRequest>,
+        fail_on_poll: Option<usize>,
+        fail_on_cancel: bool,
+        stats: Arc<Mutex<FixtureNetworkStats>>,
+    }
+
+    impl FixtureNetwork {
+        fn new(
+            fail_on_poll: Option<usize>,
+            fail_on_cancel: bool,
+            stats: Arc<Mutex<FixtureNetworkStats>>,
+        ) -> Self {
+            Self {
+                next_ticket: 1,
+                requests: BTreeMap::new(),
+                fail_on_poll,
+                fail_on_cancel,
+                stats,
+            }
+        }
+    }
+
+    impl NetworkCapability for FixtureNetwork {
+        fn start(&mut self, request: NetworkRequest) -> Result<NetworkTicket, FetchError> {
+            let ticket = NetworkTicket::new(NonZeroU64::new(self.next_ticket).expect("ticket"));
+            self.next_ticket += 1;
+            self.requests.insert(ticket, request);
+            self.stats.lock().expect("stats").starts += 1;
+            Ok(ticket)
+        }
+
+        fn poll(&mut self, ticket: NetworkTicket) -> Result<NetworkPoll, FetchError> {
+            let mut stats = self.stats.lock().expect("stats");
+            stats.polls += 1;
+            let poll_number = stats.polls;
+            drop(stats);
+
+            if self.fail_on_poll == Some(poll_number) {
+                self.requests.remove(&ticket);
+                return Err(FetchError::network("fixture network failure"));
+            }
+
+            let request = self
+                .requests
+                .remove(&ticket)
+                .ok_or_else(|| FetchError::network("unknown fixture ticket"))?;
+            let mut headers = HeaderList::default();
+            headers
+                .append("content-type", "text/html; charset=utf-8")
+                .expect("fixture content type");
+            FetchResponse::try_new(
+                Some(request.url().clone()),
+                200,
+                headers,
+                b"<main>Zorya HTTP</main>".to_vec(),
+                request.max_response_body_bytes(),
+            )
+            .map(NetworkPoll::Complete)
+        }
+
+        fn cancel(&mut self, ticket: NetworkTicket) -> Result<(), FetchError> {
+            self.requests.remove(&ticket);
+            self.stats.lock().expect("stats").cancels += 1;
+            if self.fail_on_cancel {
+                return Err(FetchError::network("fixture cancellation failure"));
+            }
+            Ok(())
+        }
+    }
+
+    fn engine_host_with_fixture(
+        fail_on_poll: Option<usize>,
+    ) -> (EngineHost, Arc<Mutex<FixtureNetworkStats>>) {
+        let stats = Arc::new(Mutex::new(FixtureNetworkStats::default()));
+        let network = FixtureNetwork::new(fail_on_poll, false, Arc::clone(&stats));
+        let host = EngineHost::with_network(Some(Box::new(network))).expect("engine host");
+        (host, stats)
+    }
+
+    #[test]
+    fn successful_remote_navigation_promotes_target_before_retiring_committed_context() {
+        let tab = initial_tab();
+        let (mut host, _) = engine_host_with_fixture(None);
+        host.create_view(tab).expect("view");
+
+        let first = host
+            .begin_navigation(tab, "https://first.example/")
+            .expect("begin first")
+            .expect("first forwarded");
+        assert_eq!(host.host.active_navigation_contexts(), 1);
+        assert!(matches!(
+            host.poll_navigation(first).expect("poll first"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let first_context = host
+            .views
+            .get(&tab)
+            .and_then(|hosted| hosted.committed_context)
+            .expect("first committed context");
+
+        let second = host
+            .begin_navigation(tab, "https://second.example/")
+            .expect("begin second")
+            .expect("second forwarded");
+        assert_eq!(host.host.active_navigation_contexts(), 2);
+        assert_eq!(
+            host.views
+                .get(&tab)
+                .and_then(|hosted| hosted.committed_context),
+            Some(first_context)
+        );
+
+        assert!(matches!(
+            host.poll_navigation(second).expect("poll second"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let second_context = host
+            .views
+            .get(&tab)
+            .and_then(|hosted| hosted.committed_context)
+            .expect("second committed context");
+        assert_ne!(second_context, first_context);
+        assert_eq!(host.host.active_navigation_contexts(), 1);
+        assert!(host.host.navigation_context(first_context).is_err());
+        assert!(host.host.navigation_context(second_context).is_ok());
+    }
+
+    #[test]
+    fn network_failure_closes_only_pending_target_authority() {
+        let tab = initial_tab();
+        let (mut host, _) = engine_host_with_fixture(Some(2));
+        host.create_view(tab).expect("view");
+
+        let committed = host
+            .begin_navigation(tab, "https://committed.example/")
+            .expect("begin committed")
+            .expect("forwarded");
+        assert!(matches!(
+            host.poll_navigation(committed).expect("commit"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let committed_context = host
+            .views
+            .get(&tab)
+            .and_then(|hosted| hosted.committed_context)
+            .expect("committed context");
+
+        let failing = host
+            .begin_navigation(tab, "https://failing.example/")
+            .expect("begin failing")
+            .expect("forwarded");
+        assert_eq!(host.host.active_navigation_contexts(), 2);
+        assert!(matches!(
+            host.poll_navigation(failing).expect("network failure"),
+            EngineNavigationPoll::Failed { .. }
+        ));
+        assert_eq!(host.host.active_navigation_contexts(), 1);
+        assert_eq!(
+            host.views
+                .get(&tab)
+                .and_then(|hosted| hosted.committed_context),
+            Some(committed_context)
+        );
+        assert!(host.host.navigation_context(committed_context).is_ok());
+    }
+
+    #[test]
+    fn newer_remote_navigation_cancels_and_closes_superseded_pending_authority() {
+        let tab = initial_tab();
+        let (mut host, stats) = engine_host_with_fixture(None);
+        host.create_view(tab).expect("view");
+
+        let stale = host
+            .begin_navigation(tab, "https://stale.example/")
+            .expect("begin stale")
+            .expect("forwarded");
+        let current = host
+            .begin_navigation(tab, "https://current.example/")
+            .expect("begin current")
+            .expect("forwarded");
+
+        assert!(current.navigation_id() > stale.navigation_id());
+        assert_eq!(host.host.active_navigation_contexts(), 1);
+        assert_eq!(stats.lock().expect("stats").cancels, 1);
+        assert_eq!(
+            host.poll_navigation(stale).expect("stale poll"),
+            EngineNavigationPoll::Stale
+        );
+        assert!(matches!(
+            host.poll_navigation(current).expect("current poll"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+    }
+
+    #[test]
+    fn supersession_cleanup_failure_cancels_new_rarog_navigation() {
+        let tab = initial_tab();
+        let stats = Arc::new(Mutex::new(FixtureNetworkStats::default()));
+        let network = FixtureNetwork::new(None, true, Arc::clone(&stats));
+        let mut host = EngineHost::with_network(Some(Box::new(network))).expect("engine host");
+        host.create_view(tab).expect("view");
+
+        host.begin_navigation(tab, "https://stale.example/")
+            .expect("begin stale")
+            .expect("forwarded");
+        assert!(matches!(
+            host.begin_navigation(tab, "https://cleanup-fails.example/"),
+            Err(EngineHostError::Host(_))
+        ));
+
+        let current = host
+            .begin_navigation(tab, "https://current.example/")
+            .expect("new Rarog navigation was cancelled after cleanup failure")
+            .expect("forwarded");
+        assert!(current.navigation_id() > 0);
+    }
+
+    #[test]
+    fn close_view_attempts_committed_cleanup_after_pending_cleanup_failure() {
+        let tab = initial_tab();
+        let stats = Arc::new(Mutex::new(FixtureNetworkStats::default()));
+        let network = FixtureNetwork::new(None, true, Arc::clone(&stats));
+        let mut host = EngineHost::with_network(Some(Box::new(network))).expect("engine host");
+        host.create_view(tab).expect("view");
+
+        let committed = host
+            .begin_navigation(tab, "https://committed.example/")
+            .expect("begin committed")
+            .expect("forwarded");
+        assert!(matches!(
+            host.poll_navigation(committed).expect("commit"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let committed_context = host
+            .views
+            .get(&tab)
+            .and_then(|hosted| hosted.committed_context)
+            .expect("committed context");
+
+        host.begin_navigation(tab, "https://pending.example/")
+            .expect("begin pending")
+            .expect("forwarded");
+        assert!(matches!(
+            host.close_view(tab),
+            Err(EngineHostError::Host(_))
+        ));
+        assert!(host.host.navigation_context(committed_context).is_err());
+    }
+
+    #[test]
+    fn cancellation_without_transport_still_closes_pending_context() {
+        let tab = initial_tab();
+        let stats = Arc::new(Mutex::new(FixtureNetworkStats::default()));
+        let network = FixtureNetwork::new(None, false, Arc::clone(&stats));
+        let mut host = EngineHost::with_network(Some(Box::new(network))).expect("engine host");
+        host.create_view(tab).expect("view");
+
+        let request = host
+            .begin_navigation(tab, "https://pending.example/")
+            .expect("begin")
+            .expect("forwarded");
+        let context = host
+            .views
+            .get(&tab)
+            .and_then(|hosted| hosted.pending_navigation)
+            .expect("pending authority")
+            .context;
+        host.network = None;
+
+        assert!(matches!(
+            host.cancel_navigation(request),
+            Err(EngineHostError::Host(_))
+        ));
+        assert!(host.host.navigation_context(context).is_err());
+    }
+
+    #[test]
+    fn cancelling_remote_navigation_keeps_committed_authority_alive() {
+        let tab = initial_tab();
+        let (mut host, stats) = engine_host_with_fixture(None);
+        host.create_view(tab).expect("view");
+
+        let committed = host
+            .begin_navigation(tab, "https://committed.example/")
+            .expect("begin committed")
+            .expect("forwarded");
+        assert!(matches!(
+            host.poll_navigation(committed).expect("commit"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let committed_context = host
+            .views
+            .get(&tab)
+            .and_then(|hosted| hosted.committed_context)
+            .expect("committed context");
+
+        let pending = host
+            .begin_navigation(tab, "https://pending.example/")
+            .expect("begin pending")
+            .expect("forwarded");
+        assert!(host.cancel_navigation(pending).expect("cancel"));
+        assert_eq!(host.host.active_navigation_contexts(), 1);
+        assert_eq!(stats.lock().expect("stats").cancels, 1);
+        assert!(host.host.navigation_context(committed_context).is_ok());
+        assert!(!host.cancel_navigation(pending).expect("stale cancel"));
     }
 
     #[test]

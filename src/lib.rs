@@ -6,6 +6,7 @@ mod branding;
 mod chrome;
 mod commands;
 pub mod engine;
+mod http_transport;
 mod navigation;
 mod platform;
 mod presentation_handoff;
@@ -62,4 +63,9 @@ pub fn run_native_tab_close_smoke() -> Result<(), Box<dyn std::error::Error>> {
 #[doc(hidden)]
 pub fn run_native_tab_supersession_smoke() -> Result<(), Box<dyn std::error::Error>> {
     platform::run(platform::RunMode::ExitAfterRapidTabActivation)
+}
+
+#[doc(hidden)]
+pub fn run_native_http_navigation_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    platform::run(platform::RunMode::ExitAfterRealHttpNavigation)
 }
