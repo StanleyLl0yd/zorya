@@ -1116,8 +1116,7 @@ mod tests {
         let tab = initial_tab();
         let stats = Arc::new(Mutex::new(FixtureNetworkStats::default()));
         let network = FixtureNetwork::new(None, true, Arc::clone(&stats));
-        let mut host =
-            EngineHost::with_network(Some(Box::new(network))).expect("engine host");
+        let mut host = EngineHost::with_network(Some(Box::new(network))).expect("engine host");
         host.create_view(tab).expect("view");
 
         host.begin_navigation(tab, "https://stale.example/")
@@ -1140,8 +1139,7 @@ mod tests {
         let tab = initial_tab();
         let stats = Arc::new(Mutex::new(FixtureNetworkStats::default()));
         let network = FixtureNetwork::new(None, true, Arc::clone(&stats));
-        let mut host =
-            EngineHost::with_network(Some(Box::new(network))).expect("engine host");
+        let mut host = EngineHost::with_network(Some(Box::new(network))).expect("engine host");
         host.create_view(tab).expect("view");
 
         let committed = host
@@ -1161,7 +1159,10 @@ mod tests {
         host.begin_navigation(tab, "https://pending.example/")
             .expect("begin pending")
             .expect("forwarded");
-        assert!(matches!(host.close_view(tab), Err(EngineHostError::Host(_))));
+        assert!(matches!(
+            host.close_view(tab),
+            Err(EngineHostError::Host(_))
+        ));
         assert!(host.host.navigation_context(committed_context).is_err());
     }
 
