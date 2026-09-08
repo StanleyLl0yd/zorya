@@ -1503,7 +1503,7 @@ impl RenderWorker {
             )
         })?;
         if let Err(error) = self.engine.load_local_html(target.tab(), START_PAGE) {
-            self.engine.close_view(target.tab());
+            let _ = self.engine.close_view(target.tab());
             return Err(format!(
                 "failed to load start document for tab {}: {error}",
                 target.tab().get()
@@ -1520,7 +1520,11 @@ impl RenderWorker {
                 tab.get()
             ));
         }
-        if !self.engine.close_view(tab) {
+        if !self
+            .engine
+            .close_view(tab)
+            .map_err(|error| format!("failed to retire Rarog View for tab {}: {error}", tab.get()))?
+        {
             return Err(format!(
                 "cannot retire missing Rarog View for tab {}",
                 tab.get()
