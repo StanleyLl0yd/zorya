@@ -213,7 +213,7 @@ fn build_client() -> Result<Client, reqwest::Error> {
 
 async fn run_request(
     client: Client,
-    mut command: TransportCommand,
+    command: TransportCommand,
     completions: mpsc::Sender<TransportCompletion>,
 ) {
     if *command.cancellation.borrow() {
