@@ -16,6 +16,7 @@ const SETTINGS_FILE_PREFIX: &str = "settings-";
 const SETTINGS_FILE_SUFFIX: &str = ".bin";
 const SETTINGS_GENERATION_DIGITS: usize = 20;
 const SETTINGS_RETAINED_GENERATIONS: usize = 3;
+const MAX_SETTINGS_DIRECTORY_ENTRIES: usize = 128;
 const MAX_DISCOVERED_GENERATIONS: usize = 64;
 const CHECKSUM_BYTES: usize = 8;
 const MIN_RECORD_BYTES: usize = 8 + 4 + 8 + 4 + CHECKSUM_BYTES;
@@ -154,6 +155,10 @@ pub enum ProfileStorageError {
         bytes: usize,
         limit: usize,
     },
+    SettingsDirectoryEntryLimitExceeded {
+        found: usize,
+        limit: usize,
+    },
     GenerationFileLimitExceeded {
         found: usize,
         limit: usize,
@@ -201,9 +206,13 @@ impl fmt::Display for ProfileStorageError {
                 formatter,
                 "profile settings record requires {bytes} bytes; limit is {limit}"
             ),
+            Self::SettingsDirectoryEntryLimitExceeded { found, limit } => write!(
+                formatter,
+                "profile settings directory contains {found} entries; scan limit is {limit}"
+            ),
             Self::GenerationFileLimitExceeded { found, limit } => write!(
                 formatter,
-                "profile settings directory contains {found} generations; scan limit is {limit}"
+                "profile settings directory contains {found} generations; generation limit is {limit}"
             ),
             Self::UnsupportedSettingsSchema { generation, schema } => write!(
                 formatter,
@@ -355,7 +364,15 @@ impl ProfileStore {
             )
         })?;
         let mut generations = Vec::new();
+        let mut entry_count = 0usize;
         for entry in entries {
+            entry_count = entry_count.saturating_add(1);
+            if entry_count > MAX_SETTINGS_DIRECTORY_ENTRIES {
+                return Err(ProfileStorageError::SettingsDirectoryEntryLimitExceeded {
+                    found: entry_count,
+                    limit: MAX_SETTINGS_DIRECTORY_ENTRIES,
+                });
+            }
             let entry = entry.map_err(|error| {
                 io_error(
                     "read settings directory entry",
@@ -926,6 +943,29 @@ mod tests {
 
         assert_eq!(saved.generation(), corrupt_generation + 1);
         assert_eq!(saved.get("browser.mode"), Some("third"));
+    }
+
+    #[test]
+    fn settings_directory_scan_is_bounded_even_for_unrelated_files() {
+        let directory = TestDirectory::new();
+        let store = ProfileStore::open(directory.path()).expect("open profile");
+
+        for index in 0..=MAX_SETTINGS_DIRECTORY_ENTRIES {
+            fs::write(
+                store.settings_directory.join(format!("unrelated-{index:03}.tmp")),
+                b"x",
+            )
+            .unwrap();
+        }
+
+        assert!(matches!(
+            store.load_settings(),
+            Err(ProfileStorageError::SettingsDirectoryEntryLimitExceeded {
+                found,
+                limit
+            }) if found == MAX_SETTINGS_DIRECTORY_ENTRIES + 1
+                && limit == MAX_SETTINGS_DIRECTORY_ENTRIES
+        ));
     }
 
     #[test]
