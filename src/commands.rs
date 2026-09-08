@@ -1,10 +1,12 @@
 use crate::app::{BrowserApp, BrowserModelError, BrowserWindowId, TabId};
 use crate::navigation::{NavigationIntent, NavigationStart};
 use crate::tab_activation::{TabActivationStart, TabCycleDirection};
+use crate::tab_close::TabCloseStart;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrowserCommand {
     NewTab,
+    CloseTab,
     FocusAddressBar,
     Back,
     Forward,
@@ -15,6 +17,7 @@ pub enum BrowserCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowserCommandEffect {
     TabCreated(TabId),
+    TabCloseStarted(TabCloseStart),
     AddressBarEditStarted(TabId),
     NavigationStarted(NavigationStart),
     NavigationStopped(NavigationIntent),
@@ -51,6 +54,9 @@ impl BrowserApp {
             BrowserCommand::NewTab => {
                 unreachable!("new-tab commands are handled before active-tab routing")
             }
+            BrowserCommand::CloseTab => self
+                .begin_tab_close(window, active_tab)
+                .map(BrowserCommandEffect::TabCloseStarted),
             BrowserCommand::FocusAddressBar => {
                 let edited_tab = self
                     .begin_address_bar_edit(window)?
@@ -150,6 +156,32 @@ mod tests {
         assert_eq!(
             app.window(window).and_then(|window| window.active_tab_id()),
             Some(tab)
+        );
+    }
+
+    #[test]
+    fn close_tab_command_starts_presentation_aware_active_close() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let first = app.create_tab(window).expect("first");
+        let second = app.create_tab(window).expect("second");
+
+        let effect = app
+            .dispatch_browser_command(window, BrowserCommand::CloseTab)
+            .expect("close command");
+        let BrowserCommandEffect::TabCloseStarted(TabCloseStart::ActiveWithFallback(close)) = effect
+        else {
+            panic!("active close should start fallback handoff");
+        };
+
+        assert_eq!(close.closing_tab(), first);
+        assert_eq!(close.fallback_tab(), second);
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(browser_window.active_tab_id(), Some(first));
+        assert!(browser_window.tab(first).is_some());
+        assert_eq!(
+            browser_window.pending_tab_activation(),
+            Some(close.activation().intent())
         );
     }
 
