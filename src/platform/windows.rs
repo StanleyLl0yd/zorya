@@ -595,6 +595,81 @@ impl NativeShell {
         Ok(())
     }
 
+    fn start_rapid_tab_activation_smoke(&mut self) -> Result<(), String> {
+        if self.run_mode != RunMode::ExitAfterRapidTabActivation {
+            return Err("rapid activation smoke started outside its run mode".into());
+        }
+        if self.rapid_smoke_tabs.len() != 2 {
+            return Err(format!(
+                "rapid activation smoke requires two background tabs; found {}",
+                self.rapid_smoke_tabs.len()
+            ));
+        }
+
+        let source = self.tab;
+        let first = self.rapid_smoke_tabs[0];
+        let second = self.rapid_smoke_tabs[1];
+        if source == first || source == second || first == second {
+            return Err("rapid activation smoke tab identities are not distinct".into());
+        }
+
+        let first_start = self
+            .browser
+            .begin_tab_activation(self.browser_window, first)
+            .map_err(|error| format!("failed to begin first rapid activation: {error}"))?;
+        self.begin_native_tab_activation(first_start)?;
+
+        let first_frame = self
+            .pending_frame
+            .current()
+            .ok_or_else(|| "first rapid target frame was not dispatched".to_string())?;
+        if first_frame.tab() != first {
+            return Err(format!(
+                "first rapid target frame belongs to tab {} instead of {}",
+                first_frame.tab().get(),
+                first.get()
+            ));
+        }
+        if self.pending_target_permit.is_some() {
+            return Err("first rapid activation unexpectedly remained queued".into());
+        }
+
+        let second_start = self
+            .browser
+            .begin_tab_activation(self.browser_window, second)
+            .map_err(|error| format!("failed to begin second rapid activation: {error}"))?;
+        self.begin_native_tab_activation(second_start)?;
+
+        if self.pending_frame.current() != Some(first_frame) {
+            return Err("second rapid activation replaced the already in-flight B frame".into());
+        }
+        let queued = self
+            .pending_target_permit
+            .ok_or_else(|| "second rapid target permit was not queued".to_string())?;
+        if queued.tab() != second {
+            return Err(format!(
+                "queued rapid target permit belongs to tab {} instead of {}",
+                queued.tab().get(),
+                second.get()
+            ));
+        }
+
+        let active = self
+            .browser
+            .window(self.browser_window)
+            .and_then(|window| window.active_tab_id());
+        if active != Some(second)
+            || self.tab != second
+            || self.presentation.represented_tab() != second
+            || self.presentation.content() != WebContentPresentation::Neutral
+            || !self.native_neutral_confirmed()
+        {
+            return Err("rapid supersession did not leave only C committed over neutral content".into());
+        }
+
+        Ok(())
+    }
+
     fn start_close_tab(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         if !self.worker_ready
             || self.pending_tab_create.is_some()
@@ -977,6 +1052,28 @@ impl NativeShell {
                                 self.shutdown(event_loop);
                                 return;
                             }
+                            if self.run_mode == RunMode::ExitAfterRapidTabActivation {
+                                let expected = self.rapid_smoke_tabs.last().copied();
+                                let active = self
+                                    .browser
+                                    .window(self.browser_window)
+                                    .and_then(|window| window.active_tab_id());
+                                if expected != Some(self.tab)
+                                    || active != Some(self.tab)
+                                    || self.presentation.represented_tab() != self.tab
+                                    || self.presentation.content()
+                                        != WebContentPresentation::Tab(self.tab)
+                                    || self.pending_target_permit.is_some()
+                                {
+                                    self.fail(
+                                        event_loop,
+                                        "rapid supersession did not finish with C as the sole presented target",
+                                    );
+                                    return;
+                                }
+                                self.shutdown(event_loop);
+                                return;
+                            }
                             if let Some(retired) = self.pending_view_close {
                                 let close_result = self
                                     .worker
@@ -1017,6 +1114,12 @@ impl NativeShell {
                                 self.start_close_tab(event_loop)
                             };
                             if let Err(error) = result {
+                                self.fail(event_loop, error);
+                            }
+                        } else if self.run_mode == RunMode::ExitAfterRapidTabActivation
+                            && self.rapid_smoke_tabs.is_empty()
+                        {
+                            if let Err(error) = self.start_new_tab_with_activation(false) {
                                 self.fail(event_loop, error);
                             }
                         } else if self.needs_redraw {
