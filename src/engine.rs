@@ -644,12 +644,9 @@ impl EngineHost {
                     pending.operation,
                     network,
                 )
-                .err(),
-            None => {
-                return Err(EngineHostError::Host(
-                    "pending network authority exists without a transport".into(),
-                ));
-            }
+                .err()
+                .map(|error| error.to_string()),
+            None => Some("pending network authority exists without a transport".into()),
         };
         let close_result = self.host.close_navigation_context(pending.context);
 
@@ -657,7 +654,7 @@ impl EngineHost {
             return Err(EngineHostError::Host(error.to_string()));
         }
         if let Some(error) = cancel_error {
-            return Err(EngineHostError::Host(error.to_string()));
+            return Err(EngineHostError::Host(error));
         }
         Ok(())
     }
@@ -1164,6 +1161,33 @@ mod tests {
             Err(EngineHostError::Host(_))
         ));
         assert!(host.host.navigation_context(committed_context).is_err());
+    }
+
+    #[test]
+    fn cancellation_without_transport_still_closes_pending_context() {
+        let tab = initial_tab();
+        let stats = Arc::new(Mutex::new(FixtureNetworkStats::default()));
+        let network = FixtureNetwork::new(None, false, Arc::clone(&stats));
+        let mut host = EngineHost::with_network(Some(Box::new(network))).expect("engine host");
+        host.create_view(tab).expect("view");
+
+        let request = host
+            .begin_navigation(tab, "https://pending.example/")
+            .expect("begin")
+            .expect("forwarded");
+        let context = host
+            .views
+            .get(&tab)
+            .and_then(|hosted| hosted.pending_navigation)
+            .expect("pending authority")
+            .context;
+        host.network = None;
+
+        assert!(matches!(
+            host.cancel_navigation(request),
+            Err(EngineHostError::Host(_))
+        ));
+        assert!(host.host.navigation_context(context).is_err());
     }
 
     #[test]
