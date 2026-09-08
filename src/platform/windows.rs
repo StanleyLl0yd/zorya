@@ -1269,6 +1269,13 @@ impl NativeShell {
                 }
             }
             WorkerEvent::NavigationFinished { target, outcome } => {
+                if let WorkerNavigationOutcome::InternalFailure { message } = &outcome {
+                    self.fail(
+                        event_loop,
+                        format!("internal navigation lifecycle failure: {message}"),
+                    );
+                    return;
+                }
                 if !self.navigation_target_is_current(target) {
                     return;
                 }
@@ -1340,11 +1347,8 @@ impl NativeShell {
                         self.needs_redraw = true;
                         self.request_redraw();
                     }
-                    WorkerNavigationOutcome::InternalFailure { message } => {
-                        self.fail(
-                            event_loop,
-                            format!("internal navigation lifecycle failure: {message}"),
-                        );
+                    WorkerNavigationOutcome::InternalFailure { .. } => {
+                        unreachable!("internal navigation failures are handled before stale filtering")
                     }
                     WorkerNavigationOutcome::Stale => {
                         self.fail(
