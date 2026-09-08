@@ -10,9 +10,8 @@ use crate::engine::{
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserWindowId, NavigationId,
     NavigationStart, PresentationFramePermit, PresentationGeneration, PresentationHandoffError,
-    TabActivationStart,
-    TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit,
-    WebContentPresentation,
+    TabActivationStart, TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff,
+    TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -25,9 +24,7 @@ use std::error::Error;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
-use std::sync::mpsc::{
-    Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel,
-};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use winit::application::ApplicationHandler;
@@ -66,6 +63,9 @@ enum WorkerNavigationOutcome {
         source_bytes: usize,
     },
     Failed {
+        message: String,
+    },
+    InternalFailure {
         message: String,
     },
     Stale,
@@ -1298,23 +1298,26 @@ impl NativeShell {
                             return;
                         }
                         if self.http_smoke_navigation == Some(target.navigation) {
-                            self.fail(event_loop, format!("HTTP smoke navigation failed: {message}"));
+                            self.fail(
+                                event_loop,
+                                format!("HTTP smoke navigation failed: {message}"),
+                            );
                             return;
                         }
                         self.needs_redraw = true;
                         self.request_redraw();
                     }
-                    WorkerNavigationOutcome::Stale => {
-                        let message = "Rarog navigation became stale before browser completion";
-                        let _ = self.browser.fail_navigation(
-                            target.window,
-                            target.tab,
-                            target.navigation,
-                            message,
+                    WorkerNavigationOutcome::InternalFailure { message } => {
+                        self.fail(
+                            event_loop,
+                            format!("internal navigation lifecycle failure: {message}"),
                         );
-                        if self.http_smoke_navigation == Some(target.navigation) {
-                            self.fail(event_loop, message);
-                        }
+                    }
+                    WorkerNavigationOutcome::Stale => {
+                        self.fail(
+                            event_loop,
+                            "current Rarog navigation became stale before browser completion",
+                        );
                     }
                 }
             }
@@ -1328,12 +1331,10 @@ impl NativeShell {
                         if !self.navigation_target_is_current(target) {
                             return;
                         }
-                        let effect = self
-                            .browser
-                            .dispatch_browser_command(
-                                self.browser_window,
-                                BrowserCommand::ReloadOrStop,
-                            );
+                        let effect = self.browser.dispatch_browser_command(
+                            self.browser_window,
+                            BrowserCommand::ReloadOrStop,
+                        );
                         match effect {
                             Ok(BrowserCommandEffect::NavigationStopped(intent))
                                 if intent.id() == target.navigation => {}
@@ -1752,50 +1753,50 @@ fn render_worker_main(
 
         if let Some(command) = command {
             match command {
-            WorkerCommand::AttachInitialSurface { target, surface } => {
-                let result = worker.attach_initial_surface(target, surface);
-                if proxy
-                    .send_event(WorkerEvent::Initialized { target, result })
-                    .is_err()
-                {
-                    return;
+                WorkerCommand::AttachInitialSurface { target, surface } => {
+                    let result = worker.attach_initial_surface(target, surface);
+                    if proxy
+                        .send_event(WorkerEvent::Initialized { target, result })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
-            }
-            WorkerCommand::CreateView { target } => {
-                let result = worker.create_view(target);
-                if proxy
-                    .send_event(WorkerEvent::ViewCreated { target, result })
-                    .is_err()
-                {
-                    return;
+                WorkerCommand::CreateView { target } => {
+                    let result = worker.create_view(target);
+                    if proxy
+                        .send_event(WorkerEvent::ViewCreated { target, result })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
-            }
-            WorkerCommand::CloseView { tab } => {
-                let result = worker.close_view(tab);
-                if proxy
-                    .send_event(WorkerEvent::ViewClosed { tab, result })
-                    .is_err()
-                {
-                    return;
+                WorkerCommand::CloseView { tab } => {
+                    let result = worker.close_view(tab);
+                    if proxy
+                        .send_event(WorkerEvent::ViewClosed { tab, result })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
-            }
-            WorkerCommand::Render {
-                target,
-                permit,
-                viewport,
-            } => {
-                let result = worker.render(target, permit, viewport);
-                if proxy
-                    .send_event(WorkerEvent::FrameFinished {
-                        target,
-                        permit,
-                        result,
-                    })
-                    .is_err()
-                {
-                    return;
+                WorkerCommand::Render {
+                    target,
+                    permit,
+                    viewport,
+                } => {
+                    let result = worker.render(target, permit, viewport);
+                    if proxy
+                        .send_event(WorkerEvent::FrameFinished {
+                            target,
+                            permit,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
-            }
                 WorkerCommand::ReplaceSurface { target, surface } => {
                     let result = worker.replace_surface(target, surface);
                     if proxy
@@ -1810,7 +1811,7 @@ fn render_worker_main(
                         && proxy
                             .send_event(WorkerEvent::NavigationFinished {
                                 target,
-                                outcome: WorkerNavigationOutcome::Failed { message },
+                                outcome: WorkerNavigationOutcome::InternalFailure { message },
                             })
                             .is_err()
                     {
@@ -1984,13 +1985,31 @@ impl RenderWorker {
             ));
         }
 
-        let request = self
-            .engine
-            .begin_navigation(target.tab, location)
-            .map_err(|error| format!("failed to begin Rarog navigation: {error}"))?
-            .ok_or_else(|| "Rarog declined the browser navigation".to_string())?;
-        self.pending_navigations
-            .insert(target.tab, PendingWorkerNavigation { target, engine: request });
+        let previous = self.pending_navigations.get(&target.tab).copied();
+        let request = match self.engine.begin_navigation(target.tab, location) {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                self.pending_navigations.remove(&target.tab);
+                if let Some(previous) = previous {
+                    let _ = self.engine.cancel_navigation(previous.engine);
+                }
+                return Err("Rarog declined the browser navigation".into());
+            }
+            Err(error) => {
+                self.pending_navigations.remove(&target.tab);
+                if let Some(previous) = previous {
+                    let _ = self.engine.cancel_navigation(previous.engine);
+                }
+                return Err(format!("failed to begin Rarog navigation: {error}"));
+            }
+        };
+        self.pending_navigations.insert(
+            target.tab,
+            PendingWorkerNavigation {
+                target,
+                engine: request,
+            },
+        );
         Ok(())
     }
 
@@ -2013,9 +2032,7 @@ impl RenderWorker {
         !self.pending_navigations.is_empty()
     }
 
-    fn poll_navigations(
-        &mut self,
-    ) -> Vec<(WorkerNavigationTarget, WorkerNavigationOutcome)> {
+    fn poll_navigations(&mut self) -> Vec<(WorkerNavigationTarget, WorkerNavigationOutcome)> {
         let tabs: Vec<_> = self.pending_navigations.keys().copied().collect();
         let mut completed = Vec::new();
 
@@ -2038,7 +2055,7 @@ impl RenderWorker {
                     WorkerNavigationOutcome::Failed { message }
                 }
                 Ok(EngineNavigationPoll::Stale) => WorkerNavigationOutcome::Stale,
-                Err(error) => WorkerNavigationOutcome::Failed {
+                Err(error) => WorkerNavigationOutcome::InternalFailure {
                     message: format!("Rarog navigation polling failed: {error}"),
                 },
             };
