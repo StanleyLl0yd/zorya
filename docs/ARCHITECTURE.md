@@ -75,7 +75,9 @@ Until native browser chrome owns a dedicated content cover, Windows uses a delib
 
 Windows now applies the same ordering to active-tab close. `Ctrl+W` keeps the window hidden while the source tab is removed from the product model, presents the fallback through a generation-bound target permit, and retires the closed source Rarog View only after the fallback frame is accepted. A late source completion after product removal is tolerated only while that exact source is tracked as retired and the native window is still confirmed neutral. The final tab is removed only after current-tab neutral confirmation, then the native window exits.
 
-The remaining issue #20 work is explicit rapid A → B → C supersession/invalidation integration coverage. A later dedicated chrome cover may replace whole-window hiding for UX quality, but it must preserve the same identity/generation protocol.
+Rapid A → B → C supersession is now covered by a Windows integration smoke that creates live background B and C Views, verifies B is already the exact pending native frame, then commits C while B remains in flight. C must become the only queued generation-bound target permit; late B acknowledgement is tolerated only while native presentation remains confirmed hidden and neutral, and the smoke succeeds only after C becomes the sole accepted presented target.
+
+A later dedicated chrome cover may replace whole-window hiding for UX quality, but it must preserve the same identity/generation protocol.
 
 ### Presentation-aware tab closing
 
