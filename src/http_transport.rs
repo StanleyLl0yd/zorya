@@ -5,6 +5,7 @@ use rarog_fetch::{
 use reqwest::{Client, Method};
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
+use std::sync::mpsc as std_mpsc;
 use std::thread::{self, JoinHandle};
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch};
@@ -37,10 +38,23 @@ impl HttpTransport {
     pub(crate) fn new() -> Result<Self, FetchError> {
         let (commands_tx, commands_rx) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let (completion_tx, completion_rx) = mpsc::channel(COMPLETION_QUEUE_CAPACITY);
+        let (initialized_tx, initialized_rx) = std_mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name("zorya-http".into())
-            .spawn(move || transport_worker_main(commands_rx, completion_tx))
-            .map_err(|error| FetchError::network(format!("failed to start HTTP worker: {error}")))?;
+            .spawn(move || transport_worker_main(commands_rx, completion_tx, initialized_tx))
+            .map_err(|error| {
+                FetchError::network(format!("failed to start HTTP worker: {error}"))
+            })?;
+
+        match initialized_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => return Err(FetchError::network(message)),
+            Err(error) => {
+                return Err(FetchError::network(format!(
+                    "HTTP worker terminated during initialization: {error}"
+                )));
+            }
+        }
 
         Ok(Self {
             commands: commands_tx,
@@ -75,7 +89,10 @@ impl HttpTransport {
     fn invalid_ticket(ticket: NetworkTicket) -> FetchError {
         FetchError::new(
             FetchErrorKind::InvalidNetworkTicket,
-            format!("unknown or completed HTTP transport ticket {}", ticket.get()),
+            format!(
+                "unknown or completed HTTP transport ticket {}",
+                ticket.get()
+            ),
         )
     }
 }
@@ -97,7 +114,9 @@ impl NetworkCapability for HttpTransport {
                 request,
                 cancellation: cancel_rx,
             })
-            .map_err(|error| FetchError::network(format!("HTTP worker queue unavailable: {error}")))?;
+            .map_err(|error| {
+                FetchError::network(format!("HTTP worker queue unavailable: {error}"))
+            })?;
         self.active.insert(ticket, cancel_tx);
         Ok(ticket)
     }
@@ -140,11 +159,20 @@ impl Drop for HttpTransport {
 fn transport_worker_main(
     mut commands: mpsc::Receiver<TransportCommand>,
     completions: mpsc::Sender<TransportCompletion>,
+    initialized: std_mpsc::SyncSender<Result<(), String>>,
 ) {
     let runtime = match Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
-        Err(_) => return,
+        Err(error) => {
+            let _ = initialized.send(Err(format!(
+                "failed to initialize HTTP runtime: {error}"
+            )));
+            return;
+        }
     };
+    if initialized.send(Ok(())).is_err() {
+        return;
+    }
 
     runtime.block_on(async move {
         let client = build_client().map_err(|error| error.to_string());
@@ -212,7 +240,10 @@ async fn run_request(
         .await;
 }
 
-async fn execute_request(client: Client, request: NetworkRequest) -> Result<FetchResponse, FetchError> {
+async fn execute_request(
+    client: Client,
+    request: NetworkRequest,
+) -> Result<FetchResponse, FetchError> {
     let response_url = request.url().clone();
     let max_body_bytes = request.max_response_body_bytes();
     let method = Method::from_bytes(request.method().as_str().as_bytes())
@@ -263,21 +294,13 @@ async fn execute_request(client: Client, request: NetworkRequest) -> Result<Fetc
         if required > max_body_bytes {
             return Err(FetchError::new(
                 FetchErrorKind::ResponseBodyLimitExceeded,
-                format!(
-                    "HTTP response body requires more than {max_body_bytes} bytes"
-                ),
+                format!("HTTP response body requires more than {max_body_bytes} bytes"),
             ));
         }
         body.extend_from_slice(&chunk);
     }
 
-    FetchResponse::try_new(
-        Some(response_url),
-        status,
-        headers,
-        body,
-        max_body_bytes,
-    )
+    FetchResponse::try_new(Some(response_url), status, headers, body, max_body_bytes)
 }
 
 #[cfg(test)]
@@ -350,7 +373,10 @@ mod tests {
 
         assert_eq!(response.status(), 302);
         assert_eq!(response.url().map(WebUrl::as_str), Some(url.as_str()));
-        assert_eq!(response.headers().get_first("content-encoding"), Some("gzip"));
+        assert_eq!(
+            response.headers().get_first("content-encoding"),
+            Some("gzip")
+        );
         assert_eq!(response.body(), b"raw-body");
     }
 

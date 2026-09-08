@@ -3,7 +3,8 @@ use crate::http_transport::HttpTransport;
 use rarog_compositor::FrameCause;
 use rarog_engine::{
     BaseUrl, Engine, EngineError, FrameStatus, NavigationCompletion,
-    NavigationId as RarogNavigationId, NavigationRequest, NavigationStartOutcome, View, ViewOptions,
+    NavigationId as RarogNavigationId, NavigationRequest, NavigationStartOutcome, View,
+    ViewOptions,
 };
 use rarog_fetch::{NetworkCapability, NetworkPoll};
 use rarog_host::{
@@ -237,9 +238,7 @@ impl EngineHost {
         Self::with_network(None)
     }
 
-    fn with_network(
-        network: Option<Box<dyn NetworkCapability>>,
-    ) -> Result<Self, EngineHostError> {
+    fn with_network(network: Option<Box<dyn NetworkCapability>>) -> Result<Self, EngineHostError> {
         Ok(Self {
             engine: Engine::builder().build()?,
             host: HostControlPlane::with_default_limits()
@@ -274,13 +273,19 @@ impl EngineHost {
             return Ok(false);
         };
 
+        let mut cleanup_error = None;
         if let Some(pending) = hosted.pending_navigation {
-            self.cancel_pending_authority(pending)?;
+            if let Err(error) = self.cancel_pending_authority(pending) {
+                cleanup_error = Some(error);
+            }
         }
         if let Some(context) = hosted.committed_context {
-            self.host
-                .close_navigation_context(context)
-                .map_err(|error| EngineHostError::Host(error.to_string()))?;
+            if let Err(error) = self.host.close_navigation_context(context) {
+                cleanup_error.get_or_insert_with(|| EngineHostError::Host(error.to_string()));
+            }
+        }
+        if let Some(error) = cleanup_error {
+            return Err(error);
         }
         Ok(true)
     }
@@ -344,7 +349,10 @@ impl EngineHost {
                 return Err(EngineHostError::InconsistentNavigationState { tab });
             }
             if let Some(previous) = previous {
-                self.cancel_pending_authority(previous)?;
+                if let Err(error) = self.cancel_pending_authority(previous) {
+                    let _ = self.view_mut(tab)?.view.cancel_navigation(navigation);
+                    return Err(error);
+                }
             }
         } else if self.view_mut(tab)?.pending_navigation.is_some() {
             let _ = self.view_mut(tab)?.view.cancel_navigation(navigation);
@@ -592,9 +600,9 @@ impl EngineHost {
         if hosted.generation != request.view_generation {
             return Ok(None);
         }
-        Ok(hosted.pending_navigation.filter(|pending| {
-            pending.navigation.get() == request.navigation_id
-        }))
+        Ok(hosted
+            .pending_navigation
+            .filter(|pending| pending.navigation.get() == request.navigation_id))
     }
 
     fn take_pending_navigation(
@@ -896,9 +904,7 @@ mod tests {
         assert!(host.begin_frame(tab).expect("begin resize frame").is_some());
     }
 
-    use rarog_fetch::{
-        FetchError, FetchResponse, HeaderList, NetworkRequest, NetworkTicket,
-    };
+    use rarog_fetch::{FetchError, FetchResponse, HeaderList, NetworkRequest, NetworkTicket};
     use std::num::NonZeroU64;
     use std::sync::{Arc, Mutex};
 
@@ -913,18 +919,21 @@ mod tests {
         next_ticket: u64,
         requests: BTreeMap<NetworkTicket, NetworkRequest>,
         fail_on_poll: Option<usize>,
+        fail_on_cancel: bool,
         stats: Arc<Mutex<FixtureNetworkStats>>,
     }
 
     impl FixtureNetwork {
         fn new(
             fail_on_poll: Option<usize>,
+            fail_on_cancel: bool,
             stats: Arc<Mutex<FixtureNetworkStats>>,
         ) -> Self {
             Self {
                 next_ticket: 1,
                 requests: BTreeMap::new(),
                 fail_on_poll,
+                fail_on_cancel,
                 stats,
             }
         }
@@ -971,6 +980,9 @@ mod tests {
         fn cancel(&mut self, ticket: NetworkTicket) -> Result<(), FetchError> {
             self.requests.remove(&ticket);
             self.stats.lock().expect("stats").cancels += 1;
+            if self.fail_on_cancel {
+                return Err(FetchError::network("fixture cancellation failure"));
+            }
             Ok(())
         }
     }
@@ -979,7 +991,7 @@ mod tests {
         fail_on_poll: Option<usize>,
     ) -> (EngineHost, Arc<Mutex<FixtureNetworkStats>>) {
         let stats = Arc::new(Mutex::new(FixtureNetworkStats::default()));
-        let network = FixtureNetwork::new(fail_on_poll, Arc::clone(&stats));
+        let network = FixtureNetwork::new(fail_on_poll, false, Arc::clone(&stats));
         let host = EngineHost::with_network(Some(Box::new(network))).expect("engine host");
         (host, stats)
     }
@@ -1097,6 +1109,60 @@ mod tests {
             host.poll_navigation(current).expect("current poll"),
             EngineNavigationPoll::Committed { .. }
         ));
+    }
+
+    #[test]
+    fn supersession_cleanup_failure_cancels_new_rarog_navigation() {
+        let tab = initial_tab();
+        let stats = Arc::new(Mutex::new(FixtureNetworkStats::default()));
+        let network = FixtureNetwork::new(None, true, Arc::clone(&stats));
+        let mut host =
+            EngineHost::with_network(Some(Box::new(network))).expect("engine host");
+        host.create_view(tab).expect("view");
+
+        host.begin_navigation(tab, "https://stale.example/")
+            .expect("begin stale")
+            .expect("forwarded");
+        assert!(matches!(
+            host.begin_navigation(tab, "https://cleanup-fails.example/"),
+            Err(EngineHostError::Host(_))
+        ));
+
+        let current = host
+            .begin_navigation(tab, "https://current.example/")
+            .expect("new Rarog navigation was cancelled after cleanup failure")
+            .expect("forwarded");
+        assert!(current.navigation_id() > 0);
+    }
+
+    #[test]
+    fn close_view_attempts_committed_cleanup_after_pending_cleanup_failure() {
+        let tab = initial_tab();
+        let stats = Arc::new(Mutex::new(FixtureNetworkStats::default()));
+        let network = FixtureNetwork::new(None, true, Arc::clone(&stats));
+        let mut host =
+            EngineHost::with_network(Some(Box::new(network))).expect("engine host");
+        host.create_view(tab).expect("view");
+
+        let committed = host
+            .begin_navigation(tab, "https://committed.example/")
+            .expect("begin committed")
+            .expect("forwarded");
+        assert!(matches!(
+            host.poll_navigation(committed).expect("commit"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let committed_context = host
+            .views
+            .get(&tab)
+            .and_then(|hosted| hosted.committed_context)
+            .expect("committed context");
+
+        host.begin_navigation(tab, "https://pending.example/")
+            .expect("begin pending")
+            .expect("forwarded");
+        assert!(matches!(host.close_view(tab), Err(EngineHostError::Host(_))));
+        assert!(host.host.navigation_context(committed_context).is_err());
     }
 
     #[test]

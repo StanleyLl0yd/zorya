@@ -1520,11 +1520,9 @@ impl RenderWorker {
                 tab.get()
             ));
         }
-        if !self
-            .engine
-            .close_view(tab)
-            .map_err(|error| format!("failed to retire Rarog View for tab {}: {error}", tab.get()))?
-        {
+        if !self.engine.close_view(tab).map_err(|error| {
+            format!("failed to retire Rarog View for tab {}: {error}", tab.get())
+        })? {
             return Err(format!(
                 "cannot retire missing Rarog View for tab {}",
                 tab.get()
