@@ -331,6 +331,7 @@ struct NativeShell {
     http_smoke_location: Option<String>,
     http_smoke_navigation: Option<NavigationId>,
     http_smoke_committed: bool,
+    http_smoke_frame: Option<AsyncTarget>,
     proxy: EventLoopProxy<WorkerEvent>,
     window: Option<Arc<Window>>,
     gpu: Option<Arc<WindowsGpuDevice>>,
@@ -372,6 +373,7 @@ impl NativeShell {
             http_smoke_location,
             http_smoke_navigation: None,
             http_smoke_committed: false,
+            http_smoke_frame: None,
             proxy,
             window: None,
             gpu: None,
@@ -473,6 +475,32 @@ impl NativeShell {
             return Err(error);
         }
         Ok(navigation)
+    }
+
+    fn dispatch_http_smoke_frame(&mut self) -> Result<(), String> {
+        if !self.http_smoke_committed || self.http_smoke_frame.is_some() {
+            return Ok(());
+        }
+        if self.pending_frame.is_pending() {
+            self.needs_redraw = true;
+            return Ok(());
+        }
+
+        self.needs_redraw = true;
+        self.start_frame()?;
+        let target = self
+            .pending_frame
+            .current()
+            .ok_or_else(|| "HTTP smoke post-commit frame was not dispatched".to_string())?;
+        if target.tab() != self.tab {
+            return Err(format!(
+                "HTTP smoke post-commit frame targeted tab {} instead of {}",
+                target.tab().get(),
+                self.tab.get()
+            ));
+        }
+        self.http_smoke_frame = Some(target);
+        Ok(())
     }
 
     fn start_http_smoke_navigation(&mut self) -> Result<(), String> {
@@ -1280,9 +1308,14 @@ impl NativeShell {
                         }
                         if self.http_smoke_navigation == Some(target.navigation) {
                             self.http_smoke_committed = true;
+                            if let Err(error) = self.dispatch_http_smoke_frame() {
+                                self.fail(event_loop, error);
+                                return;
+                            }
+                        } else {
+                            self.needs_redraw = true;
+                            self.request_redraw();
                         }
-                        self.needs_redraw = true;
-                        self.request_redraw();
                     }
                     WorkerNavigationOutcome::Failed { message } => {
                         if let Err(error) = self.browser.fail_navigation(
@@ -1473,8 +1506,12 @@ impl NativeShell {
                         }
 
                         if self.run_mode == RunMode::ExitAfterRealHttpNavigation {
-                            if self.http_smoke_committed {
+                            if self.http_smoke_frame == Some(target) {
                                 self.shutdown(event_loop);
+                            } else if self.http_smoke_committed {
+                                if let Err(error) = self.dispatch_http_smoke_frame() {
+                                    self.fail(event_loop, error);
+                                }
                             } else if self.http_smoke_navigation.is_none() {
                                 if let Err(error) = self.start_http_smoke_navigation() {
                                     self.fail(event_loop, error);
@@ -1611,6 +1648,7 @@ impl NativeShell {
         self.pending_frame.invalidate();
         self.pending_surface.invalidate();
         self.pending_navigation_cancel = None;
+        self.http_smoke_frame = None;
         self.pending_target_permit = None;
         self.surface_recovery_permit = None;
         self.pending_tab_create = None;
