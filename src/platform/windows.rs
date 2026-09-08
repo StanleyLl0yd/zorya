@@ -1317,7 +1317,6 @@ impl NativeShell {
                             self.http_smoke_committed = true;
                             if let Err(error) = self.dispatch_http_smoke_frame() {
                                 self.fail(event_loop, error);
-                                return;
                             }
                         } else {
                             self.needs_redraw = true;
@@ -1851,15 +1850,16 @@ fn render_worker_main(
                     }
                 }
                 WorkerCommand::BeginNavigation { target, location } => {
-                    if let Err(message) = worker.begin_navigation(target, location)
-                        && proxy
+                    if let Err(message) = worker.begin_navigation(target, location) {
+                        if proxy
                             .send_event(WorkerEvent::NavigationFinished {
                                 target,
                                 outcome: WorkerNavigationOutcome::InternalFailure { message },
                             })
                             .is_err()
-                    {
-                        return;
+                        {
+                            return;
+                        }
                     }
                 }
                 WorkerCommand::CancelNavigation { target } => {
