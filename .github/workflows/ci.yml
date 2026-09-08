@@ -63,6 +63,17 @@ jobs:
           if ($process.ExitCode -ne 0) {
             throw "native tab activation smoke test failed with exit code $($process.ExitCode)"
           }
+      - name: Smoke test presentation-safe tab close
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ".\\target\\debug\\zorya.exe" -ArgumentList "--native-tab-close-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "native tab close smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "native tab close smoke test failed with exit code $($process.ExitCode)"
+          }
       - name: Upload developer executable
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
