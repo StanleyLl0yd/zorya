@@ -42,7 +42,7 @@ If Zorya needs an engine capability that is not available through a supported Ra
 
 ## Current development state
 
-The current developer build has a real Windows native window, Zorya-owned browser state, one natively presented Rarog View, deterministic local HTML loading, off-UI rendering and DX12 presentation through Rarog's public platform/compositor boundary. Windows CI exercises this full vertical with a real native-window/GPU/Rarog presentation smoke test.
+The current developer build has a real Windows native window, Zorya-owned browser state, natively presented Rarog Views, deterministic local loading, real HTTP(S) document navigation through Rarog's Fetch/navigation contract, off-UI rendering and DX12 presentation through Rarog's public platform/compositor boundary. Windows CI exercises both the native-window/GPU vertical and a deterministic localhost HTTP navigation through remote commit and subsequent presentation.
 
 The platform-independent Z2 product model already includes stable window/tab identities, tab create/close/select/reorder state, monotonic navigation and history identities, stale-navigation rejection, committed `about:blank` startup history, back/forward/reload/stop state, and privileged address-bar edit/display state bound to stable `TabId` values.
 
@@ -60,12 +60,12 @@ The platform-independent Z2 product model already includes stable window/tab ide
                     v
       Rarog compositor / DX12 surface
 
-The current Windows presentation shell still presents only one active Web View and does not yet render browser chrome or general multi-tab UX. General HTTP(S) navigation is also intentionally not implemented until Rarog exposes the supported navigation-completion/Fetch integration. Native Web input, page-title observation and presentation-safe native tab activation likewise remain explicit integration/design work. Web content does not own the top-level window or privileged browser state.
+The current Windows presentation shell still presents only one active Web View at a time and does not yet render browser chrome or general multi-tab UX. HTTP(S) navigation is driven by a bounded transport thread while Fetch policy, redirects, response interpretation and navigation commit remain Rarog-owned. Native Web input and page-title observation remain explicit integration work. Web content does not own the top-level window or privileged browser state.
 
 Current tracked boundaries include:
 
 - issue #6 — stable Rarog GPU device-loss recovery contract;
-- issue #13 — Rarog navigation completion / Fetch integration;
+- issue #13 — Rarog navigation completion / Fetch integration, resolved by the pinned Rarog contract used by Z2;
 - issue #16 — supported Rarog View input dispatch;
 - issue #18 — Rarog document-title observation;
 - issue #20 — presentation-safe native tab activation in Zorya.
@@ -84,6 +84,7 @@ Requirements:
     cargo run --locked
     cargo run --locked -- --version
     cargo run --locked -- --native-smoke
+    cargo run --locked -- --native-http-navigation-smoke
 
 The `--version` path exits before native window or GPU initialization. On Windows, `--native-smoke` runs the real native-window, Rarog render and DX12 presentation path and exits after the first successful presentation. Windows CI executes both smoke paths before retaining the debug executable as an artifact named `zorya-windows-dev-<commit SHA>` for 14 days. Linux is kept as a portability compile/test target where practical, even though Windows is the first product platform.
 
