@@ -3,10 +3,14 @@ use crate::async_lifecycle::{
     AsyncRequestSequence, AsyncTarget, CancellationToken, PendingRequest,
 };
 use crate::branding::application_icon;
-use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
+use crate::engine::{
+    EngineFrameCause, EngineFrameRequest, EngineHost, EngineNavigationPoll,
+    EngineNavigationRequest, Viewport,
+};
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserWindowId, NavigationId,
-    PresentationFramePermit, PresentationGeneration, PresentationHandoffError, TabActivationStart,
+    NavigationStart, PresentationFramePermit, PresentationGeneration, PresentationHandoffError,
+    TabActivationStart,
     TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit,
     WebContentPresentation,
 };
@@ -16,10 +20,16 @@ use rarog_compositor::{
 };
 use rarog_compositor_wgpu::WgpuCompositorBackend;
 use rarog_platform_windows::{WindowsGpuDevice, WindowsGpuError, WindowsGpuSurface};
+use std::collections::BTreeMap;
 use std::error::Error;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{
+    Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel,
+};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
@@ -29,8 +39,73 @@ use winit::window::{Icon, Window, WindowId};
 
 const START_LOCATION: &str = "about:blank";
 const START_PAGE: &str = include_str!("../../assets/z1-start.html");
+const HTTP_SMOKE_BODY: &str = "<main>Zorya real HTTP navigation</main>";
+const NAVIGATION_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WorkerNavigationTarget {
+    window: BrowserWindowId,
+    tab: TabId,
+    navigation: NavigationId,
+}
+
+impl WorkerNavigationTarget {
+    const fn new(window: BrowserWindowId, tab: TabId, navigation: NavigationId) -> Self {
+        Self {
+            window,
+            tab,
+            navigation,
+        }
+    }
+}
+
+enum WorkerNavigationOutcome {
+    Committed {
+        location: String,
+        status: u16,
+        source_bytes: usize,
+    },
+    Failed {
+        message: String,
+    },
+    Stale,
+}
+
+#[derive(Clone, Copy)]
+struct PendingWorkerNavigation {
+    target: WorkerNavigationTarget,
+    engine: EngineNavigationRequest,
+}
+
+fn spawn_http_smoke_server() -> Result<String, std::io::Error> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    thread::Builder::new()
+        .name("zorya-http-smoke".into())
+        .spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                HTTP_SMOKE_BODY.len(),
+                HTTP_SMOKE_BODY
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        })?;
+    Ok(format!("http://{address}/zorya-http-smoke"))
+}
 
 pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
+    let http_smoke_location = if mode == RunMode::ExitAfterRealHttpNavigation {
+        Some(spawn_http_smoke_server()?)
+    } else {
+        None
+    };
     let mut browser = BrowserApp::bootstrap()?;
     let browser_window = browser
         .windows()
@@ -55,6 +130,7 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         initial_navigation,
         proxy,
         mode,
+        http_smoke_location,
     );
     event_loop.run_app(&mut shell)?;
 
@@ -91,6 +167,14 @@ enum WorkerEvent {
         target: AsyncTarget,
         result: Result<(), String>,
     },
+    NavigationFinished {
+        target: WorkerNavigationTarget,
+        outcome: WorkerNavigationOutcome,
+    },
+    NavigationCancelFinished {
+        target: WorkerNavigationTarget,
+        result: Result<bool, String>,
+    },
 }
 
 enum WorkerCommand {
@@ -112,6 +196,13 @@ enum WorkerCommand {
     ReplaceSurface {
         target: AsyncTarget,
         surface: WindowsGpuSurface,
+    },
+    BeginNavigation {
+        target: WorkerNavigationTarget,
+        location: String,
+    },
+    CancelNavigation {
+        target: WorkerNavigationTarget,
     },
 }
 
@@ -186,6 +277,18 @@ impl WorkerHandle {
         self.send(WorkerCommand::ReplaceSurface { target, surface })
     }
 
+    fn begin_navigation(
+        &self,
+        target: WorkerNavigationTarget,
+        location: String,
+    ) -> Result<(), String> {
+        self.send(WorkerCommand::BeginNavigation { target, location })
+    }
+
+    fn cancel_navigation(&self, target: WorkerNavigationTarget) -> Result<(), String> {
+        self.send(WorkerCommand::CancelNavigation { target })
+    }
+
     fn send(&self, command: WorkerCommand) -> Result<(), String> {
         if self.cancellation.is_cancelled() {
             return Err("render worker is cancelled".into());
@@ -224,6 +327,10 @@ struct NativeShell {
     restore_focus_after_activation: bool,
     modifiers: ModifiersState,
     initial_navigation: Option<NavigationId>,
+    pending_navigation_cancel: Option<WorkerNavigationTarget>,
+    http_smoke_location: Option<String>,
+    http_smoke_navigation: Option<NavigationId>,
+    http_smoke_committed: bool,
     proxy: EventLoopProxy<WorkerEvent>,
     window: Option<Arc<Window>>,
     gpu: Option<Arc<WindowsGpuDevice>>,
@@ -246,6 +353,7 @@ impl NativeShell {
         initial_navigation: NavigationId,
         proxy: EventLoopProxy<WorkerEvent>,
         run_mode: RunMode,
+        http_smoke_location: Option<String>,
     ) -> Self {
         Self {
             browser,
@@ -260,6 +368,10 @@ impl NativeShell {
             restore_focus_after_activation: false,
             modifiers: ModifiersState::empty(),
             initial_navigation: Some(initial_navigation),
+            pending_navigation_cancel: None,
+            http_smoke_location,
+            http_smoke_navigation: None,
+            http_smoke_committed: false,
             proxy,
             window: None,
             gpu: None,
@@ -328,6 +440,59 @@ impl NativeShell {
                 .iter()
                 .any(|candidate| candidate.id() == target.tab())
         })
+    }
+
+    fn navigation_target_is_current(&self, target: WorkerNavigationTarget) -> bool {
+        self.browser
+            .window(target.window)
+            .and_then(|window| window.tab(target.tab))
+            .and_then(|tab| tab.navigation().pending())
+            .is_some_and(|pending| pending.id() == target.navigation)
+    }
+
+    fn dispatch_navigation_start(
+        &mut self,
+        tab: TabId,
+        start: NavigationStart,
+    ) -> Result<NavigationId, String> {
+        let navigation = start.intent().id();
+        let target = WorkerNavigationTarget::new(self.browser_window, tab, navigation);
+        let location = start.intent().requested_location().to_owned();
+        let result = self
+            .worker
+            .as_ref()
+            .ok_or_else(|| "render worker is unavailable".to_string())
+            .and_then(|worker| worker.begin_navigation(target, location));
+        if let Err(error) = result {
+            let _ = self.browser.fail_navigation(
+                self.browser_window,
+                tab,
+                navigation,
+                format!("native navigation dispatch failed: {error}"),
+            );
+            return Err(error);
+        }
+        Ok(navigation)
+    }
+
+    fn start_http_smoke_navigation(&mut self) -> Result<(), String> {
+        if self.run_mode != RunMode::ExitAfterRealHttpNavigation {
+            return Err("HTTP navigation smoke started outside its run mode".into());
+        }
+        if self.http_smoke_navigation.is_some() {
+            return Err("HTTP navigation smoke is already running".into());
+        }
+        let location = self
+            .http_smoke_location
+            .clone()
+            .ok_or_else(|| "HTTP navigation smoke server is unavailable".to_string())?;
+        let start = self
+            .browser
+            .begin_navigation(self.browser_window, self.tab, location)
+            .map_err(|error| format!("failed to begin HTTP smoke navigation: {error}"))?;
+        let navigation = self.dispatch_navigation_start(self.tab, start)?;
+        self.http_smoke_navigation = Some(navigation);
+        Ok(())
     }
 
     fn request_redraw(&self) {
@@ -766,6 +931,28 @@ impl NativeShell {
     fn handle_browser_command(&mut self, command: BrowserCommand) -> Result<(), String> {
         match command {
             BrowserCommand::NewTab => self.start_new_tab(),
+            BrowserCommand::Back | BrowserCommand::Forward => {
+                if self.pending_navigation_cancel.is_some() {
+                    return Ok(());
+                }
+                let tab = self
+                    .browser
+                    .window(self.browser_window)
+                    .and_then(|window| window.active_tab_id())
+                    .ok_or_else(|| "browser window has no active tab".to_string())?;
+                let effect = self
+                    .browser
+                    .dispatch_browser_command(self.browser_window, command)
+                    .map_err(|error| format!("failed to dispatch navigation command: {error}"))?;
+                match effect {
+                    BrowserCommandEffect::NavigationStarted(start) => {
+                        self.dispatch_navigation_start(tab, start).map(|_| ())
+                    }
+                    BrowserCommandEffect::Unavailable => Ok(()),
+                    _ => Err("navigation command returned an unexpected effect".into()),
+                }
+            }
+            BrowserCommand::ReloadOrStop => self.handle_reload_or_stop(),
             BrowserCommand::CycleTab(direction) => {
                 if self.pending_tab_create.is_some() {
                     return Ok(());
@@ -785,7 +972,46 @@ impl NativeShell {
                     _ => Err("tab-cycle command returned an unexpected effect".into()),
                 }
             }
-            _ => Ok(()),
+            BrowserCommand::CloseTab | BrowserCommand::FocusAddressBar => Ok(()),
+        }
+    }
+
+    fn handle_reload_or_stop(&mut self) -> Result<(), String> {
+        if self.pending_navigation_cancel.is_some() {
+            return Ok(());
+        }
+        let tab = self
+            .browser
+            .window(self.browser_window)
+            .and_then(|window| window.active_tab_id())
+            .ok_or_else(|| "browser window has no active tab".to_string())?;
+        let pending = self
+            .browser
+            .window(self.browser_window)
+            .and_then(|window| window.tab(tab))
+            .and_then(|tab| tab.navigation().pending())
+            .map(|intent| intent.id());
+
+        if let Some(navigation) = pending {
+            let target = WorkerNavigationTarget::new(self.browser_window, tab, navigation);
+            self.worker
+                .as_ref()
+                .ok_or_else(|| "render worker is unavailable".to_string())?
+                .cancel_navigation(target)?;
+            self.pending_navigation_cancel = Some(target);
+            return Ok(());
+        }
+
+        let effect = self
+            .browser
+            .dispatch_browser_command(self.browser_window, BrowserCommand::ReloadOrStop)
+            .map_err(|error| format!("failed to dispatch reload command: {error}"))?;
+        match effect {
+            BrowserCommandEffect::NavigationStarted(start) => {
+                self.dispatch_navigation_start(tab, start).map(|_| ())
+            }
+            BrowserCommandEffect::Unavailable => Ok(()),
+            _ => Err("reload command returned an unexpected effect".into()),
         }
     }
 
@@ -798,7 +1024,38 @@ impl NativeShell {
         if is_synthetic || event.state != ElementState::Pressed || event.repeat {
             return Ok(());
         }
+        if self.modifiers.alt_key()
+            && !self.modifiers.control_key()
+            && !self.modifiers.super_key()
+            && !self.modifiers.shift_key()
+        {
+            return match event.logical_key {
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.handle_browser_command(BrowserCommand::Back)
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.handle_browser_command(BrowserCommand::Forward)
+                }
+                _ => Ok(()),
+            };
+        }
+
         if !self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key() {
+            if !self.modifiers.control_key()
+                && !self.modifiers.alt_key()
+                && !self.modifiers.super_key()
+                && !self.modifiers.shift_key()
+                && event.logical_key == Key::Named(NamedKey::Escape)
+            {
+                let is_loading = self
+                    .browser
+                    .window(self.browser_window)
+                    .and_then(|window| window.active_tab())
+                    .is_some_and(|tab| tab.navigation().is_loading());
+                if is_loading {
+                    return self.handle_browser_command(BrowserCommand::ReloadOrStop);
+                }
+            }
             return Ok(());
         }
 
@@ -812,6 +1069,11 @@ impl NativeShell {
                 if !self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("w") =>
             {
                 self.start_close_tab(event_loop)
+            }
+            Key::Character(character)
+                if !self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("r") =>
+            {
+                self.handle_browser_command(BrowserCommand::ReloadOrStop)
             }
             Key::Named(NamedKey::Tab) => {
                 let direction = if self.modifiers.shift_key() {
@@ -978,6 +1240,120 @@ impl NativeShell {
                     Err(error) => self.fail(event_loop, error),
                 }
             }
+            WorkerEvent::NavigationFinished { target, outcome } => {
+                if !self.navigation_target_is_current(target) {
+                    return;
+                }
+
+                match outcome {
+                    WorkerNavigationOutcome::Committed {
+                        location,
+                        status,
+                        source_bytes,
+                    } => {
+                        if self.http_smoke_navigation == Some(target.navigation) {
+                            let expected = self.http_smoke_location.as_deref();
+                            if status != 200
+                                || source_bytes == 0
+                                || expected != Some(location.as_str())
+                            {
+                                self.fail(
+                                    event_loop,
+                                    format!(
+                                        "HTTP smoke committed unexpected response: status {status}, bytes {source_bytes}, location {location}"
+                                    ),
+                                );
+                                return;
+                            }
+                        }
+                        if let Err(error) = self.browser.commit_navigation(
+                            target.window,
+                            target.tab,
+                            target.navigation,
+                            &location,
+                        ) {
+                            self.fail(
+                                event_loop,
+                                format!("failed to commit browser navigation: {error}"),
+                            );
+                            return;
+                        }
+                        if self.http_smoke_navigation == Some(target.navigation) {
+                            self.http_smoke_committed = true;
+                        }
+                        self.needs_redraw = true;
+                        self.request_redraw();
+                    }
+                    WorkerNavigationOutcome::Failed { message } => {
+                        if let Err(error) = self.browser.fail_navigation(
+                            target.window,
+                            target.tab,
+                            target.navigation,
+                            &message,
+                        ) {
+                            self.fail(
+                                event_loop,
+                                format!("failed to record browser navigation failure: {error}"),
+                            );
+                            return;
+                        }
+                        if self.http_smoke_navigation == Some(target.navigation) {
+                            self.fail(event_loop, format!("HTTP smoke navigation failed: {message}"));
+                            return;
+                        }
+                        self.needs_redraw = true;
+                        self.request_redraw();
+                    }
+                    WorkerNavigationOutcome::Stale => {
+                        let message = "Rarog navigation became stale before browser completion";
+                        let _ = self.browser.fail_navigation(
+                            target.window,
+                            target.tab,
+                            target.navigation,
+                            message,
+                        );
+                        if self.http_smoke_navigation == Some(target.navigation) {
+                            self.fail(event_loop, message);
+                        }
+                    }
+                }
+            }
+            WorkerEvent::NavigationCancelFinished { target, result } => {
+                if self.pending_navigation_cancel != Some(target) {
+                    return;
+                }
+                self.pending_navigation_cancel = None;
+                match result {
+                    Ok(true) => {
+                        if !self.navigation_target_is_current(target) {
+                            return;
+                        }
+                        let effect = self
+                            .browser
+                            .dispatch_browser_command(
+                                self.browser_window,
+                                BrowserCommand::ReloadOrStop,
+                            );
+                        match effect {
+                            Ok(BrowserCommandEffect::NavigationStopped(intent))
+                                if intent.id() == target.navigation => {}
+                            Ok(_) => self.fail(
+                                event_loop,
+                                "navigation cancellation acknowledged for a different product state",
+                            ),
+                            Err(error) => self.fail(
+                                event_loop,
+                                format!("failed to stop cancelled browser navigation: {error}"),
+                            ),
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => self.fail(
+                        event_loop,
+                        format!("failed to cancel exact Rarog navigation: {error}"),
+                    ),
+                }
+            }
             WorkerEvent::FrameFinished {
                 target,
                 permit,
@@ -1095,7 +1471,17 @@ impl NativeShell {
                             }
                         }
 
-                        if self.run_mode == RunMode::ExitAfterFirstPresentation {
+                        if self.run_mode == RunMode::ExitAfterRealHttpNavigation {
+                            if self.http_smoke_committed {
+                                self.shutdown(event_loop);
+                            } else if self.http_smoke_navigation.is_none() {
+                                if let Err(error) = self.start_http_smoke_navigation() {
+                                    self.fail(event_loop, error);
+                                }
+                            } else if self.needs_redraw {
+                                self.request_redraw();
+                            }
+                        } else if self.run_mode == RunMode::ExitAfterFirstPresentation {
                             self.shutdown(event_loop);
                         } else if self.run_mode == RunMode::ExitAfterTabActivation {
                             if let Err(error) = self.start_new_tab() {
@@ -1223,6 +1609,7 @@ impl NativeShell {
         self.pending_init.invalidate();
         self.pending_frame.invalidate();
         self.pending_surface.invalidate();
+        self.pending_navigation_cancel = None;
         self.pending_target_permit = None;
         self.surface_recovery_permit = None;
         self.pending_tab_create = None;
@@ -1345,12 +1732,26 @@ fn render_worker_main(
         return;
     }
 
-    while let Ok(command) = receiver.recv() {
+    loop {
+        let command = if worker.has_pending_navigation() {
+            match receiver.recv_timeout(NAVIGATION_POLL_INTERVAL) {
+                Ok(command) => Some(command),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        } else {
+            match receiver.recv() {
+                Ok(command) => Some(command),
+                Err(_) => return,
+            }
+        };
+
         if cancellation.is_cancelled() {
             return;
         }
 
-        match command {
+        if let Some(command) = command {
+            match command {
             WorkerCommand::AttachInitialSurface { target, surface } => {
                 let result = worker.attach_initial_surface(target, surface);
                 if proxy
@@ -1395,14 +1796,48 @@ fn render_worker_main(
                     return;
                 }
             }
-            WorkerCommand::ReplaceSurface { target, surface } => {
-                let result = worker.replace_surface(target, surface);
-                if proxy
-                    .send_event(WorkerEvent::SurfaceReplaced { target, result })
-                    .is_err()
-                {
-                    return;
+                WorkerCommand::ReplaceSurface { target, surface } => {
+                    let result = worker.replace_surface(target, surface);
+                    if proxy
+                        .send_event(WorkerEvent::SurfaceReplaced { target, result })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
+                WorkerCommand::BeginNavigation { target, location } => {
+                    if let Err(message) = worker.begin_navigation(target, location)
+                        && proxy
+                            .send_event(WorkerEvent::NavigationFinished {
+                                target,
+                                outcome: WorkerNavigationOutcome::Failed { message },
+                            })
+                            .is_err()
+                    {
+                        return;
+                    }
+                }
+                WorkerCommand::CancelNavigation { target } => {
+                    let result = worker.cancel_navigation(target);
+                    if proxy
+                        .send_event(WorkerEvent::NavigationCancelFinished { target, result })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+
+        if cancellation.is_cancelled() {
+            return;
+        }
+        for (target, outcome) in worker.poll_navigations() {
+            if proxy
+                .send_event(WorkerEvent::NavigationFinished { target, outcome })
+                .is_err()
+            {
+                return;
             }
         }
     }
@@ -1418,6 +1853,7 @@ struct RenderWorker {
     cancellation: CancellationToken,
     last_request_id: u64,
     last_viewport: Option<Viewport>,
+    pending_navigations: BTreeMap<TabId, PendingWorkerNavigation>,
 }
 
 impl RenderWorker {
@@ -1459,6 +1895,7 @@ impl RenderWorker {
             cancellation,
             last_request_id: init_target.request().get(),
             last_viewport: None,
+            pending_navigations: BTreeMap::new(),
         })
     }
 
@@ -1520,6 +1957,7 @@ impl RenderWorker {
                 tab.get()
             ));
         }
+        self.pending_navigations.remove(&tab);
         if !self.engine.close_view(tab).map_err(|error| {
             format!("failed to retire Rarog View for tab {}: {error}", tab.get())
         })? {
@@ -1529,6 +1967,92 @@ impl RenderWorker {
             ));
         }
         Ok(())
+    }
+
+    fn begin_navigation(
+        &mut self,
+        target: WorkerNavigationTarget,
+        location: String,
+    ) -> Result<(), String> {
+        self.ensure_active()?;
+        if target.window != self.window || !self.engine.has_view(target.tab) {
+            return Err(format!(
+                "navigation {} targeted unavailable window {} tab {}",
+                target.navigation.get(),
+                target.window.get(),
+                target.tab.get()
+            ));
+        }
+
+        let request = self
+            .engine
+            .begin_navigation(target.tab, location)
+            .map_err(|error| format!("failed to begin Rarog navigation: {error}"))?
+            .ok_or_else(|| "Rarog declined the browser navigation".to_string())?;
+        self.pending_navigations
+            .insert(target.tab, PendingWorkerNavigation { target, engine: request });
+        Ok(())
+    }
+
+    fn cancel_navigation(&mut self, target: WorkerNavigationTarget) -> Result<bool, String> {
+        self.ensure_active()?;
+        let Some(pending) = self.pending_navigations.get(&target.tab).copied() else {
+            return Ok(false);
+        };
+        if pending.target != target {
+            return Ok(false);
+        }
+
+        self.pending_navigations.remove(&target.tab);
+        self.engine
+            .cancel_navigation(pending.engine)
+            .map_err(|error| format!("failed to cancel Rarog navigation: {error}"))
+    }
+
+    fn has_pending_navigation(&self) -> bool {
+        !self.pending_navigations.is_empty()
+    }
+
+    fn poll_navigations(
+        &mut self,
+    ) -> Vec<(WorkerNavigationTarget, WorkerNavigationOutcome)> {
+        let tabs: Vec<_> = self.pending_navigations.keys().copied().collect();
+        let mut completed = Vec::new();
+
+        for tab in tabs {
+            let Some(pending) = self.pending_navigations.get(&tab).copied() else {
+                continue;
+            };
+            let outcome = match self.engine.poll_navigation(pending.engine) {
+                Ok(EngineNavigationPoll::Pending) => continue,
+                Ok(EngineNavigationPoll::Committed {
+                    location,
+                    status,
+                    source_bytes,
+                }) => WorkerNavigationOutcome::Committed {
+                    location,
+                    status,
+                    source_bytes,
+                },
+                Ok(EngineNavigationPoll::Failed { message }) => {
+                    WorkerNavigationOutcome::Failed { message }
+                }
+                Ok(EngineNavigationPoll::Stale) => WorkerNavigationOutcome::Stale,
+                Err(error) => WorkerNavigationOutcome::Failed {
+                    message: format!("Rarog navigation polling failed: {error}"),
+                },
+            };
+            if self
+                .pending_navigations
+                .get(&tab)
+                .is_some_and(|current| current.target == pending.target)
+            {
+                self.pending_navigations.remove(&tab);
+                completed.push((pending.target, outcome));
+            }
+        }
+
+        completed
     }
 
     fn replace_surface(
