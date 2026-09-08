@@ -10,6 +10,7 @@ pub(crate) enum RunMode {
     ExitAfterTabActivation,
     ExitAfterTabClose,
     ExitAfterRapidTabActivation,
+    ExitAfterRealHttpNavigation,
 }
 
 #[cfg(target_os = "windows")]
