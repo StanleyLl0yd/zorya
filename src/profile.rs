@@ -3,6 +3,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const SETTINGS_SCHEMA_VERSION: u32 = 1;
 pub const MAX_SETTINGS_RECORD_BYTES: usize = 64 * 1024;
@@ -18,7 +19,10 @@ const SETTINGS_GENERATION_DIGITS: usize = 20;
 const SETTINGS_RETAINED_GENERATIONS: usize = 3;
 const MAX_SETTINGS_DIRECTORY_ENTRIES: usize = 128;
 const MAX_DISCOVERED_GENERATIONS: usize = 64;
+const MAX_PENDING_FILE_ATTEMPTS: usize = 8;
 const CHECKSUM_BYTES: usize = 8;
+const PENDING_FILE_PREFIX: &str = ".pending-settings-";
+static NEXT_PENDING_FILE: AtomicU64 = AtomicU64::new(1);
 const MIN_RECORD_BYTES: usize = 8 + 4 + 8 + 4 + CHECKSUM_BYTES;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -106,11 +110,16 @@ impl SettingsLoad {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsCleanupWarning {
     generations: Vec<u64>,
+    pending_files: Vec<PathBuf>,
 }
 
 impl SettingsCleanupWarning {
     pub fn generations(&self) -> &[u64] {
         &self.generations
+    }
+
+    pub fn pending_files(&self) -> &[PathBuf] {
+        &self.pending_files
     }
 }
 
@@ -178,6 +187,9 @@ pub enum ProfileStorageError {
     ConcurrentSettingsWrite {
         generation: u64,
     },
+    PendingSettingsFileCollisionLimit {
+        attempts: usize,
+    },
 }
 
 impl fmt::Display for ProfileStorageError {
@@ -234,6 +246,10 @@ impl fmt::Display for ProfileStorageError {
             Self::ConcurrentSettingsWrite { generation } => write!(
                 formatter,
                 "profile settings generation {generation} was created concurrently"
+            ),
+            Self::PendingSettingsFileCollisionLimit { attempts } => write!(
+                formatter,
+                "could not allocate a unique pending settings file after {attempts} attempts"
             ),
         }
     }
@@ -316,7 +332,7 @@ impl ProfileStore {
             .recovery()
             .map(|recovery| recovery.skipped_generations())
             .unwrap_or(&[]);
-        let generations = self.discover_generations_with_reserve(1)?;
+        let generations = self.discover_generations_with_reserve(2)?;
         if let Some(unexpected) =
             unexpected_generation(current_generation, recovered, &generations)
         {
@@ -329,26 +345,48 @@ impl ProfileStore {
             .checked_add(1)
             .ok_or(ProfileStorageError::SettingsGenerationExhausted)?;
         let bytes = encode_settings(snapshot, generation)?;
-        let path = self.settings_path(generation);
-        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(ProfileStorageError::ConcurrentSettingsWrite { generation });
-            }
-            Err(error) => return Err(io_error("create settings generation", &path, error)),
-        };
+        let final_path = self.settings_path(generation);
+        let (pending_path, mut file) = self.create_pending_settings_file(generation)?;
 
         if let Err(error) = file.write_all(&bytes) {
-            return Err(io_error("write settings generation", &path, error));
+            let _ = fs::remove_file(&pending_path);
+            return Err(io_error("write pending settings generation", &pending_path, error));
         }
         if let Err(error) = file.sync_all() {
-            return Err(io_error("sync settings generation", &path, error));
+            let _ = fs::remove_file(&pending_path);
+            return Err(io_error("sync pending settings generation", &pending_path, error));
         }
         drop(file);
 
+        match fs::hard_link(&pending_path, &final_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&pending_path);
+                return Err(ProfileStorageError::ConcurrentSettingsWrite { generation });
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&pending_path);
+                return Err(io_error("publish settings generation", &final_path, error));
+            }
+        }
+
+        let mut pending_cleanup = Vec::new();
+        if let Err(error) = fs::remove_file(&pending_path) {
+            if error.kind() != io::ErrorKind::NotFound {
+                pending_cleanup.push(pending_path);
+            }
+        }
+
         let mut saved = snapshot.clone();
         saved.generation = generation;
-        let cleanup_warning = self.cleanup_generations(generation, &generations);
+        let failed_generations = self.cleanup_generations(generation, &generations);
+        let cleanup_warning =
+            (!failed_generations.is_empty() || !pending_cleanup.is_empty()).then_some(
+                SettingsCleanupWarning {
+                    generations: failed_generations,
+                    pending_files: pending_cleanup,
+                },
+            );
         Ok(SettingsSave {
             snapshot: saved,
             cleanup_warning,
@@ -412,7 +450,7 @@ impl ProfileStore {
         &self,
         current_generation: u64,
         previous_generations: &[u64],
-    ) -> Option<SettingsCleanupWarning> {
+    ) -> Vec<u64> {
         let mut failed = Vec::new();
         for &generation in previous_generations
             .iter()
@@ -428,8 +466,30 @@ impl ProfileStore {
         }
 
         debug_assert!(!failed.contains(&current_generation));
-        (!failed.is_empty()).then_some(SettingsCleanupWarning {
-            generations: failed,
+        failed
+    }
+
+    fn create_pending_settings_file(
+        &self,
+        generation: u64,
+    ) -> Result<(PathBuf, File), ProfileStorageError> {
+        for _ in 0..MAX_PENDING_FILE_ATTEMPTS {
+            let sequence = NEXT_PENDING_FILE.fetch_add(1, Ordering::Relaxed);
+            let name = format!(
+                "{PENDING_FILE_PREFIX}{generation:020}-{:010}-{sequence:020}.tmp",
+                std::process::id()
+            );
+            let path = self.settings_directory.join(name);
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok((path, file)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(io_error("create pending settings generation", &path, error));
+                }
+            }
+        }
+        Err(ProfileStorageError::PendingSettingsFileCollisionLimit {
+            attempts: MAX_PENDING_FILE_ATTEMPTS,
         })
     }
 
@@ -1005,7 +1065,7 @@ mod tests {
             Err(ProfileStorageError::SettingsDirectoryEntryLimitExceeded {
                 found,
                 limit
-            }) if found == MAX_SETTINGS_DIRECTORY_ENTRIES + 1
+            }) if found == MAX_SETTINGS_DIRECTORY_ENTRIES + 2
                 && limit == MAX_SETTINGS_DIRECTORY_ENTRIES
         ));
     }
