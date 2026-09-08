@@ -452,16 +452,16 @@ impl ProfileStore {
         previous_current_generation: u64,
         previous_generations: &[u64],
     ) -> Vec<u64> {
-        let older_backup = previous_generations
+        let retained_older = previous_generations
             .iter()
             .copied()
-            .find(|&generation| generation < previous_current_generation);
+            .filter(|&generation| generation < previous_current_generation)
+            .take(SETTINGS_RETAINED_GENERATIONS.saturating_sub(2))
+            .collect::<Vec<_>>();
         let mut failed = Vec::new();
 
         for &generation in previous_generations {
-            let retain = generation == previous_current_generation
-                || Some(generation) == older_backup;
-            if retain {
+            if generation == previous_current_generation || retained_older.contains(&generation) {
                 continue;
             }
 
@@ -527,9 +527,7 @@ fn validate_setting_key(key: &str) -> Result<(), ProfileStorageError> {
     let valid = !key.is_empty()
         && key.len() <= MAX_SETTING_KEY_BYTES
         && key.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'-' | b'_')
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
         });
     if valid {
         Ok(())
@@ -551,11 +549,7 @@ fn validate_setting_value(value: &str) -> Result<(), ProfileStorageError> {
     }
 }
 
-fn unexpected_generation(
-    current: u64,
-    recovered: &[u64],
-    generations: &[u64],
-) -> Option<u64> {
+fn unexpected_generation(current: u64, recovered: &[u64], generations: &[u64]) -> Option<u64> {
     generations
         .iter()
         .find(|&&generation| generation > current && !recovered.contains(&generation))
@@ -581,7 +575,8 @@ fn parse_generation_file_name(name: &std::ffi::OsStr) -> Option<u64> {
 }
 
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, ProfileStorageError> {
-    let file = File::open(path).map_err(|error| io_error("open settings generation", path, error))?;
+    let file =
+        File::open(path).map_err(|error| io_error("open settings generation", path, error))?;
     let mut bytes = Vec::new();
     file.take((limit + 1) as u64)
         .read_to_end(&mut bytes)
@@ -619,12 +614,16 @@ fn encode_settings(
     Ok(bytes)
 }
 
+#[derive(Debug)]
 enum DecodeError {
     Corrupt,
     UnsupportedSchema(u32),
 }
 
-fn decode_settings(bytes: &[u8], expected_generation: u64) -> Result<SettingsSnapshot, DecodeError> {
+fn decode_settings(
+    bytes: &[u8],
+    expected_generation: u64,
+) -> Result<SettingsSnapshot, DecodeError> {
     if bytes.len() < 12 {
         return Err(DecodeError::Corrupt);
     }
@@ -672,10 +671,7 @@ fn decode_settings(bytes: &[u8], expected_generation: u64) -> Result<SettingsSna
     for _ in 0..count {
         let key_len = u16::from_le_bytes(cursor.take_array::<2>()?) as usize;
         let value_len = u32::from_le_bytes(cursor.take_array::<4>()?) as usize;
-        if key_len == 0
-            || key_len > MAX_SETTING_KEY_BYTES
-            || value_len > MAX_SETTING_VALUE_BYTES
-        {
+        if key_len == 0 || key_len > MAX_SETTING_KEY_BYTES || value_len > MAX_SETTING_VALUE_BYTES {
             return Err(DecodeError::Corrupt);
         }
 
@@ -726,9 +722,7 @@ impl<'a> RecordCursor<'a> {
     }
 
     fn take_array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
-        self.take(N)?
-            .try_into()
-            .map_err(|_| DecodeError::Corrupt)
+        self.take(N)?.try_into().map_err(|_| DecodeError::Corrupt)
     }
 
     fn is_finished(&self) -> bool {
@@ -791,11 +785,7 @@ mod tests {
         snapshot
     }
 
-    fn raw_record(
-        generation: u64,
-        schema: u32,
-        entries: &[(&str, &str)],
-    ) -> Vec<u8> {
+    fn raw_record(generation: u64, schema: u32, entries: &[(&str, &str)]) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&SETTINGS_MAGIC);
         bytes.extend_from_slice(&schema.to_le_bytes());
@@ -985,7 +975,11 @@ mod tests {
         let next = first.generation() + 1;
         fs::write(
             store.settings_path(next),
-            raw_record(next, SETTINGS_SCHEMA_VERSION + 1, &[("browser.mode", "future")]),
+            raw_record(
+                next,
+                SETTINGS_SCHEMA_VERSION + 1,
+                &[("browser.mode", "future")],
+            ),
         )
         .expect("write newer schema");
 
@@ -1021,10 +1015,7 @@ mod tests {
     #[test]
     fn unexpected_generation_detection_distinguishes_recovery_from_concurrency() {
         assert_eq!(unexpected_generation(4, &[6, 5], &[6, 5, 4, 3]), None);
-        assert_eq!(
-            unexpected_generation(4, &[5], &[6, 5, 4, 3]),
-            Some(6)
-        );
+        assert_eq!(unexpected_generation(4, &[5], &[6, 5, 4, 3]), Some(6));
     }
 
     #[test]
@@ -1110,7 +1101,11 @@ mod tests {
             vec![6, first.generation()]
         );
         assert_eq!(
-            store.load_settings().unwrap().snapshot().get("browser.mode"),
+            store
+                .load_settings()
+                .unwrap()
+                .snapshot()
+                .get("browser.mode"),
             Some("recovered")
         );
     }
@@ -1122,7 +1117,9 @@ mod tests {
 
         for index in 0..=MAX_SETTINGS_DIRECTORY_ENTRIES {
             fs::write(
-                store.settings_directory.join(format!("unrelated-{index:03}.tmp")),
+                store
+                    .settings_directory
+                    .join(format!("unrelated-{index:03}.tmp")),
                 b"x",
             )
             .unwrap();
@@ -1145,7 +1142,9 @@ mod tests {
 
         for index in 0..MAX_SETTINGS_DIRECTORY_ENTRIES {
             fs::write(
-                store.settings_directory.join(format!("unrelated-{index:03}.tmp")),
+                store
+                    .settings_directory
+                    .join(format!("unrelated-{index:03}.tmp")),
                 b"x",
             )
             .unwrap();
