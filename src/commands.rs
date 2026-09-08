@@ -169,7 +169,8 @@ mod tests {
         let effect = app
             .dispatch_browser_command(window, BrowserCommand::CloseTab)
             .expect("close command");
-        let BrowserCommandEffect::TabCloseStarted(TabCloseStart::ActiveWithFallback(close)) = effect
+        let BrowserCommandEffect::TabCloseStarted(TabCloseStart::ActiveWithFallback(close)) =
+            effect
         else {
             panic!("active close should start fallback handoff");
         };
