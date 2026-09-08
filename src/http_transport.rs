@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::sync::mpsc as std_mpsc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch};
 
@@ -164,9 +165,7 @@ fn transport_worker_main(
     let runtime = match Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = initialized.send(Err(format!(
-                "failed to initialize HTTP runtime: {error}"
-            )));
+            let _ = initialized.send(Err(format!("failed to initialize HTTP runtime: {error}")));
             return;
         }
     };
@@ -221,11 +220,16 @@ async fn run_request(
         return;
     }
 
-    let request = execute_request(client, command.request);
-    let result = tokio::select! {
-        biased;
-        _ = command.cancellation.changed() => return,
-        result = request => result,
+    let mut request = Box::pin(execute_request(client, command.request));
+    let result = loop {
+        if *command.cancellation.borrow() {
+            return;
+        }
+
+        match tokio::time::timeout(Duration::from_millis(10), request.as_mut()).await {
+            Ok(result) => break result,
+            Err(_) => continue,
+        }
     };
 
     if *command.cancellation.borrow() {
