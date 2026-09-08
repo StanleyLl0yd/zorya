@@ -348,7 +348,7 @@ impl ProfileStore {
 
         let mut saved = snapshot.clone();
         saved.generation = generation;
-        let cleanup_warning = self.cleanup_generations(generation)?;
+        let cleanup_warning = self.cleanup_generations(generation, &generations);
         Ok(SettingsSave {
             snapshot: saved,
             cleanup_warning,
@@ -403,10 +403,16 @@ impl ProfileStore {
     fn cleanup_generations(
         &self,
         current_generation: u64,
-    ) -> Result<Option<SettingsCleanupWarning>, ProfileStorageError> {
-        let generations = self.discover_generations()?;
+        previous_generations: &[u64],
+    ) -> Option<SettingsCleanupWarning> {
         let mut failed = Vec::new();
-        for generation in generations.into_iter().skip(SETTINGS_RETAINED_GENERATIONS) {
+        for &generation in previous_generations
+            .iter()
+            .take(previous_generations.len().saturating_sub(
+                SETTINGS_RETAINED_GENERATIONS.saturating_sub(1),
+            ))
+            .rev()
+        {
             let path = self.settings_path(generation);
             if let Err(error) = fs::remove_file(&path) {
                 if error.kind() != io::ErrorKind::NotFound {
@@ -415,17 +421,10 @@ impl ProfileStore {
             }
         }
 
-        if failed.contains(&current_generation) {
-            return Err(ProfileStorageError::Io {
-                operation: "retain current settings generation",
-                path: self.settings_path(current_generation),
-                kind: io::ErrorKind::Other,
-            });
-        }
-
-        Ok((!failed.is_empty()).then_some(SettingsCleanupWarning {
+        debug_assert!(!failed.contains(&current_generation));
+        (!failed.is_empty()).then_some(SettingsCleanupWarning {
             generations: failed,
-        }))
+        })
     }
 
     fn settings_path(&self, generation: u64) -> PathBuf {
