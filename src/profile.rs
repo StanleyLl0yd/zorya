@@ -294,15 +294,28 @@ impl ProfileStore {
         snapshot: &SettingsSnapshot,
     ) -> Result<SettingsSave, ProfileStorageError> {
         validate_snapshot(snapshot)?;
-        let current = self.load_settings()?.into_snapshot();
-        if current.generation != snapshot.generation {
+        let loaded = self.load_settings()?;
+        let current_generation = loaded.snapshot().generation();
+        if current_generation != snapshot.generation {
             return Err(ProfileStorageError::StaleSettingsGeneration {
-                current: current.generation,
+                current: current_generation,
                 provided: snapshot.generation,
             });
         }
 
+        let recovered = loaded
+            .recovery()
+            .map(|recovery| recovery.skipped_generations())
+            .unwrap_or(&[]);
         let generations = self.discover_generations()?;
+        if let Some(&unexpected) = generations
+            .iter()
+            .find(|&&generation| generation > current_generation && !recovered.contains(&generation))
+        {
+            return Err(ProfileStorageError::ConcurrentSettingsWrite {
+                generation: unexpected,
+            });
+        }
         let previous_max = generations.first().copied().unwrap_or(0);
         let generation = previous_max
             .checked_add(1)
@@ -351,6 +364,12 @@ impl ProfileStore {
                     error,
                 )
             })?;
+            let file_type = entry.file_type().map_err(|error| {
+                io_error("inspect settings directory entry", &entry.path(), error)
+            })?;
+            if !file_type.is_file() {
+                continue;
+            }
             if let Some(generation) = parse_generation_file_name(&entry.file_name()) {
                 generations.push(generation);
                 if generations.len() > MAX_DISCOVERED_GENERATIONS {
@@ -838,6 +857,51 @@ mod tests {
                 current,
                 provided
             }) if current == second.generation() && provided == stale.generation()
+        ));
+    }
+
+    #[test]
+    fn unexpected_generation_after_load_is_a_concurrent_write_conflict() {
+        let directory = TestDirectory::new();
+        let store = ProfileStore::open(directory.path()).expect("open profile");
+        let first = store
+            .save_settings(&snapshot_with("browser.mode", "first"))
+            .unwrap()
+            .into_snapshot();
+
+        let loaded = store.load_settings().unwrap();
+        assert_eq!(loaded.snapshot().generation(), first.generation());
+
+        let concurrent_generation = first.generation() + 1;
+        fs::write(
+            store.settings_path(concurrent_generation),
+            raw_record(
+                concurrent_generation,
+                SETTINGS_SCHEMA_VERSION,
+                &[("browser.mode", "concurrent")],
+            ),
+        )
+        .unwrap();
+
+        let recovered = loaded
+            .recovery()
+            .map(|recovery| recovery.skipped_generations())
+            .unwrap_or(&[]);
+        let generations = store.discover_generations().unwrap();
+        let unexpected = generations
+            .iter()
+            .find(|&&generation| {
+                generation > loaded.snapshot().generation() && !recovered.contains(&generation)
+            })
+            .copied();
+        assert_eq!(unexpected, Some(concurrent_generation));
+
+        assert!(matches!(
+            store.save_settings(&first),
+            Err(ProfileStorageError::StaleSettingsGeneration {
+                current,
+                provided
+            }) if current == concurrent_generation && provided == first.generation()
         ));
     }
 
