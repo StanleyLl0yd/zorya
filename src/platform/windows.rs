@@ -474,11 +474,7 @@ impl NativeShell {
 
     fn native_neutral_confirmed(&self) -> bool {
         self.presentation.content() == WebContentPresentation::Neutral
-            && self
-                .window
-                .as_ref()
-                .and_then(|window| window.is_visible())
-                == Some(false)
+            && self.window.as_ref().and_then(|window| window.is_visible()) == Some(false)
     }
 
     fn begin_native_tab_activation(&mut self, start: TabActivationStart) -> Result<(), String> {
@@ -619,7 +615,9 @@ impl NativeShell {
                 let intent = close.activation().intent();
                 self.presentation
                     .begin_activation(intent)
-                    .map_err(|error| format!("failed to begin close presentation handoff: {error}"))?;
+                    .map_err(|error| {
+                        format!("failed to begin close presentation handoff: {error}")
+                    })?;
                 self.enter_native_neutral()?;
                 self.presentation
                     .confirm_neutral(intent.id())
@@ -661,7 +659,9 @@ impl NativeShell {
                 self.enter_native_neutral()?;
                 self.presentation
                     .confirm_current_tab_neutral(close.closing_tab())
-                    .map_err(|error| format!("failed to confirm last-tab neutral state: {error}"))?;
+                    .map_err(|error| {
+                        format!("failed to confirm last-tab neutral state: {error}")
+                    })?;
                 self.browser
                     .commit_last_tab_close_after_neutral(
                         self.browser_window,
@@ -868,8 +868,7 @@ impl NativeShell {
                             return;
                         }
                         if self.presentation.pending_activation().is_none()
-                            && self.presentation.content()
-                                == WebContentPresentation::Tab(self.tab)
+                            && self.presentation.content() == WebContentPresentation::Tab(self.tab)
                         {
                             if let Err(error) = self.leave_native_neutral() {
                                 self.fail(event_loop, error);
@@ -884,9 +883,7 @@ impl NativeShell {
                 permit,
                 result,
             } => {
-                if permit.tab() != target.tab()
-                    || !self.pending_frame.complete_if_current(target)
-                {
+                if permit.tab() != target.tab() || !self.pending_frame.complete_if_current(target) {
                     return;
                 }
 
