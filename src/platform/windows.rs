@@ -1348,7 +1348,9 @@ impl NativeShell {
                         self.request_redraw();
                     }
                     WorkerNavigationOutcome::InternalFailure { .. } => {
-                        unreachable!("internal navigation failures are handled before stale filtering")
+                        unreachable!(
+                            "internal navigation failures are handled before stale filtering"
+                        )
                     }
                     WorkerNavigationOutcome::Stale => {
                         self.fail(
