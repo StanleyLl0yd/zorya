@@ -1065,7 +1065,7 @@ mod tests {
             Err(ProfileStorageError::SettingsDirectoryEntryLimitExceeded {
                 found,
                 limit
-            }) if found == MAX_SETTINGS_DIRECTORY_ENTRIES + 2
+            }) if found == MAX_SETTINGS_DIRECTORY_ENTRIES + 1
                 && limit == MAX_SETTINGS_DIRECTORY_ENTRIES
         ));
     }
