@@ -316,7 +316,7 @@ impl ProfileStore {
             .recovery()
             .map(|recovery| recovery.skipped_generations())
             .unwrap_or(&[]);
-        let generations = self.discover_generations()?;
+        let generations = self.discover_generations_with_reserve(1)?;
         if let Some(unexpected) =
             unexpected_generation(current_generation, recovered, &generations)
         {
@@ -356,6 +356,13 @@ impl ProfileStore {
     }
 
     fn discover_generations(&self) -> Result<Vec<u64>, ProfileStorageError> {
+        self.discover_generations_with_reserve(0)
+    }
+
+    fn discover_generations_with_reserve(
+        &self,
+        reserved_entries: usize,
+    ) -> Result<Vec<u64>, ProfileStorageError> {
         let entries = fs::read_dir(&self.settings_directory).map_err(|error| {
             io_error(
                 "read settings directory",
@@ -367,9 +374,10 @@ impl ProfileStore {
         let mut entry_count = 0usize;
         for entry in entries {
             entry_count = entry_count.saturating_add(1);
-            if entry_count > MAX_SETTINGS_DIRECTORY_ENTRIES {
+            let prospective = entry_count.saturating_add(reserved_entries);
+            if prospective > MAX_SETTINGS_DIRECTORY_ENTRIES {
                 return Err(ProfileStorageError::SettingsDirectoryEntryLimitExceeded {
-                    found: entry_count,
+                    found: prospective,
                     limit: MAX_SETTINGS_DIRECTORY_ENTRIES,
                 });
             }
@@ -957,6 +965,30 @@ mod tests {
 
         assert!(matches!(
             store.load_settings(),
+            Err(ProfileStorageError::SettingsDirectoryEntryLimitExceeded {
+                found,
+                limit
+            }) if found == MAX_SETTINGS_DIRECTORY_ENTRIES + 1
+                && limit == MAX_SETTINGS_DIRECTORY_ENTRIES
+        ));
+    }
+
+    #[test]
+    fn save_reserves_a_directory_slot_before_creating_a_generation() {
+        let directory = TestDirectory::new();
+        let store = ProfileStore::open(directory.path()).expect("open profile");
+
+        for index in 0..MAX_SETTINGS_DIRECTORY_ENTRIES {
+            fs::write(
+                store.settings_directory.join(format!("unrelated-{index:03}.tmp")),
+                b"x",
+            )
+            .unwrap();
+        }
+
+        assert!(store.load_settings().is_ok());
+        assert!(matches!(
+            store.save_settings(&SettingsSnapshot::default()),
             Err(ProfileStorageError::SettingsDirectoryEntryLimitExceeded {
                 found,
                 limit
