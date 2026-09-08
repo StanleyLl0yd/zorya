@@ -445,9 +445,7 @@ fn validate_setting_value(value: &str) -> Result<(), ProfileStorageError> {
 }
 
 fn settings_file_name(generation: u64) -> String {
-    format!(
-        "{SETTINGS_FILE_PREFIX}{generation:0SETTINGS_GENERATION_DIGITS$}{SETTINGS_FILE_SUFFIX}"
-    )
+    format!("{SETTINGS_FILE_PREFIX}{generation:020}{SETTINGS_FILE_SUFFIX}")
 }
 
 fn parse_generation_file_name(name: &std::ffi::OsStr) -> Option<u64> {
@@ -512,9 +510,20 @@ enum DecodeError {
 }
 
 fn decode_settings(bytes: &[u8], expected_generation: u64) -> Result<SettingsSnapshot, DecodeError> {
-    if bytes.len() < MIN_RECORD_BYTES || bytes.len() > MAX_SETTINGS_RECORD_BYTES {
+    if bytes.len() < 12 || bytes.len() > MAX_SETTINGS_RECORD_BYTES {
         return Err(DecodeError::Corrupt);
     }
+    if bytes[..8] != SETTINGS_MAGIC {
+        return Err(DecodeError::Corrupt);
+    }
+    let schema = u32::from_le_bytes(bytes[8..12].try_into().map_err(|_| DecodeError::Corrupt)?);
+    if schema != SETTINGS_SCHEMA_VERSION {
+        return Err(DecodeError::UnsupportedSchema(schema));
+    }
+    if bytes.len() < MIN_RECORD_BYTES {
+        return Err(DecodeError::Corrupt);
+    }
+
     let payload_len = bytes
         .len()
         .checked_sub(CHECKSUM_BYTES)
@@ -533,10 +542,8 @@ fn decode_settings(bytes: &[u8], expected_generation: u64) -> Result<SettingsSna
     if cursor.take_array::<8>()? != SETTINGS_MAGIC {
         return Err(DecodeError::Corrupt);
     }
-    let schema = u32::from_le_bytes(cursor.take_array::<4>()?);
-    if schema != SETTINGS_SCHEMA_VERSION {
-        return Err(DecodeError::UnsupportedSchema(schema));
-    }
+    let decoded_schema = u32::from_le_bytes(cursor.take_array::<4>()?);
+    debug_assert_eq!(decoded_schema, SETTINGS_SCHEMA_VERSION);
     let generation = u64::from_le_bytes(cursor.take_array::<8>()?);
     if generation != expected_generation || generation == 0 {
         return Err(DecodeError::Corrupt);
