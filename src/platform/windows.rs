@@ -2423,6 +2423,8 @@ impl WebContentSurface {
                 if let Err(error) = self.backend.submit(FrameSubmission {
                     plan: &plan,
                     display_list: frame.display_list,
+                    image_resources: Some(frame.image_resources),
+                    viewport_translation: frame.viewport_translation,
                     clear_color: frame.clear_color,
                 }) {
                     return Err(self.discard_plan_or_fatal(
