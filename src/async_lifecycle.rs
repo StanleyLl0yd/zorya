@@ -132,6 +132,10 @@ impl PendingRequest {
         self.current.is_some()
     }
 
+    pub(crate) const fn current(&self) -> Option<AsyncTarget> {
+        self.current
+    }
+
     pub(crate) fn is_current(&self, target: AsyncTarget) -> bool {
         self.current == Some(target)
     }
@@ -201,6 +205,20 @@ mod tests {
         assert!(second.request().get() > first.request().get());
         assert_eq!(first.window(), window);
         assert_eq!(first.tab(), tab);
+    }
+
+    #[test]
+    fn current_exposes_only_the_exact_pending_target() {
+        let (window, tab) = target_ids();
+        let mut sequence = AsyncRequestSequence::new();
+        let mut pending = PendingRequest::default();
+        let target = sequence.allocate(window, tab).expect("target");
+
+        assert_eq!(pending.current(), None);
+        pending.begin(target).expect("begin target");
+        assert_eq!(pending.current(), Some(target));
+        assert!(pending.complete_if_current(target));
+        assert_eq!(pending.current(), None);
     }
 
     #[test]
