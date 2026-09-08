@@ -408,9 +408,7 @@ impl ProfileStore {
         let mut failed = Vec::new();
         for &generation in previous_generations
             .iter()
-            .take(previous_generations.len().saturating_sub(
-                SETTINGS_RETAINED_GENERATIONS.saturating_sub(1),
-            ))
+            .skip(SETTINGS_RETAINED_GENERATIONS.saturating_sub(1))
             .rev()
         {
             let path = self.settings_path(generation);
