@@ -5,8 +5,9 @@ use crate::async_lifecycle::{
 use crate::branding::application_icon;
 use crate::engine::{EngineFrameCause, EngineFrameRequest, EngineHost, Viewport};
 use crate::{
-    BrowserApp, BrowserWindowId, NavigationId, PresentationFramePermit, PresentationGeneration,
-    TabId, TabPresentationHandoff,
+    BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserWindowId, NavigationId,
+    PresentationFramePermit, PresentationGeneration, PresentationHandoffError, TabActivationStart,
+    TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -20,8 +21,9 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Icon, Window, WindowId};
 
 const START_LOCATION: &str = "about:blank";
@@ -38,11 +40,6 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         .window(browser_window)
         .and_then(|window| window.active_tab_id())
         .expect("browser bootstrap creates one active tab");
-    let activation_smoke_target = if mode == RunMode::ExitAfterTabActivation {
-        Some(browser.create_tab(browser_window)?)
-    } else {
-        None
-    };
     let event_loop = EventLoop::<WorkerEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let initial_navigation = browser
@@ -54,7 +51,6 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         browser,
         browser_window,
         tab,
-        activation_smoke_target,
         initial_navigation,
         proxy,
         mode,
@@ -77,6 +73,10 @@ enum WorkerEvent {
         target: AsyncTarget,
         result: Result<(), String>,
     },
+    ViewCreated {
+        target: AsyncTarget,
+        result: Result<(), String>,
+    },
     FrameFinished {
         target: AsyncTarget,
         permit: PresentationFramePermit,
@@ -92,6 +92,9 @@ enum WorkerCommand {
     AttachInitialSurface {
         target: AsyncTarget,
         surface: WindowsGpuSurface,
+    },
+    CreateView {
+        target: AsyncTarget,
     },
     Render {
         target: AsyncTarget,
@@ -119,7 +122,6 @@ impl WorkerHandle {
     fn spawn(
         target: AsyncTarget,
         generation: PresentationGeneration,
-        additional_tabs: Vec<TabId>,
         proxy: EventLoopProxy<WorkerEvent>,
     ) -> Result<Self, String> {
         let (sender, receiver) = sync_channel(1);
@@ -128,14 +130,7 @@ impl WorkerHandle {
         let thread = thread::Builder::new()
             .name("zorya-render".into())
             .spawn(move || {
-                render_worker_main(
-                    target,
-                    generation,
-                    additional_tabs,
-                    receiver,
-                    proxy,
-                    worker_cancellation,
-                )
+                render_worker_main(target, generation, receiver, proxy, worker_cancellation)
             })
             .map_err(|error| format!("failed to start render worker: {error}"))?;
 
@@ -152,6 +147,10 @@ impl WorkerHandle {
         surface: WindowsGpuSurface,
     ) -> Result<(), String> {
         self.send(WorkerCommand::AttachInitialSurface { target, surface })
+    }
+
+    fn create_view(&self, target: AsyncTarget) -> Result<(), String> {
+        self.send(WorkerCommand::CreateView { target })
     }
 
     fn render(
@@ -193,13 +192,22 @@ impl WorkerHandle {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingNativeTabCreate {
+    target: AsyncTarget,
+    navigation: NavigationId,
+}
+
 struct NativeShell {
     browser: BrowserApp,
     browser_window: BrowserWindowId,
     tab: TabId,
-    activation_smoke_target: Option<TabId>,
     presentation: TabPresentationHandoff,
+    pending_target_permit: Option<TargetFramePermit>,
     surface_recovery_permit: Option<PresentationFramePermit>,
+    pending_tab_create: Option<PendingNativeTabCreate>,
+    restore_focus_after_activation: bool,
+    modifiers: ModifiersState,
     initial_navigation: Option<NavigationId>,
     proxy: EventLoopProxy<WorkerEvent>,
     window: Option<Arc<Window>>,
@@ -220,7 +228,6 @@ impl NativeShell {
         browser: BrowserApp,
         browser_window: BrowserWindowId,
         tab: TabId,
-        activation_smoke_target: Option<TabId>,
         initial_navigation: NavigationId,
         proxy: EventLoopProxy<WorkerEvent>,
         run_mode: RunMode,
@@ -229,9 +236,12 @@ impl NativeShell {
             browser,
             browser_window,
             tab,
-            activation_smoke_target,
             presentation: TabPresentationHandoff::new(tab),
+            pending_target_permit: None,
             surface_recovery_permit: None,
+            pending_tab_create: None,
+            restore_focus_after_activation: false,
+            modifiers: ModifiersState::empty(),
             initial_navigation: Some(initial_navigation),
             proxy,
             window: None,
@@ -280,18 +290,14 @@ impl NativeShell {
             .begin(target)
             .map_err(|error| error.to_string())?;
 
-        let worker = match WorkerHandle::spawn(
-            target,
-            self.presentation.generation(),
-            self.activation_smoke_target.into_iter().collect(),
-            self.proxy.clone(),
-        ) {
-            Ok(worker) => worker,
-            Err(error) => {
-                self.pending_init.complete_if_current(target);
-                return Err(error);
-            }
-        };
+        let worker =
+            match WorkerHandle::spawn(target, self.presentation.generation(), self.proxy.clone()) {
+                Ok(worker) => worker,
+                Err(error) => {
+                    self.pending_init.complete_if_current(target);
+                    return Err(error);
+                }
+            };
 
         self.window = Some(window);
         self.worker = Some(worker);
@@ -340,16 +346,28 @@ impl NativeShell {
         if !self.worker_ready {
             return Ok(());
         }
-        if self.pending_frame.is_pending() || self.pending_surface.is_pending() {
+        if self.pending_frame.is_pending()
+            || self.pending_surface.is_pending()
+            || self.pending_tab_create.is_some()
+        {
             self.needs_redraw = true;
             return Ok(());
         }
+        if self.pending_target_permit.is_some() {
+            return self.dispatch_pending_target_frame();
+        }
 
-        let permit = self
-            .presentation
-            .authorize_current_frame(self.tab)
-            .map(PresentationFramePermit::from)
-            .map_err(|error| error.to_string())?;
+        let permit = match self.presentation.authorize_current_frame(self.tab) {
+            Ok(permit) => PresentationFramePermit::from(permit),
+            Err(
+                PresentationHandoffError::PendingActivationBlocksCurrentFrame { .. }
+                | PresentationHandoffError::CurrentFrameContentNeutral { .. },
+            ) => {
+                self.needs_redraw = true;
+                return Ok(());
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         self.start_frame_with_permit(permit)
     }
 
@@ -368,6 +386,9 @@ impl NativeShell {
         let size = window.inner_size();
         let viewport = Viewport::new(size.width, size.height);
         if viewport.is_suspended() {
+            if let PresentationFramePermit::Target(target) = permit {
+                self.pending_target_permit = Some(target);
+            }
             self.needs_redraw = true;
             return Ok(());
         }
@@ -394,79 +415,224 @@ impl NativeShell {
         Ok(())
     }
 
-    fn start_tab_activation_smoke(&mut self) -> Result<(), String> {
-        let target = self
-            .activation_smoke_target
-            .take()
-            .ok_or_else(|| "native tab activation smoke target is unavailable".to_string())?;
-        let product_start = self
-            .browser
-            .begin_tab_activation(self.browser_window, target)
-            .map_err(|error| format!("failed to begin product tab activation: {error}"))?;
-        if product_start.superseded().is_some() {
-            return Err("native tab activation smoke unexpectedly superseded product work".into());
+    fn dispatch_pending_target_frame(&mut self) -> Result<(), String> {
+        if self.pending_frame.is_pending() || self.pending_surface.is_pending() {
+            return Ok(());
         }
+        let Some(permit) = self.pending_target_permit.take() else {
+            return Ok(());
+        };
+        self.start_frame_with_permit(PresentationFramePermit::from(permit))
+    }
 
-        let intent = product_start.intent();
-        let presentation_start = self
-            .presentation
-            .begin_activation(intent)
-            .map_err(|error| format!("failed to begin presentation handoff: {error}"))?;
-        if presentation_start.superseded().is_some() {
-            return Err(
-                "native tab activation smoke unexpectedly superseded presentation work".into(),
-            );
-        }
-
+    fn enter_native_neutral(&mut self) -> Result<(), String> {
         let window = self
             .window
             .as_ref()
             .ok_or_else(|| "native window is unavailable".to_string())?;
-        window.set_visible(false);
+
+        if window.is_visible() != Some(false) {
+            self.restore_focus_after_activation |= window.has_focus();
+            window.set_visible(false);
+        }
         if window.is_visible() != Some(false) {
             return Err("native window did not confirm the browser-owned neutral state".into());
         }
+        Ok(())
+    }
 
+    fn leave_native_neutral(&mut self) -> Result<(), String> {
+        let window = self
+            .window
+            .as_ref()
+            .ok_or_else(|| "native window is unavailable".to_string())?;
+        window.set_visible(true);
+        if window.is_visible() != Some(true) {
+            return Err("native window did not confirm the target presentation state".into());
+        }
+
+        if self.restore_focus_after_activation {
+            window.focus_window();
+        }
+        self.restore_focus_after_activation = false;
+        Ok(())
+    }
+
+    fn begin_native_tab_activation(&mut self, start: TabActivationStart) -> Result<(), String> {
+        let intent = start.intent();
+        if intent.from() == intent.to() {
+            self.browser
+                .cancel_tab_activation(self.browser_window, intent.id())
+                .map_err(|error| format!("failed to cancel no-op tab activation: {error}"))?;
+            return Ok(());
+        }
+
+        self.presentation
+            .begin_activation(intent)
+            .map_err(|error| format!("failed to begin presentation handoff: {error}"))?;
+        self.enter_native_neutral()?;
         self.presentation
             .confirm_neutral(intent.id())
             .map_err(|error| format!("failed to confirm neutral presentation state: {error}"))?;
+
         let committed = self
             .browser
             .commit_tab_activation(self.browser_window, intent.id())
             .map_err(|error| format!("failed to commit product tab activation: {error}"))?;
-        if committed != target {
+        if committed != intent.to() {
             return Err(format!(
-                "product activation committed tab {} instead of smoke target {}",
+                "product activation committed tab {} instead of target {}",
                 committed.get(),
-                target.get()
+                intent.to().get()
             ));
         }
+
         self.presentation
             .acknowledge_chrome_commit(intent.id(), committed)
             .map_err(|error| format!("failed to acknowledge target chrome commit: {error}"))?;
         let permit = self
             .presentation
-            .authorize_target_frame(intent.id(), target)
-            .map(PresentationFramePermit::from)
+            .authorize_target_frame(intent.id(), committed)
             .map_err(|error| format!("failed to authorize target frame: {error}"))?;
 
-        self.tab = target;
-        self.start_frame_with_permit(permit)
+        self.tab = committed;
+        self.pending_target_permit = Some(permit);
+        self.dispatch_pending_target_frame()
     }
 
-    fn start_surface_recovery(&mut self) -> Result<(), String> {
+    fn start_new_tab(&mut self) -> Result<(), String> {
+        if !self.worker_ready
+            || self.pending_tab_create.is_some()
+            || self.pending_frame.is_pending()
+            || self.pending_surface.is_pending()
+            || self.presentation.pending_activation().is_some()
+        {
+            return Ok(());
+        }
+
+        let effect = self
+            .browser
+            .dispatch_browser_command(self.browser_window, BrowserCommand::NewTab)
+            .map_err(|error| format!("failed to create browser tab: {error}"))?;
+        let BrowserCommandEffect::TabCreated(tab) = effect else {
+            return Err("new-tab command returned an unexpected effect".into());
+        };
+        let navigation =
+            match self
+                .browser
+                .begin_navigation(self.browser_window, tab, START_LOCATION)
+            {
+                Ok(start) => start.intent().id(),
+                Err(error) => {
+                    let _ = self.browser.close_tab(self.browser_window, tab);
+                    return Err(format!("failed to begin new-tab navigation: {error}"));
+                }
+            };
+        let target = match self.requests.allocate(self.browser_window, tab) {
+            Ok(target) => target,
+            Err(error) => {
+                let _ = self.browser.fail_navigation(
+                    self.browser_window,
+                    tab,
+                    navigation,
+                    "native tab creation request allocation failed",
+                );
+                let _ = self.browser.close_tab(self.browser_window, tab);
+                return Err(error.to_string());
+            }
+        };
+
+        let create_result = self
+            .worker
+            .as_ref()
+            .ok_or_else(|| "render worker is unavailable".to_string())
+            .and_then(|worker| worker.create_view(target));
+        if let Err(error) = create_result {
+            let _ = self.browser.fail_navigation(
+                self.browser_window,
+                tab,
+                navigation,
+                "native Rarog View creation could not be dispatched",
+            );
+            let _ = self.browser.close_tab(self.browser_window, tab);
+            return Err(error);
+        }
+
+        self.pending_tab_create = Some(PendingNativeTabCreate { target, navigation });
+        Ok(())
+    }
+
+    fn handle_browser_command(&mut self, command: BrowserCommand) -> Result<(), String> {
+        match command {
+            BrowserCommand::NewTab => self.start_new_tab(),
+            BrowserCommand::CycleTab(direction) => {
+                if self.pending_tab_create.is_some() {
+                    return Ok(());
+                }
+                let effect = self
+                    .browser
+                    .dispatch_browser_command(
+                        self.browser_window,
+                        BrowserCommand::CycleTab(direction),
+                    )
+                    .map_err(|error| format!("failed to cycle browser tab: {error}"))?;
+                match effect {
+                    BrowserCommandEffect::TabActivationStarted(start) => {
+                        self.begin_native_tab_activation(start)
+                    }
+                    BrowserCommandEffect::Unavailable => Ok(()),
+                    _ => Err("tab-cycle command returned an unexpected effect".into()),
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn handle_keyboard_input(
+        &mut self,
+        event: winit::event::KeyEvent,
+        is_synthetic: bool,
+    ) -> Result<(), String> {
+        if is_synthetic || event.state != ElementState::Pressed || event.repeat {
+            return Ok(());
+        }
+        if !self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key() {
+            return Ok(());
+        }
+
+        match event.logical_key {
+            Key::Character(character)
+                if !self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("t") =>
+            {
+                self.handle_browser_command(BrowserCommand::NewTab)
+            }
+            Key::Named(NamedKey::Tab) => {
+                let direction = if self.modifiers.shift_key() {
+                    TabCycleDirection::Previous
+                } else {
+                    TabCycleDirection::Next
+                };
+                self.handle_browser_command(BrowserCommand::CycleTab(direction))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn start_surface_recovery(&mut self, permit: PresentationFramePermit) -> Result<(), String> {
         let target = self
             .requests
-            .allocate(self.browser_window, self.tab)
+            .allocate(self.browser_window, permit.tab())
             .map_err(|error| error.to_string())?;
         self.pending_surface
             .begin(target)
             .map_err(|error| error.to_string())?;
+        self.surface_recovery_permit = Some(permit);
 
         let surface = match self.create_surface() {
             Ok(surface) => surface,
             Err(error) => {
                 self.pending_surface.complete_if_current(target);
+                self.surface_recovery_permit = None;
                 return Err(error);
             }
         };
@@ -478,10 +644,54 @@ impl NativeShell {
             .and_then(|worker| worker.replace_surface(target, surface));
         if let Err(error) = replacement_result {
             self.pending_surface.complete_if_current(target);
+            self.surface_recovery_permit = None;
             return Err(error);
         }
 
         Ok(())
+    }
+
+    fn complete_native_tab_create(
+        &mut self,
+        target: AsyncTarget,
+        result: Result<(), String>,
+    ) -> Result<(), String> {
+        let Some(pending) = self.pending_tab_create else {
+            return Ok(());
+        };
+        if pending.target != target {
+            return Ok(());
+        }
+        self.pending_tab_create = None;
+
+        if !self.target_alive(target) {
+            return Ok(());
+        }
+
+        if let Err(error) = result {
+            let _ = self.browser.fail_navigation(
+                self.browser_window,
+                target.tab(),
+                pending.navigation,
+                &error,
+            );
+            let _ = self.browser.close_tab(self.browser_window, target.tab());
+            return Err(error);
+        }
+
+        self.browser
+            .commit_navigation(
+                self.browser_window,
+                target.tab(),
+                pending.navigation,
+                START_LOCATION,
+            )
+            .map_err(|error| format!("failed to commit new-tab navigation: {error}"))?;
+        let start = self
+            .browser
+            .begin_tab_activation(self.browser_window, target.tab())
+            .map_err(|error| format!("failed to activate newly created tab: {error}"))?;
+        self.begin_native_tab_activation(start)
     }
 
     fn handle_worker_event(&mut self, event_loop: &ActiveEventLoop, event: WorkerEvent) {
@@ -522,6 +732,11 @@ impl NativeShell {
                     Err(error) => self.fail(event_loop, error),
                 }
             }
+            WorkerEvent::ViewCreated { target, result } => {
+                if let Err(error) = self.complete_native_tab_create(target, result) {
+                    self.fail(event_loop, error);
+                }
+            }
             WorkerEvent::FrameFinished {
                 target,
                 permit,
@@ -536,25 +751,62 @@ impl NativeShell {
 
                 match result {
                     Ok(FrameOutcome::Presented) => {
+                        let mut completed_target = false;
                         if let PresentationFramePermit::Target(target_permit) = permit {
-                            if let Err(error) =
-                                self.presentation.present_target_frame(target_permit)
-                            {
-                                self.fail(event_loop, error);
-                                return;
+                            match self.presentation.present_target_frame(target_permit) {
+                                Ok(_) => completed_target = true,
+                                Err(
+                                    PresentationHandoffError::StaleActivation { .. }
+                                    | PresentationHandoffError::StaleTargetFramePermit { .. },
+                                ) => {
+                                    let hidden =
+                                        self.window.as_ref().and_then(|window| window.is_visible())
+                                            == Some(false);
+                                    if self.presentation.content()
+                                        != WebContentPresentation::Neutral
+                                        || !hidden
+                                    {
+                                        self.fail(
+                                            event_loop,
+                                            "stale target frame completed outside a confirmed neutral native state",
+                                        );
+                                        return;
+                                    }
+                                }
+                                Err(error) => {
+                                    self.fail(event_loop, error);
+                                    return;
+                                }
                             }
+                        }
+
+                        if self.pending_target_permit.is_some() {
+                            if let Err(error) = self.dispatch_pending_target_frame() {
+                                self.fail(event_loop, error);
+                            }
+                            return;
+                        }
+
+                        if completed_target {
                             if self.run_mode == RunMode::ExitAfterTabActivation {
                                 self.shutdown(event_loop);
                                 return;
+                            }
+                            if self.presentation.pending_activation().is_none()
+                                && self.presentation.content()
+                                    == WebContentPresentation::Tab(self.tab)
+                            {
+                                if let Err(error) = self.leave_native_neutral() {
+                                    self.fail(event_loop, error);
+                                    return;
+                                }
                             }
                         }
 
                         if self.run_mode == RunMode::ExitAfterFirstPresentation {
                             self.shutdown(event_loop);
-                        } else if self.run_mode == RunMode::ExitAfterTabActivation
-                            && self.activation_smoke_target.is_some()
-                        {
-                            if let Err(error) = self.start_tab_activation_smoke() {
+                        } else if self.run_mode == RunMode::ExitAfterTabActivation {
+                            if let Err(error) = self.start_new_tab() {
                                 self.fail(event_loop, error);
                             }
                         } else if self.needs_redraw {
@@ -563,8 +815,7 @@ impl NativeShell {
                     }
                     Ok(FrameOutcome::SurfaceRecoveryNeeded(error)) => {
                         self.needs_redraw = true;
-                        self.surface_recovery_permit = Some(permit);
-                        if let Err(recovery) = self.start_surface_recovery() {
+                        if let Err(recovery) = self.start_surface_recovery(permit) {
                             self.fail(
                                 event_loop,
                                 format!("{error}; surface recovery failed: {recovery}"),
@@ -582,7 +833,12 @@ impl NativeShell {
                 match result {
                     Ok(()) => {
                         self.needs_redraw = true;
-                        if let Some(permit) = self.surface_recovery_permit.take() {
+                        let recovered = self.surface_recovery_permit.take();
+                        if self.pending_target_permit.is_some() {
+                            if let Err(error) = self.dispatch_pending_target_frame() {
+                                self.fail(event_loop, error);
+                            }
+                        } else if let Some(permit) = recovered {
                             if let Err(error) = self.start_frame_with_permit(permit) {
                                 self.fail(event_loop, error);
                             }
@@ -590,7 +846,10 @@ impl NativeShell {
                             self.request_redraw();
                         }
                     }
-                    Err(error) => self.fail(event_loop, error),
+                    Err(error) => {
+                        self.surface_recovery_permit = None;
+                        self.fail(event_loop, error);
+                    }
                 }
             }
         }
@@ -652,7 +911,9 @@ impl NativeShell {
         self.pending_init.invalidate();
         self.pending_frame.invalidate();
         self.pending_surface.invalidate();
+        self.pending_target_permit = None;
         self.surface_recovery_permit = None;
+        self.pending_tab_create = None;
         self.worker_ready = false;
         if let Some(worker) = self.worker.take() {
             worker.shutdown();
@@ -699,6 +960,18 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
 
         match event {
             WindowEvent::CloseRequested => self.shutdown(event_loop),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
+                if let Err(error) = self.handle_keyboard_input(event, is_synthetic) {
+                    self.fail(event_loop, error);
+                }
+            }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 self.needs_redraw = true;
                 if self.worker_ready
@@ -728,26 +1001,21 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
 fn render_worker_main(
     init_target: AsyncTarget,
     initial_generation: PresentationGeneration,
-    additional_tabs: Vec<TabId>,
     receiver: Receiver<WorkerCommand>,
     proxy: EventLoopProxy<WorkerEvent>,
     cancellation: CancellationToken,
 ) {
-    let mut worker = match RenderWorker::initialize(
-        init_target,
-        initial_generation,
-        additional_tabs,
-        cancellation.clone(),
-    ) {
-        Ok(worker) => worker,
-        Err(error) => {
-            let _ = proxy.send_event(WorkerEvent::GpuReady {
-                target: init_target,
-                result: Err(error),
-            });
-            return;
-        }
-    };
+    let mut worker =
+        match RenderWorker::initialize(init_target, initial_generation, cancellation.clone()) {
+            Ok(worker) => worker,
+            Err(error) => {
+                let _ = proxy.send_event(WorkerEvent::GpuReady {
+                    target: init_target,
+                    result: Err(error),
+                });
+                return;
+            }
+        };
 
     if cancellation.is_cancelled() {
         return;
@@ -773,6 +1041,15 @@ fn render_worker_main(
                 let result = worker.attach_initial_surface(target, surface);
                 if proxy
                     .send_event(WorkerEvent::Initialized { target, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            WorkerCommand::CreateView { target } => {
+                let result = worker.create_view(target);
+                if proxy
+                    .send_event(WorkerEvent::ViewCreated { target, result })
                     .is_err()
                 {
                     return;
@@ -824,7 +1101,6 @@ impl RenderWorker {
     fn initialize(
         init_target: AsyncTarget,
         initial_generation: PresentationGeneration,
-        additional_tabs: Vec<TabId>,
         cancellation: CancellationToken,
     ) -> Result<Self, String> {
         let window = init_target.window();
@@ -837,22 +1113,6 @@ impl RenderWorker {
         engine
             .load_local_html(tab, START_PAGE)
             .map_err(|error| format!("failed to load Z1 start fixture: {error}"))?;
-        for additional_tab in additional_tabs {
-            engine.create_view(additional_tab).map_err(|error| {
-                format!(
-                    "failed to create Rarog View for tab {}: {error}",
-                    additional_tab.get()
-                )
-            })?;
-            engine
-                .load_local_html(additional_tab, START_PAGE)
-                .map_err(|error| {
-                    format!(
-                        "failed to load native smoke fixture for tab {}: {error}",
-                        additional_tab.get()
-                    )
-                })?;
-        }
 
         if cancellation.is_cancelled() {
             return Err("render worker initialization was cancelled".into());
@@ -900,6 +1160,32 @@ impl RenderWorker {
         }
 
         self.content = Some(WebContentSurface::new(self.gpu.as_ref(), surface));
+        Ok(())
+    }
+
+    fn create_view(&mut self, target: AsyncTarget) -> Result<(), String> {
+        self.ensure_active()?;
+        self.validate_new_request(target)?;
+        if self.engine.has_view(target.tab()) {
+            return Err(format!(
+                "tab {} already has a live Rarog View",
+                target.tab().get()
+            ));
+        }
+
+        self.engine.create_view(target.tab()).map_err(|error| {
+            format!(
+                "failed to create Rarog View for tab {}: {error}",
+                target.tab().get()
+            )
+        })?;
+        if let Err(error) = self.engine.load_local_html(target.tab(), START_PAGE) {
+            self.engine.close_view(target.tab());
+            return Err(format!(
+                "failed to load start document for tab {}: {error}",
+                target.tab().get()
+            ));
+        }
         Ok(())
     }
 
