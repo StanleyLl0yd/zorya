@@ -209,6 +209,12 @@ Persistent browser data must be versioned and migration-aware before schemas bec
 
 Writes that affect user data should be atomic or recoverable after interruption. Corruption must fail visibly and conservatively rather than silently discarding unrelated user state.
 
+The first Z3 storage primitive is `ProfileStore`, which is deliberately not wired into the native UI event loop. It owns a caller-selected profile root and a bounded settings-generation directory. Settings records use an explicit schema version, stable generation number, strict bounded key/value/count limits and a checksum for corruption detection only. The checksum is not an authenticity or secret-protection mechanism.
+
+Settings are never updated by truncating the current generation. A save first verifies that the caller still owns the current valid generation, allocates a strictly newer filename, creates that file with create-new semantics, writes the complete bounded record and synchronizes it before the generation is considered saved. An interrupted write can therefore leave a corrupt newer generation without destroying the previous valid record. Loading scans a bounded number of generation files newest-first; corrupt newer generations may be skipped only with an explicit `SettingsRecovery` result. A valid record with a newer unsupported schema fails closed instead of falling back and allowing an older browser to overwrite newer settings. Successful saves retain a bounded generation window and surface cleanup failures separately from durability of the new record.
+
+This is a synchronous storage primitive for background/profile workers and tests, not permission to perform filesystem I/O from window/input callbacks. Runtime profile selection, typed product setting keys, profile locking, history/bookmarks/session stores and migrations beyond schema v1 remain separate Z3 slices.
+
 Secrets and authentication material must not be stored in plaintext configuration files. Windows credential storage or another reviewed secret-storage boundary should be used when such features are introduced.
 
 ## Dependency on Rarog
