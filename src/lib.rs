@@ -52,3 +52,8 @@ pub fn run_native_tab_activation_smoke() -> Result<(), Box<dyn std::error::Error
 pub fn run_native_tab_close_smoke() -> Result<(), Box<dyn std::error::Error>> {
     platform::run(platform::RunMode::ExitAfterTabClose)
 }
+
+#[doc(hidden)]
+pub fn run_native_tab_supersession_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    platform::run(platform::RunMode::ExitAfterRapidTabActivation)
+}
