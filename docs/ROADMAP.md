@@ -45,6 +45,7 @@ The existing rarog-window binary remains a small engine reference host. Product 
 
 ## Z3 — Browser Profile
 
+- versioned, bounded and recoverable profile-settings storage foundation with monotonic generation records, corruption fallback reporting and fail-closed newer-schema handling; runtime profile selection and typed settings remain separate;
 - settings;
 - history;
 - bookmarks;
