@@ -856,6 +856,25 @@ impl NativeShell {
                     self.fail(event_loop, error);
                 }
             }
+            WorkerEvent::ViewClosed { tab, result } => {
+                if self.pending_view_close != Some(tab) {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        self.pending_view_close = None;
+                        if self.presentation.pending_activation().is_none()
+                            && self.presentation.content()
+                                == WebContentPresentation::Tab(self.tab)
+                        {
+                            if let Err(error) = self.leave_native_neutral() {
+                                self.fail(event_loop, error);
+                            }
+                        }
+                    }
+                    Err(error) => self.fail(event_loop, error),
+                }
+            }
             WorkerEvent::FrameFinished {
                 target,
                 permit,
@@ -863,8 +882,28 @@ impl NativeShell {
             } => {
                 if permit.tab() != target.tab()
                     || !self.pending_frame.complete_if_current(target)
-                    || !self.target_alive(target)
                 {
+                    return;
+                }
+
+                if !self.target_alive(target) {
+                    let retired_source = self.pending_view_close == Some(target.tab())
+                        && self.native_neutral_confirmed();
+                    if !retired_source {
+                        self.fail(
+                            event_loop,
+                            format!(
+                                "frame for closed tab {} completed outside a confirmed neutral close handoff",
+                                target.tab().get()
+                            ),
+                        );
+                        return;
+                    }
+                    if self.pending_target_permit.is_some()
+                        && let Err(error) = self.dispatch_pending_target_frame()
+                    {
+                        self.fail(event_loop, error);
+                    }
                     return;
                 }
 
@@ -909,6 +948,17 @@ impl NativeShell {
                         if completed_target {
                             if self.run_mode == RunMode::ExitAfterTabActivation {
                                 self.shutdown(event_loop);
+                                return;
+                            }
+                            if let Some(retired) = self.pending_view_close {
+                                let close_result = self
+                                    .worker
+                                    .as_ref()
+                                    .ok_or_else(|| "render worker is unavailable".to_string())
+                                    .and_then(|worker| worker.close_view(retired));
+                                if let Err(error) = close_result {
+                                    self.fail(event_loop, error);
+                                }
                                 return;
                             }
                             if self.presentation.pending_activation().is_none()
