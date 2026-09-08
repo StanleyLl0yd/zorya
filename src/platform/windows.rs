@@ -863,6 +863,10 @@ impl NativeShell {
                 match result {
                     Ok(()) => {
                         self.pending_view_close = None;
+                        if self.run_mode == RunMode::ExitAfterTabClose {
+                            self.shutdown(event_loop);
+                            return;
+                        }
                         if self.presentation.pending_activation().is_none()
                             && self.presentation.content()
                                 == WebContentPresentation::Tab(self.tab)
@@ -899,10 +903,10 @@ impl NativeShell {
                         );
                         return;
                     }
-                    if self.pending_target_permit.is_some()
-                        && let Err(error) = self.dispatch_pending_target_frame()
-                    {
-                        self.fail(event_loop, error);
+                    if self.pending_target_permit.is_some() {
+                        if let Err(error) = self.dispatch_pending_target_frame() {
+                            self.fail(event_loop, error);
+                        }
                     }
                     return;
                 }
@@ -976,6 +980,20 @@ impl NativeShell {
                             self.shutdown(event_loop);
                         } else if self.run_mode == RunMode::ExitAfterTabActivation {
                             if let Err(error) = self.start_new_tab() {
+                                self.fail(event_loop, error);
+                            }
+                        } else if self.run_mode == RunMode::ExitAfterTabClose {
+                            let tab_count = self
+                                .browser
+                                .window(self.browser_window)
+                                .map(|window| window.tabs().len())
+                                .unwrap_or_default();
+                            let result = if tab_count == 1 {
+                                self.start_new_tab()
+                            } else {
+                                self.start_close_tab(event_loop)
+                            };
+                            if let Err(error) = result {
                                 self.fail(event_loop, error);
                             }
                         } else if self.needs_redraw {
