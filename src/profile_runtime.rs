@@ -230,22 +230,45 @@ impl PreparedProfile {
     pub fn load(intent: &ProfileSelectionIntent) -> Result<Self, ProfilePreparationError> {
         let lock =
             ProfileLock::acquire(intent.root.clone()).map_err(ProfilePreparationError::Lock)?;
-        let store =
-            ProfileStore::open(intent.root.clone()).map_err(ProfilePreparationError::Storage)?;
-        let load = store
-            .load_settings()
-            .map_err(ProfilePreparationError::Storage)?;
-        let settings_recovery = load.recovery().cloned();
-        let settings = ProductSettings::from_snapshot(load.into_snapshot())
-            .map_err(ProfilePreparationError::Settings)?;
+        let prepared = (|| {
+            let store =
+                ProfileStore::open(intent.root.clone()).map_err(ProfilePreparationError::Storage)?;
+            let load = store
+                .load_settings()
+                .map_err(ProfilePreparationError::Storage)?;
+            let settings_recovery = load.recovery().cloned();
+            let settings = ProductSettings::from_snapshot(load.into_snapshot())
+                .map_err(ProfilePreparationError::Settings)?;
 
-        let history_store = BrowsingHistoryStore::open(intent.root.clone())
-            .map_err(ProfilePreparationError::BrowsingHistory)?;
-        let history_load = history_store
-            .load()
-            .map_err(ProfilePreparationError::BrowsingHistory)?;
-        let browsing_history_recovery = history_load.recovery().cloned();
-        let browsing_history = history_load.into_snapshot();
+            let history_store = BrowsingHistoryStore::open(intent.root.clone())
+                .map_err(ProfilePreparationError::BrowsingHistory)?;
+            let history_load = history_store
+                .load()
+                .map_err(ProfilePreparationError::BrowsingHistory)?;
+            let browsing_history_recovery = history_load.recovery().cloned();
+            let browsing_history = history_load.into_snapshot();
+
+            Ok((
+                settings,
+                settings_recovery,
+                browsing_history,
+                browsing_history_recovery,
+            ))
+        })();
+
+        let (settings, settings_recovery, browsing_history, browsing_history_recovery) =
+            match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return match lock.release() {
+                        Ok(()) => Err(error),
+                        Err(release) => Err(ProfilePreparationError::LockRelease {
+                            preparation: Box::new(error),
+                            release,
+                        }),
+                    };
+                }
+            };
 
         Ok(Self {
             selection: intent.id,
@@ -289,6 +312,10 @@ pub enum ProfilePreparationError {
     Storage(ProfileStorageError),
     Settings(ProfileSettingsError),
     BrowsingHistory(crate::browsing_history::BrowsingHistoryError),
+    LockRelease {
+        preparation: Box<ProfilePreparationError>,
+        release: ProfileLockError,
+    },
 }
 
 impl fmt::Display for ProfilePreparationError {
@@ -298,6 +325,13 @@ impl fmt::Display for ProfilePreparationError {
             Self::Storage(error) => error.fmt(formatter),
             Self::Settings(error) => error.fmt(formatter),
             Self::BrowsingHistory(error) => error.fmt(formatter),
+            Self::LockRelease {
+                preparation,
+                release,
+            } => write!(
+                formatter,
+                "profile preparation failed: {preparation}; failed to release acquired profile lock: {release}"
+            ),
         }
     }
 }
@@ -309,6 +343,7 @@ impl std::error::Error for ProfilePreparationError {
             Self::Storage(error) => Some(error),
             Self::Settings(error) => Some(error),
             Self::BrowsingHistory(error) => Some(error),
+            Self::LockRelease { preparation, .. } => Some(preparation.as_ref()),
         }
     }
 }
@@ -1530,6 +1565,30 @@ mod tests {
                 value: "sepia".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn preparation_failure_after_acquire_releases_exact_lock() {
+        let root = TempRoot::new();
+        let store = ProfileStore::open(root.path()).unwrap();
+        let mut raw = store.load_settings().unwrap().into_snapshot();
+        raw.set(COLOR_SCHEME_KEY, "sepia").unwrap();
+        let lock = ProfileLock::acquire(root.path()).unwrap();
+        store.save_settings(&lock, &raw).unwrap();
+        lock.release().unwrap();
+
+        let mut runtime = ProfileRuntime::new();
+        let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
+        assert_eq!(
+            PreparedProfile::load(&intent).unwrap_err(),
+            ProfilePreparationError::Settings(ProfileSettingsError::InvalidValue {
+                key: COLOR_SCHEME_KEY,
+                value: "sepia".to_owned(),
+            })
+        );
+
+        let reacquired = ProfileLock::acquire(root.path()).unwrap();
+        reacquired.release().unwrap();
     }
 
     #[test]
