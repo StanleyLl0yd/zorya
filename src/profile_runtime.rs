@@ -342,7 +342,9 @@ pub enum ProfileRuntimeError {
 impl fmt::Display for ProfileRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ProfileIdExhausted => formatter.write_str("profile identifier space is exhausted"),
+            Self::ProfileIdExhausted => {
+                formatter.write_str("profile identifier space is exhausted")
+            }
             Self::ProfileSelectionIdExhausted => {
                 formatter.write_str("profile selection identifier space is exhausted")
             }
