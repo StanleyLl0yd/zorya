@@ -1,6 +1,7 @@
+use crate::app::BrowserNavigationCommit;
 use crate::browsing_history::{
-    BrowsingHistoryError, BrowsingHistoryRecovery, BrowsingHistorySave, BrowsingHistorySnapshot,
-    BrowsingHistoryStore,
+    BrowsingHistoryError, BrowsingHistoryRecord, BrowsingHistoryRecovery, BrowsingHistorySave,
+    BrowsingHistorySnapshot, BrowsingHistoryStore,
 };
 use crate::profile::{ProfileStorageError, ProfileStore, SettingsRecovery, SettingsSnapshot};
 use std::fmt;
@@ -469,6 +470,7 @@ pub enum ProfileRuntimeError {
         current_generation: u64,
         saved_generation: u64,
     },
+    BrowsingHistory(BrowsingHistoryError),
     StaleSelection {
         expected: Option<ProfileSelectionId>,
         actual: ProfileSelectionId,
@@ -525,6 +527,9 @@ impl fmt::Display for ProfileRuntimeError {
                 formatter,
                 "profile browsing-history save expected in-memory generation {expected_generation}, found {current_generation}, saved {saved_generation}"
             ),
+            Self::BrowsingHistory(error) => {
+                write!(formatter, "browsing-history update failed: {error}")
+            }
             Self::StaleSelection { expected, actual } => match expected {
                 Some(expected) => write!(
                     formatter,
@@ -702,6 +707,17 @@ impl ProfileRuntime {
             .settings)
     }
 
+    pub fn record_committed_navigation(
+        &mut self,
+        profile: ProfileId,
+        visited_unix_millis: u64,
+        commit: BrowserNavigationCommit,
+    ) -> Result<BrowsingHistoryRecord, ProfileRuntimeError> {
+        self.active_browsing_history_mut(profile)?
+            .record_visit(visited_unix_millis, commit.location())
+            .map_err(ProfileRuntimeError::BrowsingHistory)
+    }
+
     pub fn active_browsing_history(
         &self,
         profile: ProfileId,
@@ -834,6 +850,7 @@ impl ProfileRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{BrowserApp, BrowserWindow, MAX_HISTORY_LOCATION_BYTES};
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -876,6 +893,22 @@ mod tests {
         let intent = runtime.begin_selection(root).unwrap().into_intent();
         let prepared = PreparedProfile::load(&intent).unwrap();
         runtime.commit_selection(prepared).unwrap().active_profile()
+    }
+
+    fn committed_navigation(location: &str) -> BrowserNavigationCommit {
+        let mut app = BrowserApp::bootstrap().unwrap();
+        let window = app.windows().next().unwrap().id();
+        let tab = app
+            .window(window)
+            .and_then(BrowserWindow::active_tab_id)
+            .unwrap();
+        let navigation = app
+            .begin_navigation(window, tab, location)
+            .unwrap()
+            .intent()
+            .id();
+        app.commit_navigation(window, tab, navigation, location)
+            .unwrap()
     }
 
     #[test]
@@ -1088,6 +1121,71 @@ mod tests {
                 actual,
             }) if expected == second && actual == first
         ));
+    }
+
+    #[test]
+    fn committed_navigation_records_one_visit_for_exact_active_profile() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        let commit = committed_navigation("https://example.test/committed");
+
+        let record = runtime
+            .record_committed_navigation(profile, 1_234, commit)
+            .unwrap();
+
+        assert_eq!(record.id().get(), 1);
+        let history = runtime.active_browsing_history(profile).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.visits()[0].id(), record.id());
+        assert_eq!(history.visits()[0].visited_unix_millis(), 1_234);
+        assert_eq!(
+            history.visits()[0].location(),
+            "https://example.test/committed"
+        );
+        assert_eq!(history.generation(), 0);
+    }
+
+    #[test]
+    fn stale_profile_cannot_record_committed_navigation() {
+        let first_root = TempRoot::new();
+        let second_root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let first = load_profile(&mut runtime, first_root.path());
+        let second = load_profile(&mut runtime, second_root.path());
+        let commit = committed_navigation("https://example.test/stale");
+
+        assert_eq!(
+            runtime.record_committed_navigation(first, 1, commit),
+            Err(ProfileRuntimeError::StaleProfile {
+                expected: Some(second),
+                actual: first,
+            })
+        );
+        assert!(runtime.active_browsing_history(second).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejected_committed_location_does_not_partially_mutate_history() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        let oversized = "x".repeat(MAX_HISTORY_LOCATION_BYTES + 1);
+        let invalid = committed_navigation(&oversized);
+
+        assert!(matches!(
+            runtime.record_committed_navigation(profile, 1, invalid),
+            Err(ProfileRuntimeError::BrowsingHistory(
+                BrowsingHistoryError::LocationTooLarge { .. }
+            ))
+        ));
+        assert!(runtime.active_browsing_history(profile).unwrap().is_empty());
+
+        let valid = committed_navigation("https://example.test/valid");
+        let record = runtime
+            .record_committed_navigation(profile, 2, valid)
+            .unwrap();
+        assert_eq!(record.id().get(), 1);
     }
 
     #[test]
