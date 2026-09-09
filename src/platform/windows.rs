@@ -437,6 +437,123 @@ impl NativeShell {
         }
     }
 
+    fn submit_initial_profile_selection(&mut self) -> Result<(), String> {
+        let Some(_) = self.initial_profile_selection else {
+            return Ok(());
+        };
+        let worker = self
+            .profile_worker
+            .as_ref()
+            .ok_or_else(|| "profile worker is unavailable before initial profile selection".to_string())?;
+        let intent = self
+            .initial_profile_selection
+            .take()
+            .expect("initial profile selection was checked");
+        let selection = intent.id();
+
+        match worker.prepare(intent) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let message = error.to_string();
+                let intent = error.into_work();
+                debug_assert_eq!(intent.id(), selection);
+                self.profile_runtime
+                    .cancel_selection(selection)
+                    .map_err(|cancel| {
+                        format!(
+                            "failed to submit initial profile preparation: {message}; failed to cancel selection: {cancel}"
+                        )
+                    })?;
+                Err(format!(
+                    "failed to submit initial profile preparation: {message}"
+                ))
+            }
+        }
+    }
+
+    fn handle_profile_worker_completion(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        completion: ProfileWorkerCompletion,
+    ) {
+        match completion {
+            ProfileWorkerCompletion::Prepared { selection, result } => {
+                let prepared = match result {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        let cancellation = self.profile_runtime.cancel_selection(selection);
+                        let message = match cancellation {
+                            Ok(_) => format!(
+                                "failed to prepare profile selection {}: {error}",
+                                selection.get()
+                            ),
+                            Err(cancel) => format!(
+                                "failed to prepare profile selection {}: {error}; failed to cancel selection: {cancel}",
+                                selection.get()
+                            ),
+                        };
+                        self.fail(event_loop, message);
+                        return;
+                    }
+                };
+
+                if prepared.selection() != selection {
+                    self.fail(
+                        event_loop,
+                        format!(
+                            "profile worker completion {} returned prepared selection {}",
+                            selection.get(),
+                            prepared.selection().get()
+                        ),
+                    );
+                    return;
+                }
+
+                if let Err(error) = self.profile_runtime.commit_selection(prepared) {
+                    self.fail(
+                        event_loop,
+                        format!(
+                            "failed to commit prepared profile selection {}: {error}",
+                            selection.get()
+                        ),
+                    );
+                    return;
+                }
+
+                if let Err(error) = self.initialize(event_loop) {
+                    self.fail(event_loop, error);
+                }
+            }
+            ProfileWorkerCompletion::HistorySaved(completion) => {
+                let save = completion.id();
+                let storage_error = completion.result().as_ref().err().map(ToString::to_string);
+                match self
+                    .profile_runtime
+                    .complete_browsing_history_save(completion)
+                {
+                    Ok(_) => {
+                        if let Some(error) = storage_error {
+                            self.fail(
+                                event_loop,
+                                format!(
+                                    "browsing-history save {} failed on profile worker: {error}",
+                                    save.get()
+                                ),
+                            );
+                        }
+                    }
+                    Err(error) => self.fail(
+                        event_loop,
+                        format!(
+                            "failed to reconcile browsing-history save {}: {error}",
+                            save.get()
+                        ),
+                    ),
+                }
+            }
+        }
+    }
+
     fn initialize(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         if let Some(window) = &self.window {
             if self.worker_ready && !self.pending_surface.is_pending() {
@@ -1253,6 +1370,9 @@ impl NativeShell {
 
     fn handle_worker_event(&mut self, event_loop: &ActiveEventLoop, event: WorkerEvent) {
         match event {
+            WorkerEvent::Profile(completion) => {
+                self.handle_profile_worker_completion(event_loop, completion);
+            }
             WorkerEvent::GpuReady { target, result } => {
                 if !self.pending_init.is_current(target) || !self.target_alive(target) {
                     return;
@@ -1708,6 +1828,7 @@ impl NativeShell {
         self.pending_view_close = None;
         self.rapid_smoke_tabs.clear();
         self.worker_ready = false;
+        drop(self.profile_worker.take());
         if let Some(worker) = self.worker.take() {
             worker.shutdown();
         }
@@ -1732,6 +1853,13 @@ impl NativeShell {
 
 impl ApplicationHandler<WorkerEvent> for NativeShell {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.profile_runtime.active_profile().is_none() {
+            if let Err(error) = self.submit_initial_profile_selection() {
+                self.fail(event_loop, error);
+            }
+            return;
+        }
+
         if let Err(error) = self.initialize(event_loop) {
             self.fail(event_loop, error);
         }
