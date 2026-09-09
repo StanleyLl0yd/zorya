@@ -6,6 +6,9 @@ use crate::browsing_history::{
 use crate::profile::{
     ProfileStorageError, ProfileStore, SettingsRecovery, SettingsSave, SettingsSnapshot,
 };
+use crate::profile_catalog::{
+    ProfileIdentityError, ProfileStorageId, load_or_create_profile_storage_id,
+};
 use crate::profile_lock::{ProfileLock, ProfileLockError};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -219,6 +222,7 @@ impl std::error::Error for ProfileSettingsError {
 pub struct PreparedProfile {
     selection: ProfileSelectionId,
     root: PathBuf,
+    storage_id: ProfileStorageId,
     lock: ProfileLock,
     settings: ProductSettings,
     settings_recovery: Option<SettingsRecovery>,
@@ -231,6 +235,8 @@ impl PreparedProfile {
         let lock =
             ProfileLock::acquire(intent.root.clone()).map_err(ProfilePreparationError::Lock)?;
         let prepared = (|| {
+            let storage_id = load_or_create_profile_storage_id(&lock)
+                .map_err(ProfilePreparationError::Identity)?;
             let store = ProfileStore::open(intent.root.clone())
                 .map_err(ProfilePreparationError::Storage)?;
             let load = store
@@ -249,6 +255,7 @@ impl PreparedProfile {
             let browsing_history = history_load.into_snapshot();
 
             Ok((
+                storage_id,
                 settings,
                 settings_recovery,
                 browsing_history,
@@ -256,7 +263,7 @@ impl PreparedProfile {
             ))
         })();
 
-        let (settings, settings_recovery, browsing_history, browsing_history_recovery) =
+        let (storage_id, settings, settings_recovery, browsing_history, browsing_history_recovery) =
             match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -273,6 +280,7 @@ impl PreparedProfile {
         Ok(Self {
             selection: intent.id,
             root: intent.root.clone(),
+            storage_id,
             lock,
             settings,
             settings_recovery,
@@ -287,6 +295,10 @@ impl PreparedProfile {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub const fn storage_id(&self) -> ProfileStorageId {
+        self.storage_id
     }
 
     pub const fn settings(&self) -> &ProductSettings {
@@ -314,6 +326,7 @@ impl PreparedProfile {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfilePreparationError {
     Lock(ProfileLockError),
+    Identity(ProfileIdentityError),
     Storage(ProfileStorageError),
     Settings(ProfileSettingsError),
     BrowsingHistory(crate::browsing_history::BrowsingHistoryError),
@@ -327,6 +340,7 @@ impl fmt::Display for ProfilePreparationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Lock(error) => error.fmt(formatter),
+            Self::Identity(error) => error.fmt(formatter),
             Self::Storage(error) => error.fmt(formatter),
             Self::Settings(error) => error.fmt(formatter),
             Self::BrowsingHistory(error) => error.fmt(formatter),
@@ -345,6 +359,7 @@ impl std::error::Error for ProfilePreparationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Lock(error) => Some(error),
+            Self::Identity(error) => Some(error),
             Self::Storage(error) => Some(error),
             Self::Settings(error) => Some(error),
             Self::BrowsingHistory(error) => Some(error),
@@ -357,6 +372,7 @@ impl std::error::Error for ProfilePreparationError {
 pub struct ActiveProfile {
     id: ProfileId,
     root: PathBuf,
+    storage_id: ProfileStorageId,
     lock: ProfileLock,
     settings: ProductSettings,
     settings_recovery: Option<SettingsRecovery>,
@@ -375,6 +391,10 @@ impl ActiveProfile {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub const fn storage_id(&self) -> ProfileStorageId {
+        self.storage_id
     }
 
     #[cfg(target_os = "windows")]
@@ -704,6 +724,10 @@ pub enum ProfileRuntimeError {
     ActiveProfileNotDurable {
         profile: ProfileId,
     },
+    DuplicateStorageIdentity {
+        active_profile: ProfileId,
+        storage_id: ProfileStorageId,
+    },
     StaleProfile {
         expected: Option<ProfileId>,
         actual: ProfileId,
@@ -818,6 +842,14 @@ impl fmt::Display for ProfileRuntimeError {
                 formatter,
                 "active profile {} still has pending or unsaved persistence work",
                 profile.get()
+            ),
+            Self::DuplicateStorageIdentity {
+                active_profile,
+                storage_id,
+            } => write!(
+                formatter,
+                "prepared profile storage identity {storage_id} duplicates active profile {}",
+                active_profile.get()
             ),
             Self::StaleProfile { expected, actual } => match expected {
                 Some(expected) => write!(
@@ -953,6 +985,16 @@ impl ProfileRuntime {
         }
 
         if let Some(active) = self.active.as_ref() {
+            if active.storage_id == prepared.storage_id {
+                return Err(ProfileSelectionCommitError {
+                    error: ProfileRuntimeError::DuplicateStorageIdentity {
+                        active_profile: active.id,
+                        storage_id: prepared.storage_id,
+                    },
+                    prepared: Box::new(prepared),
+                });
+            }
+
             let persistence_pending =
                 self.pending_settings_save.is_some() || self.pending_history_save.is_some();
             let persistence_dirty = active.settings_revision != active.durable_settings_revision
@@ -977,6 +1019,7 @@ impl ProfileRuntime {
         let active = ActiveProfile {
             id,
             root: prepared.root,
+            storage_id: prepared.storage_id,
             lock: prepared.lock,
             settings: prepared.settings,
             settings_recovery: prepared.settings_recovery,
@@ -1506,6 +1549,24 @@ mod tests {
     }
 
     #[test]
+    fn prepared_and_active_profile_preserve_persisted_storage_identity() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
+        let prepared = PreparedProfile::load(&intent).unwrap();
+        let storage_id = prepared.storage_id();
+
+        assert_ne!(storage_id.get(), 0);
+        assert_eq!(
+            crate::load_profile_storage_id(root.path()).unwrap(),
+            Some(storage_id)
+        );
+
+        runtime.commit_selection(prepared).unwrap();
+        assert_eq!(runtime.active_profile().unwrap().storage_id(), storage_id);
+    }
+
+    #[test]
     fn committed_profile_survives_pending_selection_and_exact_cancel() {
         let first_root = TempRoot::new();
         let second_root = TempRoot::new();
@@ -1569,6 +1630,66 @@ mod tests {
         let lock = replaced.into_profile_lock();
         lock.release().unwrap();
         let reacquired = ProfileLock::acquire(first_root.path()).unwrap();
+        reacquired.release().unwrap();
+    }
+
+    #[test]
+    fn duplicate_persisted_storage_identity_cannot_replace_active_profile() {
+        let first_root = TempRoot::new();
+        let second_root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+
+        let first_intent = runtime
+            .begin_selection(first_root.path())
+            .unwrap()
+            .into_intent();
+        let first_prepared = prepared(&first_intent);
+        let storage_id = first_prepared.storage_id();
+        let first_id = runtime
+            .commit_selection(first_prepared)
+            .unwrap()
+            .active_profile();
+
+        let identity_directory = first_root
+            .path()
+            .join(crate::PROFILE_IDENTITY_DIRECTORY_NAME);
+        let identity_record = fs::read_dir(&identity_directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name();
+        fs::create_dir_all(
+            second_root
+                .path()
+                .join(crate::PROFILE_IDENTITY_DIRECTORY_NAME)
+                .join(identity_record),
+        )
+        .unwrap();
+
+        let second_intent = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
+        let rejection = runtime
+            .commit_selection(prepared(&second_intent))
+            .unwrap_err();
+        assert_eq!(
+            rejection.error(),
+            &ProfileRuntimeError::DuplicateStorageIdentity {
+                active_profile: first_id,
+                storage_id,
+            }
+        );
+        rejection
+            .into_parts()
+            .1
+            .into_profile_lock()
+            .release()
+            .unwrap();
+        assert_eq!(runtime.active_profile().unwrap().id(), first_id);
+
+        let reacquired = ProfileLock::acquire(second_root.path()).unwrap();
         reacquired.release().unwrap();
     }
 
