@@ -872,6 +872,20 @@ impl NativeShell {
             return;
         }
 
+        if self.replaced_profile_lock.is_some() {
+            match self.drive_replaced_profile_lock_release() {
+                Ok(true) => {}
+                Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                Err(error) => {
+                    if self.fatal_error.is_none() {
+                        self.fatal_error = Some(error);
+                    }
+                    self.finish_shutdown(event_loop);
+                }
+            }
+            return;
+        }
+
         if let Some(lock) = self.rejected_profile_lock.take() {
             let owner = lock.owner();
             let Some(worker) = self.profile_worker.as_ref() else {
@@ -1058,35 +1072,41 @@ impl NativeShell {
                     return;
                 }
 
-                if let Err(rejection) = self.profile_runtime.commit_selection(prepared) {
-                    let (error, prepared) = rejection.into_parts();
-                    self.fail_with_rejected_profile(
-                        event_loop,
-                        prepared,
-                        format!(
-                            "failed to commit prepared profile selection {}: {error}",
+                if self.shutdown_requested {
+                    if let Err(error) = self.profile_runtime.cancel_selection(selection)
+                        && self.fatal_error.is_none()
+                    {
+                        self.fatal_error = Some(format!(
+                            "failed to cancel prepared profile selection {} during shutdown: {error}",
                             selection.get()
-                        ),
-                    );
+                        ));
+                    }
+                    debug_assert!(self.rejected_profile_lock.is_none());
+                    if self.rejected_profile_lock.is_none() {
+                        self.rejected_profile_lock = Some(prepared.into_profile_lock());
+                    }
+                    match self.profile_flush_complete() {
+                        Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
+                        Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                        Err(error) => self.fail(event_loop, error),
+                    }
                     return;
                 }
 
-                if let Err(error) = self.initialize(event_loop) {
-                    self.fail(event_loop, error);
-                }
+                self.commit_prepared_profile(event_loop, selection, prepared);
             }
             ProfileWorkerCompletion::LockReleased { owner, result } => {
                 let expected = self.pending_profile_lock_release;
                 if expected.map(|pending| pending.owner) != Some(owner) {
-                    if self.fatal_error.is_none() {
-                        self.fatal_error = Some(format!(
+                    self.fail(
+                        event_loop,
+                        format!(
                             "profile-lock release {}:{} is stale; expected {:?}",
                             owner.process_id(),
                             owner.owner_id(),
                             expected
-                        ));
-                    }
-                    self.finish_shutdown(event_loop);
+                        ),
+                    );
                     return;
                 }
                 let pending = self
@@ -1101,7 +1121,22 @@ impl NativeShell {
                             owner.owner_id()
                         ));
                     }
-                    self.finish_shutdown(event_loop);
+                    match pending.purpose {
+                        ProfileLockReleasePurpose::ReplacedProfile => {
+                            self.replaced_profile_lock = None;
+                            self.shutdown(event_loop);
+                        }
+                        ProfileLockReleasePurpose::RejectedSelection => {
+                            match self.profile_flush_complete() {
+                                Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
+                                Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                                Err(error) => self.fail(event_loop, error),
+                            }
+                        }
+                        ProfileLockReleasePurpose::ActiveShutdown => {
+                            self.finish_shutdown(event_loop);
+                        }
+                    }
                     return;
                 }
                 match pending.purpose {
@@ -1110,6 +1145,16 @@ impl NativeShell {
                             Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
                             Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
                             Err(error) => self.fail(event_loop, error),
+                        }
+                    }
+                    ProfileLockReleasePurpose::ReplacedProfile => {
+                        self.replaced_profile_lock = None;
+                        if self.shutdown_requested {
+                            match self.profile_flush_complete() {
+                                Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
+                                Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                                Err(error) => self.fail(event_loop, error),
+                            }
                         }
                     }
                     ProfileLockReleasePurpose::ActiveShutdown => {
@@ -1135,13 +1180,21 @@ impl NativeShell {
                             return;
                         }
 
-                        if let Err(error) = self.drive_profile_saves(self.shutdown_requested) {
+                        let flush =
+                            self.shutdown_requested || self.replacement_flush_requested();
+                        if let Err(error) = self.drive_profile_saves(flush) {
                             self.fail(event_loop, error);
                             return;
                         }
                         if self.shutdown_requested {
                             match self.profile_flush_complete() {
                                 Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
+                                Ok(false) => {}
+                                Err(error) => self.fail(event_loop, error),
+                            }
+                        } else if self.pending_profile_replacement.is_some() {
+                            match self.profile_flush_complete() {
+                                Ok(true) => self.continue_profile_replacement(event_loop),
                                 Ok(false) => {}
                                 Err(error) => self.fail(event_loop, error),
                             }
@@ -1176,13 +1229,21 @@ impl NativeShell {
                             return;
                         }
 
-                        if let Err(error) = self.drive_profile_saves(self.shutdown_requested) {
+                        let flush =
+                            self.shutdown_requested || self.replacement_flush_requested();
+                        if let Err(error) = self.drive_profile_saves(flush) {
                             self.fail(event_loop, error);
                             return;
                         }
                         if self.shutdown_requested {
                             match self.profile_flush_complete() {
                                 Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
+                                Ok(false) => {}
+                                Err(error) => self.fail(event_loop, error),
+                            }
+                        } else if self.pending_profile_replacement.is_some() {
+                            match self.profile_flush_complete() {
+                                Ok(true) => self.continue_profile_replacement(event_loop),
                                 Ok(false) => {}
                                 Err(error) => self.fail(event_loop, error),
                             }
@@ -2472,6 +2533,21 @@ impl NativeShell {
         if self.shutdown_requested {
             return;
         }
+        if let Some(prepared) = self.pending_profile_replacement.take() {
+            let selection = prepared.selection();
+            if let Err(error) = self.profile_runtime.cancel_selection(selection)
+                && self.fatal_error.is_none()
+            {
+                self.fatal_error = Some(format!(
+                    "failed to cancel pending profile replacement {} during shutdown: {error}",
+                    selection.get()
+                ));
+            }
+            debug_assert!(self.rejected_profile_lock.is_none());
+            if self.rejected_profile_lock.is_none() {
+                self.rejected_profile_lock = Some(prepared.into_profile_lock());
+            }
+        }
         self.shutdown_requested = true;
         if let Err(error) = self.stop_initial_navigation()
             && self.fatal_error.is_none()
@@ -2555,7 +2631,8 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Err(error) = self.drive_profile_saves(self.shutdown_requested) {
+        let flush = self.shutdown_requested || self.replacement_flush_requested();
+        if let Err(error) = self.drive_profile_saves(flush) {
             self.fail(event_loop, error);
             return;
         }
@@ -2566,6 +2643,24 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
                 Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
                 Err(error) => self.fail(event_loop, error),
             }
+            return;
+        }
+
+        if self.pending_profile_replacement.is_some() {
+            match self.profile_flush_complete() {
+                Ok(true) => self.continue_profile_replacement(event_loop),
+                Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                Err(error) => self.fail(event_loop, error),
+            }
+            return;
+        }
+
+        if self.replaced_profile_lock.is_some()
+            || self
+                .pending_profile_lock_release
+                .is_some_and(|pending| pending.purpose == ProfileLockReleasePurpose::ReplacedProfile)
+        {
+            self.continue_profile_replacement(event_loop);
             return;
         }
 
