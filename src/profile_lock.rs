@@ -2,14 +2,13 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const PROFILE_LOCK_FILE_NAME: &str = ".zorya-profile.lock";
 pub const MAX_PROFILE_LOCK_BYTES: usize = 256;
 
 const PROFILE_LOCK_MAGIC: &str = "ZORYA_PROFILE_LOCK_V1";
-const PROFILE_LOCK_ACQUIRE_RETRIES: usize = 4;
+const MAX_PROFILE_LOCK_DIRECTORY_ENTRIES: usize = 4;
 static NEXT_PROFILE_LOCK_OWNER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -129,35 +128,11 @@ impl fmt::Display for ProfileLockError {
 
 impl std::error::Error for ProfileLockError {}
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileLock {
-    inner: Arc<ProfileLockInner>,
-}
-
-impl PartialEq for ProfileLock {
-    fn eq(&self, other: &Self) -> bool {
-        self.inner.root == other.inner.root && self.inner.owner == other.inner.owner
-    }
-}
-
-impl Eq for ProfileLock {}
-
-#[derive(Debug)]
-struct ProfileLockInner {
     root: PathBuf,
     path: PathBuf,
     owner: ProfileLockOwner,
-}
-
-impl Drop for ProfileLockInner {
-    fn drop(&mut self) {
-        if matches!(
-            read_owner_if_present(&self.path),
-            Ok(Some(owner)) if owner == self.owner
-        ) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
 }
 
 impl ProfileLock {
@@ -167,43 +142,39 @@ impl ProfileLock {
             .map_err(|error| io_error("create profile root", &root, error))?;
         let path = root.join(PROFILE_LOCK_FILE_NAME);
         let owner = next_owner()?;
-        let record = encode_owner(owner);
 
-        for _ in 0..PROFILE_LOCK_ACQUIRE_RETRIES {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    if let Err(error) = write_lock_record(&mut file, &record, &path) {
-                        let _ = fs::remove_file(&path);
-                        return Err(error);
-                    }
-                    return Ok(Self {
-                        inner: Arc::new(ProfileLockInner {
-                            root,
-                            path,
-                            owner,
-                        }),
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    match read_owner_if_present(&path)? {
-                        Some(owner) => return Err(ProfileLockError::Held { owner }),
-                        None => continue,
-                    }
-                }
-                Err(error) => {
-                    return Err(io_error("create profile lock", &path, error));
-                }
+        match fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return match read_owner_if_present(&path)? {
+                    Some(owner) => Err(ProfileLockError::Held { owner }),
+                    None => Err(ProfileLockError::Corrupt { path }),
+                };
             }
+            Err(error) => return Err(io_error("create profile lock directory", &path, error)),
         }
 
-        match read_owner_if_present(&path)? {
-            Some(owner) => Err(ProfileLockError::Held { owner }),
-            None => Err(ProfileLockError::Io {
-                operation: "acquire profile lock",
-                path,
-                kind: io::ErrorKind::WouldBlock,
-            }),
+        let owner_path = owner_path(&path, owner);
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&owner_path)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = fs::remove_dir(&path);
+                return Err(io_error("create profile lock owner record", &owner_path, error));
+            }
+        };
+        let record = encode_owner(owner);
+        if let Err(error) = write_lock_record(&mut file, &record, &owner_path) {
+            drop(file);
+            let _ = fs::remove_file(&owner_path);
+            let _ = fs::remove_dir(&path);
+            return Err(error);
         }
+
+        Ok(Self { root, path, owner })
     }
 
     pub fn recover_abandoned(
@@ -215,48 +186,40 @@ impl ProfileLock {
             .map_err(|error| io_error("create profile root", &root, error))?;
         let path = root.join(PROFILE_LOCK_FILE_NAME);
 
-        match read_owner_if_present(&path)? {
-            Some(actual) if actual == expected => {}
-            actual => {
-                return Err(ProfileLockError::RecoveryTargetChanged { expected, actual });
-            }
-        }
-
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error("remove abandoned profile lock", &path, error)),
-        }
-
+        remove_exact_owner(&path, expected, true)?;
         Self::acquire(root)
     }
 
     pub fn verify(&self) -> Result<(), ProfileLockError> {
-        match read_owner_if_present(&self.inner.path)? {
-            Some(actual) if actual == self.inner.owner => Ok(()),
+        match read_owner_if_present(&self.path)? {
+            Some(actual) if actual == self.owner => Ok(()),
             actual => Err(ProfileLockError::OwnershipLost {
-                expected: self.inner.owner,
+                expected: self.owner,
                 actual,
             }),
         }
     }
 
     pub fn verify_for_root(&self, root: &Path) -> Result<(), ProfileLockError> {
-        if self.inner.root != root {
+        if self.root != root {
             return Err(ProfileLockError::RootMismatch {
-                lock_root: self.inner.root.clone(),
+                lock_root: self.root.clone(),
                 requested_root: root.to_owned(),
             });
         }
         self.verify()
     }
 
+    pub fn release(self) -> Result<(), ProfileLockError> {
+        remove_exact_owner(&self.path, self.owner, false)
+    }
+
     pub const fn owner(&self) -> ProfileLockOwner {
-        self.inner.owner
+        self.owner
     }
 
     pub fn root(&self) -> &Path {
-        &self.inner.root
+        &self.root
     }
 }
 
@@ -270,6 +233,18 @@ fn next_owner() -> Result<ProfileLockOwner, ProfileLockError> {
         process_id: std::process::id(),
         owner_id,
     })
+}
+
+fn owner_file_name(owner: ProfileLockOwner) -> String {
+    format!(
+        "owner-{:010}-{:020}",
+        owner.process_id(),
+        owner.owner_id()
+    )
+}
+
+fn owner_path(lock_path: &Path, owner: ProfileLockOwner) -> PathBuf {
+    lock_path.join(owner_file_name(owner))
 }
 
 fn encode_owner(owner: ProfileLockOwner) -> Vec<u8> {
@@ -293,26 +268,61 @@ fn write_lock_record(
 }
 
 fn read_owner_if_present(path: &Path) -> Result<Option<ProfileLockOwner>, ProfileLockError> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io_error("open profile lock", path, error)),
+        Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
+            return Err(ProfileLockError::Corrupt {
+                path: path.to_owned(),
+            });
+        }
+        Err(error) => return Err(io_error("read profile lock directory", path, error)),
     };
 
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take((MAX_PROFILE_LOCK_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| io_error("read profile lock", path, error))?;
-    if bytes.len() > MAX_PROFILE_LOCK_BYTES {
-        return Err(ProfileLockError::Corrupt {
+    let mut owner = None;
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_PROFILE_LOCK_DIRECTORY_ENTRIES {
+            return Err(ProfileLockError::Corrupt {
+                path: path.to_owned(),
+            });
+        }
+        let entry = entry.map_err(|error| io_error("read profile lock entry", path, error))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| io_error("inspect profile lock entry", &entry.path(), error))?;
+        if !file_type.is_file() || owner.is_some() {
+            return Err(ProfileLockError::Corrupt {
+                path: path.to_owned(),
+            });
+        }
+
+        let mut file = File::open(entry.path())
+            .map_err(|error| io_error("open profile lock owner record", &entry.path(), error))?;
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take((MAX_PROFILE_LOCK_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| io_error("read profile lock owner record", &entry.path(), error))?;
+        if bytes.len() > MAX_PROFILE_LOCK_BYTES {
+            return Err(ProfileLockError::Corrupt {
+                path: path.to_owned(),
+            });
+        }
+        let parsed = parse_owner(&bytes).ok_or_else(|| ProfileLockError::Corrupt {
             path: path.to_owned(),
-        });
+        })?;
+        if entry.file_name() != owner_file_name(parsed).as_str() {
+            return Err(ProfileLockError::Corrupt {
+                path: path.to_owned(),
+            });
+        }
+        owner = Some(parsed);
     }
 
-    parse_owner(&bytes).map(Some).ok_or_else(|| ProfileLockError::Corrupt {
+    owner.ok_or_else(|| ProfileLockError::Corrupt {
         path: path.to_owned(),
     })
+    .map(Some)
 }
 
 fn parse_owner(bytes: &[u8]) -> Option<ProfileLockOwner> {
@@ -330,6 +340,53 @@ fn parse_owner(bytes: &[u8]) -> Option<ProfileLockOwner> {
         process_id,
         owner_id,
     })
+}
+
+fn remove_exact_owner(
+    path: &Path,
+    expected: ProfileLockOwner,
+    recovery: bool,
+) -> Result<(), ProfileLockError> {
+    let mismatch = |actual| {
+        if recovery {
+            ProfileLockError::RecoveryTargetChanged { expected, actual }
+        } else {
+            ProfileLockError::OwnershipLost { expected, actual }
+        }
+    };
+
+    match read_owner_if_present(path)? {
+        Some(actual) if actual == expected => {}
+        actual => return Err(mismatch(actual)),
+    }
+
+    let exact_owner_path = owner_path(path, expected);
+    match fs::remove_file(&exact_owner_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(mismatch(read_owner_if_present(path)?));
+        }
+        Err(error) => {
+            return Err(io_error(
+                "remove profile lock owner record",
+                &exact_owner_path,
+                error,
+            ));
+        }
+    }
+
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Err(mismatch(read_owner_if_present(path)?))
+        }
+        Err(error) => Err(io_error("remove profile lock directory", path, error)),
+    }
 }
 
 fn io_error(operation: &'static str, path: &Path, error: io::Error) -> ProfileLockError {
@@ -352,10 +409,8 @@ mod tests {
     impl TempRoot {
         fn new() -> Self {
             let id = NEXT_TEMP_ROOT.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir().join(format!(
-                "zorya-profile-lock-{}-{id}",
-                std::process::id()
-            ));
+            let root = std::env::temp_dir()
+                .join(format!("zorya-profile-lock-{}-{id}", std::process::id()));
             let _ = fs::remove_dir_all(&root);
             Self(root)
         }
@@ -372,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_owner_blocks_second_acquisition_until_drop() {
+    fn exact_owner_blocks_second_acquisition_until_explicit_release() {
         let root = TempRoot::new();
         let first = ProfileLock::acquire(root.path()).unwrap();
 
@@ -383,21 +438,38 @@ mod tests {
             })
         );
 
-        drop(first);
+        first.release().unwrap();
         assert!(ProfileLock::acquire(root.path()).is_ok());
+    }
+
+    #[test]
+    fn dropping_token_does_not_perform_filesystem_release() {
+        let root = TempRoot::new();
+        let first = ProfileLock::acquire(root.path()).unwrap();
+        let owner = first.owner();
+        drop(first);
+
+        assert_eq!(
+            ProfileLock::acquire(root.path()),
+            Err(ProfileLockError::Held { owner })
+        );
+
+        ProfileLock::recover_abandoned(root.path(), owner)
+            .unwrap()
+            .release()
+            .unwrap();
     }
 
     #[test]
     fn malformed_existing_lock_fails_closed() {
         let root = TempRoot::new();
         fs::create_dir_all(root.path()).unwrap();
-        fs::write(root.path().join(PROFILE_LOCK_FILE_NAME), b"not-a-lock").unwrap();
+        fs::write(root.path().join(PROFILE_LOCK_FILE_NAME), b"not-a-directory").unwrap();
 
         assert!(matches!(
             ProfileLock::acquire(root.path()),
             Err(ProfileLockError::Corrupt { .. })
         ));
-        assert!(root.path().join(PROFILE_LOCK_FILE_NAME).exists());
     }
 
     #[test]
@@ -421,10 +493,12 @@ mod tests {
             ProfileLock::acquire(root.path()),
             Err(ProfileLockError::Held { owner })
         );
+
+        first.release().unwrap();
     }
 
     #[test]
-    fn recovered_owner_cannot_be_unlocked_by_old_guard() {
+    fn recovered_owner_cannot_be_unlocked_by_old_token() {
         let root = TempRoot::new();
         let first = ProfileLock::acquire(root.path()).unwrap();
         let first_owner = first.owner();
@@ -439,8 +513,13 @@ mod tests {
                 actual: Some(recovered_owner),
             })
         );
-
-        drop(first);
+        assert_eq!(
+            first.release(),
+            Err(ProfileLockError::OwnershipLost {
+                expected: first_owner,
+                actual: Some(recovered_owner),
+            })
+        );
         assert_eq!(
             ProfileLock::acquire(root.path()),
             Err(ProfileLockError::Held {
@@ -448,7 +527,7 @@ mod tests {
             })
         );
 
-        drop(recovered);
+        recovered.release().unwrap();
         assert!(ProfileLock::acquire(root.path()).is_ok());
     }
 
@@ -457,7 +536,7 @@ mod tests {
         let root = TempRoot::new();
         let lock = ProfileLock::acquire(root.path()).unwrap();
         let owner = lock.owner();
-        std::mem::forget(lock);
+        drop(lock);
 
         assert_eq!(
             ProfileLock::acquire(root.path()),
@@ -467,5 +546,6 @@ mod tests {
         let recovered = ProfileLock::recover_abandoned(root.path(), owner).unwrap();
         assert_ne!(recovered.owner(), owner);
         recovered.verify().unwrap();
+        recovered.release().unwrap();
     }
 }
