@@ -792,12 +792,12 @@ impl ProfileRuntime {
         let pending = self
             .pending_history_save
             .expect("pending history save was validated");
-        let active = self
-            .active
-            .as_ref()
-            .ok_or(ProfileRuntimeError::BrowsingHistorySaveTargetMismatch {
-                save: completion.id,
-            })?;
+        let active =
+            self.active
+                .as_ref()
+                .ok_or(ProfileRuntimeError::BrowsingHistorySaveTargetMismatch {
+                    save: completion.id,
+                })?;
         if pending.profile != completion.profile
             || pending.base_generation != completion.base_generation
             || active.id != completion.profile
@@ -1115,9 +1115,7 @@ mod tests {
 
         let completion = intent.execute();
         assert!(completion.result().is_ok());
-        runtime
-            .complete_browsing_history_save(completion)
-            .unwrap();
+        runtime.complete_browsing_history_save(completion).unwrap();
         let active = runtime.active_browsing_history(profile).unwrap();
         assert_eq!(active.generation(), 1);
         assert_eq!(active.len(), 2);
@@ -1135,9 +1133,7 @@ mod tests {
             .begin_browsing_history_save(profile)
             .unwrap()
             .execute();
-        runtime
-            .complete_browsing_history_save(completion)
-            .unwrap();
+        runtime.complete_browsing_history_save(completion).unwrap();
         let persisted = BrowsingHistoryStore::open(root.path())
             .unwrap()
             .load()
@@ -1161,9 +1157,7 @@ mod tests {
         ));
 
         let completion = intent.execute();
-        runtime
-            .complete_browsing_history_save(completion)
-            .unwrap();
+        runtime.complete_browsing_history_save(completion).unwrap();
         assert!(runtime.begin_browsing_history_save(profile).is_ok());
     }
 
@@ -1191,9 +1185,7 @@ mod tests {
                 provided: 0,
             })
         ));
-        runtime
-            .complete_browsing_history_save(completion)
-            .unwrap();
+        runtime.complete_browsing_history_save(completion).unwrap();
         let active = runtime.active_browsing_history(profile).unwrap();
         assert_eq!(active.generation(), 0);
         assert_eq!(active.len(), 1);
@@ -1233,7 +1225,10 @@ mod tests {
             })
         );
         assert_eq!(
-            runtime.active_browsing_history(second).unwrap().generation(),
+            runtime
+                .active_browsing_history(second)
+                .unwrap()
+                .generation(),
             0
         );
         assert!(runtime.active_browsing_history(second).unwrap().is_empty());
