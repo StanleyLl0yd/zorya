@@ -724,6 +724,10 @@ pub enum ProfileRuntimeError {
     ActiveProfileNotDurable {
         profile: ProfileId,
     },
+    DuplicateStorageIdentity {
+        active_profile: ProfileId,
+        storage_id: ProfileStorageId,
+    },
     StaleProfile {
         expected: Option<ProfileId>,
         actual: ProfileId,
@@ -838,6 +842,14 @@ impl fmt::Display for ProfileRuntimeError {
                 formatter,
                 "active profile {} still has pending or unsaved persistence work",
                 profile.get()
+            ),
+            Self::DuplicateStorageIdentity {
+                active_profile,
+                storage_id,
+            } => write!(
+                formatter,
+                "prepared profile storage identity {storage_id} duplicates active profile {}",
+                active_profile.get()
             ),
             Self::StaleProfile { expected, actual } => match expected {
                 Some(expected) => write!(
@@ -973,6 +985,16 @@ impl ProfileRuntime {
         }
 
         if let Some(active) = self.active.as_ref() {
+            if active.storage_id == prepared.storage_id {
+                return Err(ProfileSelectionCommitError {
+                    error: ProfileRuntimeError::DuplicateStorageIdentity {
+                        active_profile: active.id,
+                        storage_id: prepared.storage_id,
+                    },
+                    prepared: Box::new(prepared),
+                });
+            }
+
             let persistence_pending =
                 self.pending_settings_save.is_some() || self.pending_history_save.is_some();
             let persistence_dirty = active.settings_revision != active.durable_settings_revision
@@ -1608,6 +1630,62 @@ mod tests {
         let lock = replaced.into_profile_lock();
         lock.release().unwrap();
         let reacquired = ProfileLock::acquire(first_root.path()).unwrap();
+        reacquired.release().unwrap();
+    }
+
+    #[test]
+    fn duplicate_persisted_storage_identity_cannot_replace_active_profile() {
+        let first_root = TempRoot::new();
+        let second_root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+
+        let first_intent = runtime
+            .begin_selection(first_root.path())
+            .unwrap()
+            .into_intent();
+        let first_prepared = prepared(&first_intent);
+        let storage_id = first_prepared.storage_id();
+        let first_id = runtime
+            .commit_selection(first_prepared)
+            .unwrap()
+            .active_profile();
+
+        let identity_directory = first_root.path().join(crate::PROFILE_IDENTITY_DIRECTORY_NAME);
+        let identity_record = fs::read_dir(&identity_directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name();
+        fs::create_dir_all(
+            second_root
+                .path()
+                .join(crate::PROFILE_IDENTITY_DIRECTORY_NAME)
+                .join(identity_record),
+        )
+        .unwrap();
+
+        let second_intent = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
+        let rejection = runtime.commit_selection(prepared(&second_intent)).unwrap_err();
+        assert_eq!(
+            rejection.error(),
+            &ProfileRuntimeError::DuplicateStorageIdentity {
+                active_profile: first_id,
+                storage_id,
+            }
+        );
+        rejection
+            .into_parts()
+            .1
+            .into_profile_lock()
+            .release()
+            .unwrap();
+        assert_eq!(runtime.active_profile().unwrap().id(), first_id);
+
+        let reacquired = ProfileLock::acquire(second_root.path()).unwrap();
         reacquired.release().unwrap();
     }
 
