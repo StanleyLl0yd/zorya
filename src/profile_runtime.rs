@@ -311,6 +311,8 @@ pub struct ActiveProfile {
     settings_recovery: Option<SettingsRecovery>,
     browsing_history: BrowsingHistorySnapshot,
     browsing_history_recovery: Option<BrowsingHistoryRecovery>,
+    browsing_history_revision: u64,
+    durable_browsing_history_revision: u64,
 }
 
 impl ActiveProfile {
@@ -354,6 +356,7 @@ pub struct ProfileHistorySaveIntent {
     profile: ProfileId,
     root: PathBuf,
     snapshot: BrowsingHistorySnapshot,
+    mutation_revision: u64,
 }
 
 impl ProfileHistorySaveIntent {
@@ -373,6 +376,10 @@ impl ProfileHistorySaveIntent {
         &self.snapshot
     }
 
+    pub const fn mutation_revision(&self) -> u64 {
+        self.mutation_revision
+    }
+
     pub fn execute(self) -> ProfileHistorySaveCompletion {
         let base_generation = self.snapshot.generation();
         let result = BrowsingHistoryStore::open(self.root.clone())
@@ -382,6 +389,7 @@ impl ProfileHistorySaveIntent {
             profile: self.profile,
             root: self.root,
             base_generation,
+            mutation_revision: self.mutation_revision,
             result,
         }
     }
@@ -393,6 +401,7 @@ pub struct ProfileHistorySaveCompletion {
     profile: ProfileId,
     root: PathBuf,
     base_generation: u64,
+    mutation_revision: u64,
     result: Result<BrowsingHistorySave, BrowsingHistoryError>,
 }
 
@@ -409,6 +418,10 @@ impl ProfileHistorySaveCompletion {
         self.base_generation
     }
 
+    pub const fn mutation_revision(&self) -> u64 {
+        self.mutation_revision
+    }
+
     pub const fn result(&self) -> &Result<BrowsingHistorySave, BrowsingHistoryError> {
         &self.result
     }
@@ -423,6 +436,7 @@ struct PendingProfileHistorySave {
     id: ProfileHistorySaveId,
     profile: ProfileId,
     base_generation: u64,
+    mutation_revision: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -455,6 +469,7 @@ pub enum ProfileRuntimeError {
     ProfileIdExhausted,
     ProfileSelectionIdExhausted,
     ProfileHistorySaveIdExhausted,
+    ProfileHistoryMutationRevisionExhausted,
     BrowsingHistorySaveAlreadyPending {
         pending: ProfileHistorySaveId,
     },
@@ -495,6 +510,9 @@ impl fmt::Display for ProfileRuntimeError {
             }
             Self::ProfileHistorySaveIdExhausted => {
                 formatter.write_str("profile browsing-history save identifier space is exhausted")
+            }
+            Self::ProfileHistoryMutationRevisionExhausted => {
+                formatter.write_str("profile browsing-history mutation revision space is exhausted")
             }
             Self::BrowsingHistorySaveAlreadyPending { pending } => write!(
                 formatter,
@@ -678,6 +696,8 @@ impl ProfileRuntime {
             settings_recovery: prepared.settings_recovery,
             browsing_history: prepared.browsing_history,
             browsing_history_recovery: prepared.browsing_history_recovery,
+            browsing_history_revision: 0,
+            durable_browsing_history_revision: 0,
         };
         let invalidated_browsing_history_save =
             self.pending_history_save.take().map(|pending| pending.id);
@@ -713,9 +733,50 @@ impl ProfileRuntime {
         visited_unix_millis: u64,
         commit: BrowserNavigationCommit,
     ) -> Result<BrowsingHistoryRecord, ProfileRuntimeError> {
-        self.active_browsing_history_mut(profile)?
+        let expected = self.active.as_ref().map(ActiveProfile::id);
+        if expected != Some(profile) {
+            return Err(ProfileRuntimeError::StaleProfile {
+                expected,
+                actual: profile,
+            });
+        }
+
+        let active = self.active.as_mut().expect("active profile was validated");
+        let next_revision = active
+            .browsing_history_revision
+            .checked_add(1)
+            .ok_or(ProfileRuntimeError::ProfileHistoryMutationRevisionExhausted)?;
+        let record = active
+            .browsing_history
             .record_visit(visited_unix_millis, commit.location())
-            .map_err(ProfileRuntimeError::BrowsingHistory)
+            .map_err(ProfileRuntimeError::BrowsingHistory)?;
+        active.browsing_history_revision = next_revision;
+        Ok(record)
+    }
+
+    pub fn browsing_history_unsaved_mutations(
+        &self,
+        profile: ProfileId,
+    ) -> Result<u64, ProfileRuntimeError> {
+        let expected = self.active.as_ref().map(ActiveProfile::id);
+        if expected != Some(profile) {
+            return Err(ProfileRuntimeError::StaleProfile {
+                expected,
+                actual: profile,
+            });
+        }
+        let active = self.active.as_ref().expect("active profile was validated");
+        Ok(active
+            .browsing_history_revision
+            .checked_sub(active.durable_browsing_history_revision)
+            .expect("durable history revision cannot exceed current revision"))
+    }
+
+    pub fn browsing_history_is_dirty(
+        &self,
+        profile: ProfileId,
+    ) -> Result<bool, ProfileRuntimeError> {
+        Ok(self.browsing_history_unsaved_mutations(profile)? != 0)
     }
 
     pub fn active_browsing_history(
@@ -747,11 +808,22 @@ impl ProfileRuntime {
                 actual: profile,
             });
         }
-        Ok(&mut self
-            .active
-            .as_mut()
-            .expect("active profile was validated")
-            .browsing_history)
+        let active = self.active.as_mut().expect("active profile was validated");
+        active.browsing_history_revision = active
+            .browsing_history_revision
+            .checked_add(1)
+            .ok_or(ProfileRuntimeError::ProfileHistoryMutationRevisionExhausted)?;
+        Ok(&mut active.browsing_history)
+    }
+
+    pub fn begin_browsing_history_save_if_dirty(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<Option<ProfileHistorySaveIntent>, ProfileRuntimeError> {
+        if !self.browsing_history_is_dirty(profile)? {
+            return Ok(None);
+        }
+        self.begin_browsing_history_save(profile).map(Some)
     }
 
     pub fn begin_browsing_history_save(
@@ -775,6 +847,7 @@ impl ProfileRuntime {
         let root = active.root.clone();
         let snapshot = active.browsing_history.clone();
         let base_generation = snapshot.generation();
+        let mutation_revision = active.browsing_history_revision;
         let id = ProfileHistorySaveId(self.next_history_save_id);
         self.next_history_save_id = self
             .next_history_save_id
@@ -784,12 +857,14 @@ impl ProfileRuntime {
             id,
             profile,
             base_generation,
+            mutation_revision,
         });
         Ok(ProfileHistorySaveIntent {
             id,
             profile,
             root,
             snapshot,
+            mutation_revision,
         })
     }
 
@@ -816,6 +891,7 @@ impl ProfileRuntime {
                 })?;
         if pending.profile != completion.profile
             || pending.base_generation != completion.base_generation
+            || pending.mutation_revision != completion.mutation_revision
             || active.id != completion.profile
             || active.root != completion.root
         {
@@ -842,6 +918,7 @@ impl ProfileRuntime {
                     saved_generation,
                 });
             }
+            active.durable_browsing_history_revision = pending.mutation_revision;
         }
         Ok(completion)
     }
@@ -1189,6 +1266,124 @@ mod tests {
     }
 
     #[test]
+    fn loaded_history_starts_clean_and_successful_record_marks_dirty() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+
+        assert!(!runtime.browsing_history_is_dirty(profile).unwrap());
+        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 0);
+        assert!(runtime
+            .begin_browsing_history_save_if_dirty(profile)
+            .unwrap()
+            .is_none());
+
+        runtime
+            .record_committed_navigation(
+                profile,
+                100,
+                committed_navigation("https://example.test/dirty"),
+            )
+            .unwrap();
+
+        assert!(runtime.browsing_history_is_dirty(profile).unwrap());
+        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 1);
+        let intent = runtime
+            .begin_browsing_history_save_if_dirty(profile)
+            .unwrap()
+            .expect("dirty history should schedule a save");
+        assert_eq!(intent.mutation_revision(), 1);
+    }
+
+    #[test]
+    fn successful_save_cleans_only_mutations_captured_by_its_snapshot() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+
+        runtime
+            .record_committed_navigation(
+                profile,
+                100,
+                committed_navigation("https://example.test/first"),
+            )
+            .unwrap();
+        let intent = runtime
+            .begin_browsing_history_save_if_dirty(profile)
+            .unwrap()
+            .unwrap();
+        assert_eq!(intent.mutation_revision(), 1);
+
+        runtime
+            .record_committed_navigation(
+                profile,
+                200,
+                committed_navigation("https://example.test/second"),
+            )
+            .unwrap();
+        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 2);
+
+        let completion = intent.execute();
+        assert_eq!(completion.mutation_revision(), 1);
+        runtime.complete_browsing_history_save(completion).unwrap();
+        assert!(runtime.browsing_history_is_dirty(profile).unwrap());
+        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 1);
+
+        let completion = runtime
+            .begin_browsing_history_save_if_dirty(profile)
+            .unwrap()
+            .unwrap()
+            .execute();
+        runtime.complete_browsing_history_save(completion).unwrap();
+        assert!(!runtime.browsing_history_is_dirty(profile).unwrap());
+        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 0);
+        assert!(runtime
+            .begin_browsing_history_save_if_dirty(profile)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn mutable_history_access_conservatively_marks_history_dirty() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+
+        let _ = runtime.active_browsing_history_mut(profile).unwrap();
+
+        assert!(runtime.browsing_history_is_dirty(profile).unwrap());
+        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 1);
+    }
+
+    #[test]
+    fn mutation_revision_exhaustion_precedes_history_mutation_or_mutable_access() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        runtime
+            .active
+            .as_mut()
+            .unwrap()
+            .browsing_history_revision = u64::MAX;
+
+        let before = runtime.active_browsing_history(profile).unwrap().clone();
+        assert_eq!(
+            runtime.record_committed_navigation(
+                profile,
+                100,
+                committed_navigation("https://example.test/exhausted"),
+            ),
+            Err(ProfileRuntimeError::ProfileHistoryMutationRevisionExhausted)
+        );
+        assert_eq!(runtime.active_browsing_history(profile).unwrap(), &before);
+        assert_eq!(
+            runtime.active_browsing_history_mut(profile).map(|_| ()),
+            Err(ProfileRuntimeError::ProfileHistoryMutationRevisionExhausted)
+        );
+        assert_eq!(runtime.active_browsing_history(profile).unwrap(), &before);
+    }
+
+    #[test]
     fn history_save_advances_generation_without_losing_newer_in_memory_visits() {
         let root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
@@ -1288,6 +1483,8 @@ mod tests {
         assert_eq!(active.generation(), 0);
         assert_eq!(active.len(), 1);
         assert!(runtime.pending_browsing_history_save().is_none());
+        assert!(runtime.browsing_history_is_dirty(profile).unwrap());
+        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 1);
     }
 
     #[test]
