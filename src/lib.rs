@@ -12,6 +12,7 @@ mod navigation;
 mod platform;
 mod presentation_handoff;
 mod profile;
+mod profile_catalog;
 mod profile_history_scheduler;
 mod profile_lock;
 mod profile_runtime;
@@ -45,6 +46,12 @@ pub use profile::{
     MAX_SETTING_KEY_BYTES, MAX_SETTING_VALUE_BYTES, MAX_SETTINGS_ENTRIES,
     MAX_SETTINGS_RECORD_BYTES, ProfileStorageError, ProfileStore, SETTINGS_SCHEMA_VERSION,
     SettingsCleanupWarning, SettingsLoad, SettingsRecovery, SettingsSave, SettingsSnapshot,
+};
+pub use profile_catalog::{
+    MAX_DISCOVERED_PROFILES, MAX_PROFILE_CATALOG_DIRECTORY_ENTRIES,
+    MAX_PROFILE_IDENTITY_DIRECTORY_ENTRIES, PROFILE_IDENTITY_DIRECTORY_NAME,
+    PROFILE_IDENTITY_SCHEMA_VERSION, ProfileCatalog, ProfileCatalogEntry, ProfileCatalogError,
+    ProfileIdentityError, ProfileStorageId, load_profile_storage_id,
 };
 pub use profile_history_scheduler::{
     ProfileHistorySavePolicy, ProfileHistorySavePolicyError, ProfileHistorySaveScheduler,
