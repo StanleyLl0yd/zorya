@@ -6,6 +6,9 @@ use crate::browsing_history::{
 use crate::profile::{
     ProfileStorageError, ProfileStore, SettingsRecovery, SettingsSave, SettingsSnapshot,
 };
+use crate::profile_catalog::{
+    ProfileIdentityError, ProfileStorageId, load_or_create_profile_storage_id,
+};
 use crate::profile_lock::{ProfileLock, ProfileLockError};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -219,6 +222,7 @@ impl std::error::Error for ProfileSettingsError {
 pub struct PreparedProfile {
     selection: ProfileSelectionId,
     root: PathBuf,
+    storage_id: ProfileStorageId,
     lock: ProfileLock,
     settings: ProductSettings,
     settings_recovery: Option<SettingsRecovery>,
@@ -231,6 +235,8 @@ impl PreparedProfile {
         let lock =
             ProfileLock::acquire(intent.root.clone()).map_err(ProfilePreparationError::Lock)?;
         let prepared = (|| {
+            let storage_id =
+                load_or_create_profile_storage_id(&lock).map_err(ProfilePreparationError::Identity)?;
             let store = ProfileStore::open(intent.root.clone())
                 .map_err(ProfilePreparationError::Storage)?;
             let load = store
@@ -249,6 +255,7 @@ impl PreparedProfile {
             let browsing_history = history_load.into_snapshot();
 
             Ok((
+                storage_id,
                 settings,
                 settings_recovery,
                 browsing_history,
@@ -256,8 +263,13 @@ impl PreparedProfile {
             ))
         })();
 
-        let (settings, settings_recovery, browsing_history, browsing_history_recovery) =
-            match prepared {
+        let (
+            storage_id,
+            settings,
+            settings_recovery,
+            browsing_history,
+            browsing_history_recovery,
+        ) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     return match lock.release() {
@@ -273,6 +285,7 @@ impl PreparedProfile {
         Ok(Self {
             selection: intent.id,
             root: intent.root.clone(),
+            storage_id,
             lock,
             settings,
             settings_recovery,
@@ -287,6 +300,10 @@ impl PreparedProfile {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub const fn storage_id(&self) -> ProfileStorageId {
+        self.storage_id
     }
 
     pub const fn settings(&self) -> &ProductSettings {
@@ -314,6 +331,7 @@ impl PreparedProfile {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfilePreparationError {
     Lock(ProfileLockError),
+    Identity(ProfileIdentityError),
     Storage(ProfileStorageError),
     Settings(ProfileSettingsError),
     BrowsingHistory(crate::browsing_history::BrowsingHistoryError),
@@ -327,6 +345,7 @@ impl fmt::Display for ProfilePreparationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Lock(error) => error.fmt(formatter),
+            Self::Identity(error) => error.fmt(formatter),
             Self::Storage(error) => error.fmt(formatter),
             Self::Settings(error) => error.fmt(formatter),
             Self::BrowsingHistory(error) => error.fmt(formatter),
@@ -345,6 +364,7 @@ impl std::error::Error for ProfilePreparationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Lock(error) => Some(error),
+            Self::Identity(error) => Some(error),
             Self::Storage(error) => Some(error),
             Self::Settings(error) => Some(error),
             Self::BrowsingHistory(error) => Some(error),
@@ -357,6 +377,7 @@ impl std::error::Error for ProfilePreparationError {
 pub struct ActiveProfile {
     id: ProfileId,
     root: PathBuf,
+    storage_id: ProfileStorageId,
     lock: ProfileLock,
     settings: ProductSettings,
     settings_recovery: Option<SettingsRecovery>,
@@ -375,6 +396,10 @@ impl ActiveProfile {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub const fn storage_id(&self) -> ProfileStorageId {
+        self.storage_id
     }
 
     #[cfg(target_os = "windows")]
@@ -977,6 +1002,7 @@ impl ProfileRuntime {
         let active = ActiveProfile {
             id,
             root: prepared.root,
+            storage_id: prepared.storage_id,
             lock: prepared.lock,
             settings: prepared.settings,
             settings_recovery: prepared.settings_recovery,
