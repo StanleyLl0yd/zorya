@@ -1,8 +1,7 @@
 use crate::profile_lock::{ProfileLock, ProfileLockError};
 use crate::profile_metadata::{
-    PROFILE_METADATA_DIRECTORY_NAME, ProfileDisplayName, ProfileDisplayNameError, ProfileMetadata,
-    ProfileMetadataError, load_or_create_profile_metadata, load_profile_metadata,
-    save_profile_metadata,
+    ProfileDisplayName, ProfileDisplayNameError, ProfileMetadata, ProfileMetadataError,
+    load_or_create_profile_metadata, load_profile_metadata, save_profile_metadata,
 };
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
