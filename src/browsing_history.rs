@@ -1082,7 +1082,9 @@ mod tests {
             .unwrap()
             .into_snapshot();
         let mut second_input = first.clone();
-        second_input.record_visit(2_000, "https://two.test").unwrap();
+        second_input
+            .record_visit(2_000, "https://two.test")
+            .unwrap();
         let second = store.save(&second_input).unwrap().into_snapshot();
 
         let path = store.history_path(second.generation());
