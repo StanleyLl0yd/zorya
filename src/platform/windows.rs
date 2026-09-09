@@ -11,8 +11,9 @@ use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     NavigationId, NavigationStart, PreparedProfile, PresentationFramePermit,
     PresentationGeneration, PresentationHandoffError, ProfileHistorySavePolicy,
-    ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileLock, ProfileLockOwner,
-    ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent, ProfileSettingsSavePolicy,
+    ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileId, ProfileLock,
+    ProfileLockOwner, ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent,
+    ProfileSettingsSavePolicy,
     ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency, ProfileWorker,
     ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection, TabId,
     TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
@@ -98,14 +99,21 @@ struct WorkerNavigationTarget {
     window: BrowserWindowId,
     tab: TabId,
     navigation: NavigationId,
+    profile: ProfileId,
 }
 
 impl WorkerNavigationTarget {
-    const fn new(window: BrowserWindowId, tab: TabId, navigation: NavigationId) -> Self {
+    const fn new(
+        window: BrowserWindowId,
+        tab: TabId,
+        navigation: NavigationId,
+        profile: ProfileId,
+    ) -> Self {
         Self {
             window,
             tab,
             navigation,
+            profile,
         }
     }
 }
@@ -183,21 +191,21 @@ fn current_unix_millis() -> Result<u64, String> {
 
 fn record_profile_navigation_at(
     runtime: &mut ProfileRuntime,
+    profile: ProfileId,
     visited_unix_millis: u64,
     commit: BrowserNavigationCommit,
 ) -> Result<(), String> {
     if commit.location() == START_LOCATION {
         return Ok(());
     }
-    let profile = runtime
-        .active_profile()
-        .ok_or_else(|| "no active profile for committed navigation history".to_string())?
-        .id();
     runtime
         .record_committed_navigation(profile, visited_unix_millis, commit)
         .map(|_| ())
         .map_err(|error| {
-            format!("failed to record committed navigation in active profile: {error}")
+            format!(
+                "failed to record committed navigation for profile {}: {error}",
+                profile.get()
+            )
         })
 }
 
@@ -468,6 +476,7 @@ struct NativeShell {
     surface_recovery_permit: Option<PresentationFramePermit>,
     pending_tab_create: Option<PendingNativeTabCreate>,
     pending_view_close: Option<TabId>,
+    pending_navigation_targets: BTreeMap<TabId, WorkerNavigationTarget>,
     rapid_smoke_tabs: Vec<TabId>,
     restore_focus_after_activation: bool,
     modifiers: ModifiersState,
@@ -528,6 +537,7 @@ impl NativeShell {
             surface_recovery_permit: None,
             pending_tab_create: None,
             pending_view_close: None,
+            pending_navigation_targets: BTreeMap::new(),
             rapid_smoke_tabs: Vec::new(),
             restore_focus_after_activation: false,
             modifiers: ModifiersState::empty(),
@@ -557,10 +567,59 @@ impl NativeShell {
         }
     }
 
-    fn record_navigation_commit(&mut self, commit: BrowserNavigationCommit) -> Result<(), String> {
+    fn record_navigation_commit(
+        &mut self,
+        profile: ProfileId,
+        commit: BrowserNavigationCommit,
+    ) -> Result<(), String> {
         let visited_unix_millis = current_unix_millis()?;
-        record_profile_navigation_at(&mut self.profile_runtime, visited_unix_millis, commit)?;
+        record_profile_navigation_at(
+            &mut self.profile_runtime,
+            profile,
+            visited_unix_millis,
+            commit,
+        )?;
         self.drive_history_save(ProfileHistorySaveUrgency::Normal)
+    }
+
+    fn active_profile_id(&self) -> Result<ProfileId, String> {
+        self.profile_runtime
+            .active_profile()
+            .map(|profile| profile.id())
+            .ok_or_else(|| "native browser work requires an active profile".to_string())
+    }
+
+    fn profile_transition_in_progress(&self) -> bool {
+        self.profile_runtime.pending_selection().is_some()
+            || self.pending_profile_replacement.is_some()
+            || self.replaced_profile_lock.is_some()
+            || self.pending_profile_lock_release.is_some_and(|pending| {
+                pending.purpose == ProfileLockReleasePurpose::ReplacedProfile
+            })
+    }
+
+    fn profile_replacement_browser_quiescent(&self) -> bool {
+        if self.initial_navigation.is_some()
+            || self.pending_tab_create.is_some()
+            || self.pending_view_close.is_some()
+            || self.pending_navigation_cancel.is_some()
+            || !self.pending_navigation_targets.is_empty()
+            || self.presentation.pending_activation().is_some()
+            || self.pending_target_permit.is_some()
+            || self.pending_frame.is_pending()
+            || self.pending_surface.is_pending()
+        {
+            return false;
+        }
+
+        self.browser
+            .window(self.browser_window)
+            .is_some_and(|window| {
+                window
+                    .tabs()
+                    .iter()
+                    .all(|tab| tab.navigation().pending().is_none())
+            })
     }
 
     fn drive_settings_save(&mut self, urgency: ProfileSettingsSaveUrgency) -> Result<(), String> {
@@ -786,6 +845,22 @@ impl NativeShell {
             return;
         }
 
+        if self.profile_runtime.active_profile().is_some()
+            && !self.profile_replacement_browser_quiescent()
+        {
+            if self.pending_profile_replacement.is_some() {
+                self.fail_with_rejected_profile(
+                    event_loop,
+                    prepared,
+                    "profile replacement overlapped an existing pending replacement",
+                );
+                return;
+            }
+            self.pending_profile_replacement = Some(prepared);
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
         match self.profile_runtime.commit_selection(prepared) {
             Ok(commit) => {
                 if let Some(replaced) = commit.into_replaced_profile() {
@@ -856,6 +931,11 @@ impl NativeShell {
                 Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
                 Err(error) => self.fail(event_loop, error),
             }
+            return;
+        }
+
+        if !self.profile_replacement_browser_quiescent() {
+            event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
 
@@ -1319,11 +1399,19 @@ impl NativeShell {
     }
 
     fn navigation_target_is_current(&self, target: WorkerNavigationTarget) -> bool {
-        self.browser
-            .window(target.window)
-            .and_then(|window| window.tab(target.tab))
-            .and_then(|tab| tab.navigation().pending())
-            .is_some_and(|pending| pending.id() == target.navigation)
+        self.pending_navigation_targets.get(&target.tab) == Some(&target)
+            && self
+                .browser
+                .window(target.window)
+                .and_then(|window| window.tab(target.tab))
+                .and_then(|tab| tab.navigation().pending())
+                .is_some_and(|pending| pending.id() == target.navigation)
+    }
+
+    fn clear_navigation_target_if_current(&mut self, target: WorkerNavigationTarget) {
+        if self.pending_navigation_targets.get(&target.tab) == Some(&target) {
+            self.pending_navigation_targets.remove(&target.tab);
+        }
     }
 
     fn dispatch_navigation_start(
@@ -1332,7 +1420,17 @@ impl NativeShell {
         start: NavigationStart,
     ) -> Result<NavigationId, String> {
         let navigation = start.intent().id();
-        let target = WorkerNavigationTarget::new(self.browser_window, tab, navigation);
+        if self.profile_transition_in_progress() {
+            let _ = self.browser.fail_navigation(
+                self.browser_window,
+                tab,
+                navigation,
+                "browser navigation was blocked by an in-progress profile transition",
+            );
+            return Err("browser navigation is blocked during a profile transition".into());
+        }
+        let profile = self.active_profile_id()?;
+        let target = WorkerNavigationTarget::new(self.browser_window, tab, navigation, profile);
         let location = start.intent().requested_location().to_owned();
         let result = self
             .worker
@@ -1348,6 +1446,7 @@ impl NativeShell {
             );
             return Err(error);
         }
+        self.pending_navigation_targets.insert(tab, target);
         Ok(navigation)
     }
 
@@ -1594,6 +1693,9 @@ impl NativeShell {
     }
 
     fn start_new_tab_with_activation(&mut self, activate_after_create: bool) -> Result<(), String> {
+        if self.profile_transition_in_progress() {
+            return Ok(());
+        }
         if !self.worker_ready
             || self.pending_tab_create.is_some()
             || self.pending_frame.is_pending()
@@ -1895,7 +1997,17 @@ impl NativeShell {
             .map(|intent| intent.id());
 
         if let Some(navigation) = pending {
-            let target = WorkerNavigationTarget::new(self.browser_window, tab, navigation);
+            let target = self
+                .pending_navigation_targets
+                .get(&tab)
+                .copied()
+                .filter(|target| target.navigation == navigation)
+                .ok_or_else(|| {
+                    format!(
+                        "browser navigation {} has no exact native profile owner",
+                        navigation.get()
+                    )
+                })?;
             self.worker
                 .as_ref()
                 .ok_or_else(|| "render worker is unavailable".to_string())?
@@ -1924,6 +2036,9 @@ impl NativeShell {
         is_synthetic: bool,
     ) -> Result<(), String> {
         if is_synthetic || event.state != ElementState::Pressed || event.repeat {
+            return Ok(());
+        }
+        if self.profile_transition_in_progress() {
             return Ok(());
         }
         if self.modifiers.alt_key()
@@ -2059,7 +2174,8 @@ impl NativeShell {
                 START_LOCATION,
             )
             .map_err(|error| format!("failed to commit new-tab navigation: {error}"))?;
-        self.record_navigation_commit(commit)?;
+        let profile = self.active_profile_id()?;
+        self.record_navigation_commit(profile, commit)?;
 
         if pending.activate_after_create {
             let start = self
@@ -2195,10 +2311,11 @@ impl NativeShell {
                                 return;
                             }
                         };
-                        if let Err(error) = self.record_navigation_commit(commit) {
+                        if let Err(error) = self.record_navigation_commit(target.profile, commit) {
                             self.fail(event_loop, error);
                             return;
                         }
+                        self.clear_navigation_target_if_current(target);
                         if self.http_smoke_navigation == Some(target.navigation) {
                             self.http_smoke_committed = true;
                             if let Err(error) = self.dispatch_http_smoke_frame() {
@@ -2222,6 +2339,7 @@ impl NativeShell {
                             );
                             return;
                         }
+                        self.clear_navigation_target_if_current(target);
                         if self.http_smoke_navigation == Some(target.navigation) {
                             self.fail(
                                 event_loop,
@@ -2261,7 +2379,10 @@ impl NativeShell {
                         );
                         match effect {
                             Ok(BrowserCommandEffect::NavigationStopped(intent))
-                                if intent.id() == target.navigation => {}
+                                if intent.id() == target.navigation =>
+                            {
+                                self.clear_navigation_target_if_current(target);
+                            }
                             Ok(_) => self.fail(
                                 event_loop,
                                 "navigation cancellation acknowledged for a different product state",
@@ -2490,7 +2611,8 @@ impl NativeShell {
             .browser
             .commit_navigation(self.browser_window, self.tab, navigation, START_LOCATION)
             .map_err(|error| format!("failed to commit initial browser navigation: {error}"))?;
-        self.record_navigation_commit(commit)?;
+        let profile = self.active_profile_id()?;
+        self.record_navigation_commit(profile, commit)?;
         self.initial_navigation = None;
         Ok(())
     }
@@ -3573,7 +3695,7 @@ mod tests {
         let profile = runtime.active_profile().unwrap().id();
         let commit = committed_navigation("https://example.test/final");
 
-        record_profile_navigation_at(&mut runtime, 1_234, commit).unwrap();
+        record_profile_navigation_at(&mut runtime, profile, 1_234, commit).unwrap();
 
         let history = runtime.active_browsing_history(profile).unwrap();
         assert_eq!(history.len(), 1);
@@ -3583,12 +3705,42 @@ mod tests {
     }
 
     #[test]
+    fn stale_navigation_owner_cannot_record_into_replacement_profile() {
+        let (first_root, mut runtime) = active_profile_runtime();
+        let first = runtime.active_profile().unwrap().id();
+        let commit = committed_navigation("https://example.test/owned-by-first");
+
+        let second_root = TestProfileRoot::new();
+        let selection = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
+        let prepared = PreparedProfile::load(&selection).unwrap();
+        let replacement = runtime.commit_selection(prepared).unwrap();
+        let second = replacement.active_profile();
+        replacement
+            .into_replaced_profile()
+            .unwrap()
+            .into_profile_lock()
+            .release()
+            .unwrap();
+
+        let error =
+            record_profile_navigation_at(&mut runtime, first, 1_234, commit).unwrap_err();
+        assert!(error.contains("stale"));
+        assert!(runtime.active_browsing_history(second).unwrap().is_empty());
+
+        let reacquired = ProfileLock::acquire(first_root.path()).unwrap();
+        reacquired.release().unwrap();
+    }
+
+    #[test]
     fn service_about_blank_commit_is_not_persisted() {
         let (_root, mut runtime) = active_profile_runtime();
         let profile = runtime.active_profile().unwrap().id();
         let commit = committed_navigation(START_LOCATION);
 
-        record_profile_navigation_at(&mut runtime, 1_234, commit).unwrap();
+        record_profile_navigation_at(&mut runtime, profile, 1_234, commit).unwrap();
 
         assert!(runtime.active_browsing_history(profile).unwrap().is_empty());
         assert!(!runtime.browsing_history_is_dirty(profile).unwrap());
