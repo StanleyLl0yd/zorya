@@ -167,6 +167,18 @@ jobs:
           if ($process.ExitCode -ne 0) {
             throw "release HTTP navigation smoke test failed with exit code $($process.ExitCode)"
           }
+      - name: Smoke test release native profile cycle
+        shell: pwsh
+        run: |
+          $executable = Join-Path "target/release" "zorya.exe"
+          $process = Start-Process -FilePath $executable -ArgumentList "--native-profile-cycle-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "release native profile cycle smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "release native profile cycle smoke test failed with exit code $($process.ExitCode)"
+          }
 
       - name: Package release candidate
         shell: pwsh
@@ -254,6 +266,15 @@ jobs:
           }
           if ($process.ExitCode -ne 0) {
             throw "packaged HTTP navigation smoke test failed with exit code $($process.ExitCode)"
+          }
+
+          $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-profile-cycle-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "packaged native profile cycle smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "packaged native profile cycle smoke test failed with exit code $($process.ExitCode)"
           }
 
           $buildInfoPath = Join-Path $packageRoot "BUILD-INFO.txt"
