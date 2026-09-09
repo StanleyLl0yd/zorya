@@ -365,17 +365,30 @@ pub fn load_profile_storage_id(
 ) -> Result<Option<ProfileStorageId>, ProfileIdentityError> {
     let root = root.as_ref();
     let identity_directory = root.join(PROFILE_IDENTITY_DIRECTORY_NAME);
-    let entries = match fs::read_dir(&identity_directory) {
-        Ok(entries) => entries,
+    let metadata = match fs::symlink_metadata(&identity_directory) {
+        Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(identity_io_error(
-                "read profile identity directory",
+                "inspect profile identity directory",
                 &identity_directory,
                 error,
             ));
         }
     };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ProfileIdentityError::Corrupt {
+            path: identity_directory,
+        });
+    }
+
+    let entries = fs::read_dir(&identity_directory).map_err(|error| {
+        identity_io_error(
+            "read profile identity directory",
+            &identity_directory,
+            error,
+        )
+    })?;
 
     let mut found = Vec::new();
     for entry in entries {
@@ -602,6 +615,26 @@ mod tests {
             }) if storage_id == id
                 && ((first_root == first && second_root == second)
                     || (first_root == second && second_root == first))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_loader_rejects_symlinked_identity_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestRoot::new("identity-symlink");
+        let target = root.path().join("identity-target");
+        fs::create_dir_all(target.join(identity_record_name(ProfileStorageId(7)))).unwrap();
+        symlink(
+            &target,
+            root.path().join(PROFILE_IDENTITY_DIRECTORY_NAME),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            load_profile_storage_id(root.path()),
+            Err(ProfileIdentityError::Corrupt { .. })
         ));
     }
 
