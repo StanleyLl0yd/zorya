@@ -53,6 +53,7 @@ pub use profile_runtime::{
     ProfileHistorySaveCompletion, ProfileHistorySaveId, ProfileHistorySaveIntent, ProfileId,
     ProfilePreparationError, ProfileRuntime, ProfileRuntimeError, ProfileSelectionCommit,
     ProfileSelectionId, ProfileSelectionIntent, ProfileSelectionStart, ProfileSettingsError,
+    ProfileSettingsSaveCompletion, ProfileSettingsSaveId, ProfileSettingsSaveIntent,
 };
 pub use profile_worker::{
     PROFILE_WORKER_COMMAND_QUEUE_CAPACITY, ProfileWorker, ProfileWorkerCompletion,
