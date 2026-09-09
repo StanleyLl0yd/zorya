@@ -1345,14 +1345,7 @@ mod tests {
     }
 
     fn prepared(intent: &ProfileSelectionIntent) -> PreparedProfile {
-        PreparedProfile {
-            selection: intent.id,
-            root: intent.root.clone(),
-            settings: ProductSettings::from_snapshot(SettingsSnapshot::default()).unwrap(),
-            settings_recovery: None,
-            browsing_history: BrowsingHistorySnapshot::default(),
-            browsing_history_recovery: None,
-        }
+        PreparedProfile::load(intent).unwrap()
     }
 
     fn load_profile(runtime: &mut ProfileRuntime, root: &Path) -> ProfileId {
@@ -1379,10 +1372,15 @@ mod tests {
 
     #[test]
     fn selection_is_two_phase_and_supersession_is_stale_safe() {
+        let first_root = TempRoot::new();
+        let second_root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
-        let first = runtime.begin_selection("first").unwrap().into_intent();
+        let first = runtime
+            .begin_selection(first_root.path())
+            .unwrap()
+            .into_intent();
         let first_prepared = prepared(&first);
-        let second_start = runtime.begin_selection("second").unwrap();
+        let second_start = runtime.begin_selection(second_root.path()).unwrap();
         assert_eq!(second_start.superseded(), Some(&first));
         let second = second_start.into_intent();
 
@@ -1398,21 +1396,26 @@ mod tests {
         let commit = runtime.commit_selection(prepared(&second)).unwrap();
         assert_eq!(commit.active_profile().get(), 1);
         assert!(commit.replaced_profile().is_none());
-        assert_eq!(
-            runtime.active_profile().unwrap().root(),
-            Path::new("second")
-        );
+        assert_eq!(runtime.active_profile().unwrap().root(), second_root.path());
     }
 
     #[test]
     fn committed_profile_survives_pending_selection_and_exact_cancel() {
+        let first_root = TempRoot::new();
+        let second_root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
-        let first = runtime.begin_selection("first").unwrap().into_intent();
+        let first = runtime
+            .begin_selection(first_root.path())
+            .unwrap()
+            .into_intent();
         let first_id = runtime
             .commit_selection(prepared(&first))
             .unwrap()
             .active_profile();
-        let second = runtime.begin_selection("second").unwrap().into_intent();
+        let second = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
 
         assert_eq!(runtime.active_profile().unwrap().id(), first_id);
         assert_eq!(
@@ -1428,13 +1431,21 @@ mod tests {
 
     #[test]
     fn replacing_profile_returns_old_identity_and_rejects_old_mutation() {
+        let first_root = TempRoot::new();
+        let second_root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
-        let first = runtime.begin_selection("first").unwrap().into_intent();
+        let first = runtime
+            .begin_selection(first_root.path())
+            .unwrap()
+            .into_intent();
         let first_id = runtime
             .commit_selection(prepared(&first))
             .unwrap()
             .active_profile();
-        let second = runtime.begin_selection("second").unwrap().into_intent();
+        let second = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
         let commit = runtime.commit_selection(prepared(&second)).unwrap();
         let second_id = commit.active_profile();
 
@@ -1460,7 +1471,8 @@ mod tests {
         assert!(runtime.pending_selection().is_none());
 
         runtime.next_selection_id = 1;
-        let intent = runtime.begin_selection("profile").unwrap().into_intent();
+        let root = TempRoot::new();
+        let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
         runtime.next_profile_id = u64::MAX;
         assert_eq!(
             runtime.commit_selection(prepared(&intent)),
@@ -1522,8 +1534,10 @@ mod tests {
         let mut raw = store.load_settings().unwrap().into_snapshot();
         raw.set(COLOR_SCHEME_KEY, "light").unwrap();
         raw.set("future.same_schema.key", "preserved").unwrap();
-        let saved = store.save_settings(&raw).unwrap().into_snapshot();
+        let lock = ProfileLock::acquire(root.path()).unwrap();
+        let saved = store.save_settings(&lock, &raw).unwrap().into_snapshot();
         assert_eq!(saved.generation(), 1);
+        drop(lock);
 
         let mut runtime = ProfileRuntime::new();
         let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
@@ -1549,8 +1563,10 @@ mod tests {
         snapshot
             .record_visit(123, "https://example.test/first")
             .unwrap();
-        let saved = store.save(&snapshot).unwrap().into_snapshot();
+        let lock = ProfileLock::acquire(root.path()).unwrap();
+        let saved = store.save(&lock, &snapshot).unwrap().into_snapshot();
         assert_eq!(saved.generation(), 1);
+        drop(lock);
 
         let mut runtime = ProfileRuntime::new();
         let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
@@ -1581,8 +1597,9 @@ mod tests {
             1
         );
 
+        let replacement_root = TempRoot::new();
         let replacement = runtime
-            .begin_selection("replacement")
+            .begin_selection(replacement_root.path())
             .unwrap()
             .into_intent();
         let second = runtime
@@ -1783,7 +1800,8 @@ mod tests {
 
         let store = ProfileStore::open(root.path()).unwrap();
         let external = store.load_settings().unwrap().into_snapshot();
-        store.save_settings(&external).unwrap();
+        let lock = runtime.active.as_ref().unwrap().lock.clone();
+        store.save_settings(&lock, &external).unwrap();
 
         let completion = intent.execute();
         assert!(matches!(
@@ -2170,7 +2188,8 @@ mod tests {
 
         let store = BrowsingHistoryStore::open(root.path()).unwrap();
         let external = store.load().unwrap().into_snapshot();
-        store.save(&external).unwrap();
+        let lock = runtime.active.as_ref().unwrap().lock.clone();
+        store.save(&lock, &external).unwrap();
 
         let completion = intent.execute();
         assert!(matches!(
