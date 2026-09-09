@@ -1175,12 +1175,16 @@ mod tests {
         assert!(loaded.browsing_history_recovery().is_none());
 
         let first = runtime.commit_selection(loaded).unwrap().active_profile();
+        assert!(!runtime.browsing_history_is_dirty(first).unwrap());
+        assert_eq!(runtime.browsing_history_unsaved_mutations(first).unwrap(), 0);
         runtime
             .active_browsing_history_mut(first)
             .unwrap()
             .record_visit(456, "https://example.test/second")
             .unwrap();
         assert_eq!(runtime.active_browsing_history(first).unwrap().len(), 2);
+        assert!(runtime.browsing_history_is_dirty(first).unwrap());
+        assert_eq!(runtime.browsing_history_unsaved_mutations(first).unwrap(), 1);
 
         let replacement = runtime
             .begin_selection("replacement")
@@ -1257,6 +1261,8 @@ mod tests {
             ))
         ));
         assert!(runtime.active_browsing_history(profile).unwrap().is_empty());
+        assert!(!runtime.browsing_history_is_dirty(profile).unwrap());
+        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 0);
 
         let valid = committed_navigation("https://example.test/valid");
         let record = runtime
@@ -1360,11 +1366,7 @@ mod tests {
         let root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
         let profile = load_profile(&mut runtime, root.path());
-        runtime
-            .active
-            .as_mut()
-            .unwrap()
-            .browsing_history_revision = u64::MAX;
+        runtime.active.as_mut().unwrap().browsing_history_revision = u64::MAX;
 
         let before = runtime.active_browsing_history(profile).unwrap().clone();
         assert_eq!(
