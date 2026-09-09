@@ -623,15 +623,38 @@ pub(crate) fn load_or_create_profile_storage_id(
     lock: &ProfileLock,
 ) -> Result<ProfileStorageId, ProfileIdentityError> {
     lock.verify().map_err(ProfileIdentityError::Lock)?;
-    let root = lock.root();
-    if let Some(storage_id) = load_profile_storage_id(root)? {
+    if let Some(storage_id) = load_profile_storage_id(lock.root())? {
         return Ok(storage_id);
+    }
+    let storage_id = next_profile_storage_id()?;
+    publish_profile_storage_id(lock, storage_id)?;
+    Ok(storage_id)
+}
+
+pub(crate) fn publish_profile_storage_id(
+    lock: &ProfileLock,
+    storage_id: ProfileStorageId,
+) -> Result<(), ProfileIdentityError> {
+    lock.verify().map_err(ProfileIdentityError::Lock)?;
+    let root = lock.root();
+    if load_profile_storage_id(root)?.is_some() {
+        return Err(ProfileIdentityError::ConcurrentWrite {
+            path: root.join(PROFILE_IDENTITY_DIRECTORY_NAME),
+        });
     }
 
     let identity_directory = root.join(PROFILE_IDENTITY_DIRECTORY_NAME);
     match fs::create_dir(&identity_directory) {
         Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(&identity_directory)
+                .map_err(|error| identity_io_error("inspect profile identity directory", &identity_directory, error))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(ProfileIdentityError::Corrupt {
+                    path: identity_directory,
+                });
+            }
+        }
         Err(error) => {
             return Err(identity_io_error(
                 "create profile identity directory",
@@ -648,7 +671,6 @@ pub(crate) fn load_or_create_profile_storage_id(
         });
     }
 
-    let storage_id = next_profile_storage_id()?;
     let record_path = identity_directory.join(identity_record_name(storage_id));
     lock.verify().map_err(ProfileIdentityError::Lock)?;
     match fs::create_dir(&record_path) {
@@ -665,7 +687,7 @@ pub(crate) fn load_or_create_profile_storage_id(
         }
     }
     lock.verify().map_err(ProfileIdentityError::Lock)?;
-    Ok(storage_id)
+    Ok(())
 }
 
 pub fn load_profile_storage_id(
