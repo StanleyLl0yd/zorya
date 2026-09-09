@@ -1532,6 +1532,24 @@ mod tests {
     }
 
     #[test]
+    fn prepared_and_active_profile_preserve_persisted_storage_identity() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
+        let prepared = PreparedProfile::load(&intent).unwrap();
+        let storage_id = prepared.storage_id();
+
+        assert_ne!(storage_id.get(), 0);
+        assert_eq!(
+            crate::load_profile_storage_id(root.path()).unwrap(),
+            Some(storage_id)
+        );
+
+        runtime.commit_selection(prepared).unwrap();
+        assert_eq!(runtime.active_profile().unwrap().storage_id(), storage_id);
+    }
+
+    #[test]
     fn committed_profile_survives_pending_selection_and_exact_cancel() {
         let first_root = TempRoot::new();
         let second_root = TempRoot::new();
