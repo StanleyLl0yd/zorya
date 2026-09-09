@@ -1912,6 +1912,7 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        drop(self.profile_worker.take());
         if let Some(worker) = self.worker.take() {
             worker.shutdown();
         }
