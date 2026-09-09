@@ -159,7 +159,11 @@ impl fmt::Display for ProfileMetadataError {
                 "profile metadata directory contains {found} entries; limit is {limit}"
             ),
             Self::Corrupt { path } => {
-                write!(formatter, "profile metadata is malformed: {}", path.display())
+                write!(
+                    formatter,
+                    "profile metadata is malformed: {}",
+                    path.display()
+                )
             }
             Self::UnsupportedSchema { path, schema } => write!(
                 formatter,
@@ -260,8 +264,8 @@ pub(crate) fn save_profile_metadata(
     }
 
     lock.verify().map_err(ProfileMetadataError::Lock)?;
-    let reloaded = load_profile_metadata(lock.root(), storage_id)?
-        .ok_or(ProfileMetadataError::Missing)?;
+    let reloaded =
+        load_profile_metadata(lock.root(), storage_id)?.ok_or(ProfileMetadataError::Missing)?;
     if reloaded.generation != current.generation {
         return Err(ProfileMetadataError::StaleGeneration {
             expected: current.generation,
@@ -325,9 +329,8 @@ fn publish_metadata_record(
         .map_err(|error| metadata_io_error("read profile metadata directory", &directory, error))?;
     let mut count = 0_usize;
     for entry in entries {
-        entry.map_err(|error| {
-            metadata_io_error("read profile metadata entry", &directory, error)
-        })?;
+        entry
+            .map_err(|error| metadata_io_error("read profile metadata entry", &directory, error))?;
         count = count.saturating_add(1);
         if count >= MAX_PROFILE_METADATA_DIRECTORY_ENTRIES {
             return Err(ProfileMetadataError::DirectoryEntryLimitExceeded {
@@ -350,11 +353,7 @@ fn publish_metadata_record(
             return Err(ProfileMetadataError::ConcurrentWrite { path });
         }
         Err(error) => {
-            return Err(metadata_io_error(
-                "publish profile metadata",
-                &path,
-                error,
-            ));
+            return Err(metadata_io_error("publish profile metadata", &path, error));
         }
     }
     lock.verify().map_err(ProfileMetadataError::Lock)?;
@@ -393,9 +392,8 @@ fn scan_metadata_records(
                 limit: MAX_PROFILE_METADATA_DIRECTORY_ENTRIES,
             });
         }
-        let entry = entry.map_err(|error| {
-            metadata_io_error("read profile metadata entry", &directory, error)
-        })?;
+        let entry = entry
+            .map_err(|error| metadata_io_error("read profile metadata entry", &directory, error))?;
         let path = entry.path();
         let file_type = entry
             .file_type()
@@ -411,7 +409,10 @@ fn scan_metadata_records(
             });
         }
         let generation = metadata.generation;
-        if records.insert(generation, (path.clone(), metadata)).is_some() {
+        if records
+            .insert(generation, (path.clone(), metadata))
+            .is_some()
+        {
             return Err(ProfileMetadataError::Corrupt { path });
         }
     }
@@ -501,8 +502,8 @@ fn parse_metadata_record_name(
             path: path.to_owned(),
         });
     }
-    let storage_id = ProfileStorageId::from_raw(storage_id)
-        .ok_or_else(|| ProfileMetadataError::Corrupt {
+    let storage_id =
+        ProfileStorageId::from_raw(storage_id).ok_or_else(|| ProfileMetadataError::Corrupt {
             path: path.to_owned(),
         })?;
 
@@ -709,11 +710,8 @@ mod tests {
     fn metadata_directory_is_bounded_and_rejects_unknown_schema() {
         let (root, lock, storage_id) = locked_identity("bounds");
         let directory = root.path().join(PROFILE_METADATA_DIRECTORY_NAME);
-        fs::create_dir_all(directory.join(format!(
-            "v2-g{:016x}-i{}-n41",
-            1_u64, storage_id
-        )))
-        .unwrap();
+        fs::create_dir_all(directory.join(format!("v2-g{:016x}-i{}-n41", 1_u64, storage_id)))
+            .unwrap();
         assert!(matches!(
             load_profile_metadata(root.path(), storage_id),
             Err(ProfileMetadataError::UnsupportedSchema { schema: 2, .. })
