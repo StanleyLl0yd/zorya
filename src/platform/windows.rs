@@ -11,7 +11,8 @@ use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     NavigationId, NavigationStart, PresentationFramePermit, PresentationGeneration,
     PresentationHandoffError, ProfileHistorySavePolicy, ProfileHistorySaveScheduler,
-    ProfileHistorySaveUrgency, ProfileRuntime, ProfileSelectionIntent, ProfileWorker,
+    ProfileHistorySaveUrgency, ProfileRuntime, ProfileSelectionIntent, ProfileSettingsSavePolicy,
+    ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency, ProfileWorker,
     ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection, TabId,
     TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
@@ -45,16 +46,19 @@ const NAVIGATION_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const PRODUCT_DATA_DIRECTORY: &str = "Zorya";
 const PROFILES_DIRECTORY: &str = "Profiles";
 const DEFAULT_PROFILE_DIRECTORY: &str = "Default";
+const SETTINGS_SAVE_DEBOUNCE_MILLIS: u64 = 1_000;
+const SETTINGS_SAVE_MAX_DIRTY_MILLIS: u64 = 10_000;
+const SETTINGS_SAVE_MUTATION_THRESHOLD: u64 = 8;
 const HISTORY_SAVE_DEBOUNCE_MILLIS: u64 = 5_000;
 const HISTORY_SAVE_MAX_DIRTY_MILLIS: u64 = 30_000;
 const HISTORY_SAVE_MUTATION_THRESHOLD: u64 = 32;
 
 #[derive(Debug)]
-struct NativeHistoryClock {
+struct NativeProfileClock {
     origin: Instant,
 }
 
-impl NativeHistoryClock {
+impl NativeProfileClock {
     fn new() -> Self {
         Self {
             origin: Instant::now(),
@@ -68,6 +72,15 @@ impl NativeHistoryClock {
     fn deadline(&self, millis: u64) -> Option<Instant> {
         self.origin.checked_add(Duration::from_millis(millis))
     }
+}
+
+fn native_settings_save_policy() -> ProfileSettingsSavePolicy {
+    ProfileSettingsSavePolicy::new(
+        SETTINGS_SAVE_DEBOUNCE_MILLIS,
+        SETTINGS_SAVE_MAX_DIRTY_MILLIS,
+        SETTINGS_SAVE_MUTATION_THRESHOLD,
+    )
+    .expect("native profile-settings save policy is valid")
 }
 
 fn native_history_save_policy() -> ProfileHistorySavePolicy {
@@ -430,8 +443,9 @@ struct NativeShell {
     browser_window: BrowserWindowId,
     profile_runtime: ProfileRuntime,
     profile_worker: Option<ProfileWorker>,
+    settings_scheduler: ProfileSettingsSaveScheduler,
     history_scheduler: ProfileHistorySaveScheduler,
-    history_clock: NativeHistoryClock,
+    profile_clock: NativeProfileClock,
     initial_profile_selection: Option<ProfileSelectionIntent>,
     tab: TabId,
     presentation: TabPresentationHandoff,
@@ -484,8 +498,9 @@ impl NativeShell {
             browser_window,
             profile_runtime,
             profile_worker: Some(profile_worker),
+            settings_scheduler: ProfileSettingsSaveScheduler::new(native_settings_save_policy()),
             history_scheduler: ProfileHistorySaveScheduler::new(native_history_save_policy()),
-            history_clock: NativeHistoryClock::new(),
+            profile_clock: NativeProfileClock::new(),
             initial_profile_selection: Some(initial_profile_selection),
             tab,
             presentation: TabPresentationHandoff::new(tab),
@@ -524,6 +539,55 @@ impl NativeShell {
         self.drive_history_save(ProfileHistorySaveUrgency::Normal)
     }
 
+    fn drive_settings_save(&mut self, urgency: ProfileSettingsSaveUrgency) -> Result<(), String> {
+        let Some(profile) = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| profile.id())
+        else {
+            return Ok(());
+        };
+        let now_millis = self.profile_clock.now_millis();
+        let Some(intent) = self
+            .settings_scheduler
+            .poll(&mut self.profile_runtime, profile, now_millis, urgency)
+            .map_err(|error| format!("failed to schedule profile-settings save: {error}"))?
+        else {
+            return Ok(());
+        };
+        let save = intent.id();
+        let worker = self
+            .profile_worker
+            .as_ref()
+            .ok_or_else(|| "profile worker is unavailable for profile-settings save".to_string())?;
+
+        match worker.save_settings(intent) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let queue_full = error.is_full();
+                let message = error.to_string();
+                let intent = error.into_work();
+                debug_assert_eq!(intent.id(), save);
+                self.profile_runtime
+                    .cancel_settings_save(save)
+                    .map_err(|cancel| {
+                        format!(
+                            "failed to submit profile-settings save {}: {message}; failed to cancel pending save: {cancel}",
+                            save.get()
+                        )
+                    })?;
+                if queue_full {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "failed to submit profile-settings save {}: {message}",
+                        save.get()
+                    ))
+                }
+            }
+        }
+    }
+
     fn drive_history_save(&mut self, urgency: ProfileHistorySaveUrgency) -> Result<(), String> {
         let Some(profile) = self
             .profile_runtime
@@ -532,7 +596,7 @@ impl NativeShell {
         else {
             return Ok(());
         };
-        let now_millis = self.history_clock.now_millis();
+        let now_millis = self.profile_clock.now_millis();
         let Some(intent) = self
             .history_scheduler
             .poll(&mut self.profile_runtime, profile, now_millis, urgency)
@@ -573,6 +637,23 @@ impl NativeShell {
         }
     }
 
+    fn settings_flush_complete(&self) -> Result<bool, String> {
+        let Some(profile) = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| profile.id())
+        else {
+            return Ok(true);
+        };
+        if self.profile_runtime.pending_settings_save().is_some() {
+            return Ok(false);
+        }
+        self.profile_runtime
+            .settings_is_dirty(profile)
+            .map(|dirty| !dirty)
+            .map_err(|error| format!("failed to inspect profile-settings dirty state: {error}"))
+    }
+
     fn history_flush_complete(&self) -> Result<bool, String> {
         let Some(profile) = self
             .profile_runtime
@@ -592,6 +673,25 @@ impl NativeShell {
             .browsing_history_is_dirty(profile)
             .map(|dirty| !dirty)
             .map_err(|error| format!("failed to inspect browsing-history dirty state: {error}"))
+    }
+
+    fn profile_flush_complete(&self) -> Result<bool, String> {
+        Ok(self.settings_flush_complete()? && self.history_flush_complete()?)
+    }
+
+    fn drive_profile_saves(&mut self, flush: bool) -> Result<(), String> {
+        let settings_urgency = if flush {
+            ProfileSettingsSaveUrgency::Flush
+        } else {
+            ProfileSettingsSaveUrgency::Normal
+        };
+        let history_urgency = if flush {
+            ProfileHistorySaveUrgency::Flush
+        } else {
+            ProfileHistorySaveUrgency::Normal
+        };
+        self.drive_settings_save(settings_urgency)?;
+        self.drive_history_save(history_urgency)
     }
 
     fn submit_initial_profile_selection(&mut self) -> Result<(), String> {
@@ -681,13 +781,42 @@ impl NativeShell {
                 }
             }
             ProfileWorkerCompletion::SettingsSaved(completion) => {
-                self.fail(
-                    event_loop,
-                    format!(
-                        "unexpected profile settings-save completion {}",
-                        completion.id().get()
+                let save = completion.id();
+                let storage_error = completion.result().as_ref().err().map(ToString::to_string);
+                match self.profile_runtime.complete_settings_save(completion) {
+                    Ok(_) => {
+                        if let Some(error) = storage_error {
+                            if self.fatal_error.is_none() {
+                                self.fatal_error = Some(format!(
+                                    "profile-settings save {} failed on profile worker: {error}",
+                                    save.get()
+                                ));
+                            }
+                            self.begin_shutdown();
+                            self.finish_shutdown(event_loop);
+                            return;
+                        }
+
+                        if let Err(error) = self.drive_profile_saves(self.shutdown_requested) {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+                        if self.shutdown_requested {
+                            match self.profile_flush_complete() {
+                                Ok(true) => self.finish_shutdown(event_loop),
+                                Ok(false) => {}
+                                Err(error) => self.fail(event_loop, error),
+                            }
+                        }
+                    }
+                    Err(error) => self.fail(
+                        event_loop,
+                        format!(
+                            "failed to reconcile profile-settings save {}: {error}",
+                            save.get()
+                        ),
                     ),
-                );
+                }
             }
             ProfileWorkerCompletion::HistorySaved(completion) => {
                 let save = completion.id();
@@ -709,17 +838,12 @@ impl NativeShell {
                             return;
                         }
 
-                        let urgency = if self.shutdown_requested {
-                            ProfileHistorySaveUrgency::Flush
-                        } else {
-                            ProfileHistorySaveUrgency::Normal
-                        };
-                        if let Err(error) = self.drive_history_save(urgency) {
+                        if let Err(error) = self.drive_profile_saves(self.shutdown_requested) {
                             self.fail(event_loop, error);
                             return;
                         }
                         if self.shutdown_requested {
-                            match self.history_flush_complete() {
+                            match self.profile_flush_complete() {
                                 Ok(true) => self.finish_shutdown(event_loop),
                                 Ok(false) => {}
                                 Err(error) => self.fail(event_loop, error),
@@ -2042,14 +2166,14 @@ impl NativeShell {
 
     fn shutdown(&mut self, event_loop: &ActiveEventLoop) {
         self.begin_shutdown();
-        if let Err(error) = self.drive_history_save(ProfileHistorySaveUrgency::Flush) {
+        if let Err(error) = self.drive_profile_saves(true) {
             if self.fatal_error.is_none() {
                 self.fatal_error = Some(error);
             }
             self.finish_shutdown(event_loop);
             return;
         }
-        match self.history_flush_complete() {
+        match self.profile_flush_complete() {
             Ok(true) => self.finish_shutdown(event_loop),
             Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
             Err(error) => {
@@ -2093,18 +2217,13 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let urgency = if self.shutdown_requested {
-            ProfileHistorySaveUrgency::Flush
-        } else {
-            ProfileHistorySaveUrgency::Normal
-        };
-        if let Err(error) = self.drive_history_save(urgency) {
+        if let Err(error) = self.drive_profile_saves(self.shutdown_requested) {
             self.fail(event_loop, error);
             return;
         }
 
         if self.shutdown_requested {
-            match self.history_flush_complete() {
+            match self.profile_flush_complete() {
                 Ok(true) => self.finish_shutdown(event_loop),
                 Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
                 Err(error) => self.fail(event_loop, error),
@@ -2112,16 +2231,25 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
             return;
         }
 
-        let control_flow = if self
-            .profile_runtime
-            .pending_browsing_history_save()
-            .is_some()
-        {
+        let save_pending = self.profile_runtime.pending_settings_save().is_some()
+            || self
+                .profile_runtime
+                .pending_browsing_history_save()
+                .is_some();
+        let next_save_due = match (
+            self.settings_scheduler.next_save_due_millis(),
+            self.history_scheduler.next_save_due_millis(),
+        ) {
+            (Some(settings), Some(history)) => Some(settings.min(history)),
+            (Some(settings), None) => Some(settings),
+            (None, Some(history)) => Some(history),
+            (None, None) => None,
+        };
+        let control_flow = if save_pending {
             ControlFlow::Wait
         } else {
-            self.history_scheduler
-                .next_save_due_millis()
-                .and_then(|deadline| self.history_clock.deadline(deadline))
+            next_save_due
+                .and_then(|deadline| self.profile_clock.deadline(deadline))
                 .map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
         };
         event_loop.set_control_flow(control_flow);
