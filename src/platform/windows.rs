@@ -3048,6 +3048,15 @@ fn render_worker_main(
                         return;
                     }
                 }
+                WorkerCommand::ResetProfileSession { target, generation } => {
+                    let result = worker.reset_profile_session(target, generation);
+                    if proxy
+                        .send_event(WorkerEvent::ProfileSessionReset { target, result })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
             }
         }
 
@@ -3188,6 +3197,38 @@ impl RenderWorker {
                 tab.get()
             ));
         }
+        Ok(())
+    }
+
+    fn reset_profile_session(
+        &mut self,
+        target: AsyncTarget,
+        generation: PresentationGeneration,
+    ) -> Result<(), String> {
+        self.ensure_active()?;
+        if self.has_pending_navigation() {
+            return Err("cannot reset profile session while navigation is pending".into());
+        }
+        self.validate_new_request(target)?;
+
+        let mut engine =
+            EngineHost::new().map_err(|error| format!("failed to reset Rarog: {error}"))?;
+        engine
+            .create_view(target.tab())
+            .map_err(|error| format!("failed to create fresh profile View: {error}"))?;
+        engine
+            .load_local_html(target.tab(), START_PAGE)
+            .map_err(|error| format!("failed to load fresh profile start document: {error}"))?;
+
+        self.engine = engine;
+        self.pending_navigations.clear();
+        self.tab = target.tab();
+        self.presentation_generation = generation;
+        self.last_viewport = None;
+        self.content
+            .as_mut()
+            .ok_or_else(|| "Web content surface is not initialized".to_string())?
+            .reset_for_view_switch(self.gpu.as_ref());
         Ok(())
     }
 
