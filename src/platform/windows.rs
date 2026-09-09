@@ -12,12 +12,11 @@ use crate::{
     NavigationId, NavigationStart, PreparedProfile, PresentationFramePermit,
     PresentationGeneration, PresentationHandoffError, ProfileCatalogCreateIntent,
     ProfileCatalogDiscoverIntent, ProfileCatalogEntry, ProfileHistorySavePolicy,
-    ProfileHistorySaveScheduler,
-    ProfileHistorySaveUrgency, ProfileId, ProfileLock, ProfileLockOwner, ProfileRuntime,
-    ProfileRuntimeError, ProfileSelectionIntent, ProfileSettingsSavePolicy,
-    ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency, ProfileStorageId, ProfileWorker,
-    ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection, TabId,
-    TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
+    ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileId, ProfileLock,
+    ProfileLockOwner, ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent,
+    ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency,
+    ProfileStorageId, ProfileWorker, ProfileWorkerCompletion, TabActivationStart, TabCloseStart,
+    TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -3038,22 +3037,19 @@ impl NativeShell {
                                     );
                                     return;
                                 }
-                                let clean = self
-                                    .browser
-                                    .window(self.browser_window)
-                                    .is_some_and(|window| {
+                                let clean = self.browser.window(self.browser_window).is_some_and(
+                                    |window| {
                                         window.tabs().len() == 1
                                             && window.active_tab_id() == Some(self.tab)
                                             && window.tabs()[0].navigation().history().len() == 1
                                             && window.tabs()[0].navigation().display_location()
                                                 == Some(START_LOCATION)
                                             && window.tabs()[0].navigation().pending().is_none()
-                                    });
-                                let visible = self
-                                    .window
-                                    .as_ref()
-                                    .and_then(|window| window.is_visible())
-                                    == Some(true);
+                                    },
+                                );
+                                let visible =
+                                    self.window.as_ref().and_then(|window| window.is_visible())
+                                        == Some(true);
                                 if !clean
                                     || self.initial_navigation.is_some()
                                     || self.presentation.content()
