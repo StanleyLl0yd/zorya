@@ -15,6 +15,7 @@ mod profile;
 mod profile_catalog;
 mod profile_history_scheduler;
 mod profile_lock;
+mod profile_metadata;
 mod profile_runtime;
 mod profile_settings_scheduler;
 mod profile_worker;
@@ -50,8 +51,10 @@ pub use profile::{
 pub use profile_catalog::{
     MAX_DISCOVERED_PROFILES, MAX_PROFILE_CATALOG_DIRECTORY_ENTRIES,
     MAX_PROFILE_IDENTITY_DIRECTORY_ENTRIES, PROFILE_IDENTITY_DIRECTORY_NAME,
-    PROFILE_IDENTITY_SCHEMA_VERSION, ProfileCatalog, ProfileCatalogEntry, ProfileCatalogError,
-    ProfileIdentityError, ProfileStorageId, load_profile_storage_id,
+    PROFILE_IDENTITY_SCHEMA_VERSION, PROFILE_READY_DIRECTORY_NAME, ProfileCatalog,
+    ProfileCatalogCreateError, ProfileCatalogCreateIntent, ProfileCatalogDiscoverIntent,
+    ProfileCatalogEntry, ProfileCatalogError, ProfileCatalogRenameError,
+    ProfileCatalogRenameIntent, ProfileIdentityError, ProfileStorageId, load_profile_storage_id,
 };
 pub use profile_history_scheduler::{
     ProfileHistorySavePolicy, ProfileHistorySavePolicyError, ProfileHistorySaveScheduler,
@@ -59,6 +62,11 @@ pub use profile_history_scheduler::{
 };
 pub use profile_lock::{
     MAX_PROFILE_LOCK_BYTES, PROFILE_LOCK_FILE_NAME, ProfileLock, ProfileLockError, ProfileLockOwner,
+};
+pub use profile_metadata::{
+    MAX_PROFILE_DISPLAY_NAME_BYTES, MAX_PROFILE_METADATA_DIRECTORY_ENTRIES,
+    PROFILE_METADATA_DIRECTORY_NAME, PROFILE_METADATA_SCHEMA_VERSION, ProfileDisplayName,
+    ProfileDisplayNameError, ProfileMetadata, ProfileMetadataError, load_profile_metadata,
 };
 pub use profile_runtime::{
     ActiveProfile, ColorSchemePreference, PreparedProfile, ProductSettings,
