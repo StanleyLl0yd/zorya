@@ -180,7 +180,6 @@ fn profile_root_from_local_app_data(local_app_data: Option<OsString>) -> io::Res
     Ok(profiles_root_from_local_app_data(local_app_data)?.join(DEFAULT_PROFILE_DIRECTORY))
 }
 
-
 fn current_unix_millis() -> Result<u64, String> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
