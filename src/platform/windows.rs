@@ -696,6 +696,75 @@ impl NativeShell {
         }
     }
 
+    fn begin_profile_cycle_smoke_create(&mut self) -> Result<(), String> {
+        if self.run_mode != RunMode::ExitAfterProfileCycle {
+            return Err("profile-cycle smoke creation started outside its run mode".into());
+        }
+        if self.profile_cycle_smoke_start.is_some() || self.pending_profile_smoke_create.is_some() {
+            return Ok(());
+        }
+        let active = self
+            .profile_runtime
+            .active_profile()
+            .ok_or_else(|| "profile-cycle smoke requires an active profile".to_string())?
+            .storage_id();
+        let intent = ProfileCatalogCreateIntent::new(
+            self.profiles_root.clone(),
+            "Native profile switch smoke",
+        )
+        .map_err(|error| format!("failed to build profile-cycle smoke profile: {error}"))?;
+        self.profile_cycle_smoke_start = Some(active);
+        self.pending_profile_smoke_create = Some(PendingProfileSmokeCreate {
+            intent,
+            submitted: false,
+        });
+        self.drive_profile_cycle_smoke_create()
+    }
+
+    fn drive_profile_cycle_smoke_create(&mut self) -> Result<(), String> {
+        let Some(pending) = self.pending_profile_smoke_create.as_ref() else {
+            return Ok(());
+        };
+        if pending.submitted {
+            return Ok(());
+        }
+        let intent = pending.intent.clone();
+        let worker = self
+            .profile_worker
+            .as_ref()
+            .ok_or_else(|| "profile worker is unavailable for profile-cycle smoke".to_string())?;
+        match worker.create_profile(intent) {
+            Ok(()) => {
+                self.pending_profile_smoke_create
+                    .as_mut()
+                    .expect("profile-cycle smoke creation remains pending")
+                    .submitted = true;
+                Ok(())
+            }
+            Err(error) if error.is_full() => {
+                let returned = error.into_work();
+                self.pending_profile_smoke_create
+                    .as_mut()
+                    .expect("profile-cycle smoke creation remains pending")
+                    .intent = returned;
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let returned = error.into_work();
+                let expected = self
+                    .pending_profile_smoke_create
+                    .take()
+                    .expect("profile-cycle smoke creation remains pending")
+                    .intent;
+                debug_assert_eq!(returned, expected);
+                Err(format!(
+                    "failed to submit profile-cycle smoke profile creation: {message}"
+                ))
+            }
+        }
+    }
+
     fn begin_profile_cycle(&mut self) -> Result<(), String> {
         if self.shutdown_requested || self.profile_transition_in_progress() {
             return Ok(());
@@ -1222,7 +1291,10 @@ impl NativeShell {
             self.finish_shutdown(event_loop);
             return;
         }
-        if self.profile_runtime.pending_selection().is_some() {
+        if self.profile_runtime.pending_selection().is_some()
+            || self.pending_profile_catalog_discovery.is_some()
+            || self.pending_profile_smoke_create.is_some()
+        {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
@@ -1671,10 +1743,46 @@ impl NativeShell {
                     ),
                 }
             }
-            ProfileWorkerCompletion::ProfileCreated { .. }
-            | ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
+            ProfileWorkerCompletion::ProfileCreated { intent, result } => {
+                let Some(pending) = self.pending_profile_smoke_create.take() else {
+                    self.fail(
+                        event_loop,
+                        "stale profile-create completion has no pending smoke request",
+                    );
+                    return;
+                };
+                if !pending.submitted || pending.intent != intent {
+                    self.fail(
+                        event_loop,
+                        "profile-create completion does not match the exact pending smoke request",
+                    );
+                    return;
+                }
+                if self.shutdown_requested {
+                    match self.profile_flush_complete() {
+                        Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
+                        Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                        Err(error) => self.fail(event_loop, error),
+                    }
+                    return;
+                }
+                match result {
+                    Ok(_) => {
+                        if let Err(error) = self.begin_profile_cycle() {
+                            self.fail(event_loop, error);
+                        } else {
+                            event_loop.set_control_flow(ControlFlow::Wait);
+                        }
+                    }
+                    Err(error) => self.fail(
+                        event_loop,
+                        format!("profile-cycle smoke profile creation failed: {error}"),
+                    ),
+                }
+            }
+            ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
                 event_loop,
-                "unexpected profile mutation completion arrived without native mutation UX",
+                "unexpected profile rename completion arrived without native mutation UX",
             ),
         }
     }
@@ -3043,6 +3151,13 @@ impl NativeShell {
         {
             self.pending_profile_catalog_discovery = None;
         }
+        if self
+            .pending_profile_smoke_create
+            .as_ref()
+            .is_some_and(|pending| !pending.submitted)
+        {
+            self.pending_profile_smoke_create = None;
+        }
         if let Some(intent) = self.pending_profile_selection_submission.take() {
             let selection = intent.id();
             if let Err(error) = self.profile_runtime.cancel_selection(selection)
@@ -3154,6 +3269,10 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if !self.shutdown_requested {
+            if let Err(error) = self.drive_profile_cycle_smoke_create() {
+                self.fail(event_loop, error);
+                return;
+            }
             if let Err(error) = self.drive_profile_catalog_discovery() {
                 self.fail(event_loop, error);
                 return;
