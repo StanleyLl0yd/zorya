@@ -266,7 +266,11 @@ impl fmt::Display for BrowsingHistoryError {
                 operation,
                 path,
                 kind,
-            } => write!(formatter, "{operation} failed for {}: {kind}", path.display()),
+            } => write!(
+                formatter,
+                "{operation} failed for {}: {kind}",
+                path.display()
+            ),
             Self::EmptyLocation => formatter.write_str("browsing history location is empty"),
             Self::LocationTooLarge { bytes, limit } => write!(
                 formatter,
@@ -413,11 +417,19 @@ impl BrowsingHistoryStore {
 
         if let Err(error) = file.write_all(&bytes) {
             let _ = fs::remove_file(&pending_path);
-            return Err(io_error("write pending history generation", &pending_path, error));
+            return Err(io_error(
+                "write pending history generation",
+                &pending_path,
+                error,
+            ));
         }
         if let Err(error) = file.sync_all() {
             let _ = fs::remove_file(&pending_path);
-            return Err(io_error("sync pending history generation", &pending_path, error));
+            return Err(io_error(
+                "sync pending history generation",
+                &pending_path,
+                error,
+            ));
         }
         drop(file);
 
@@ -482,9 +494,9 @@ impl BrowsingHistoryStore {
                     error,
                 )
             })?;
-            let file_type = entry
-                .file_type()
-                .map_err(|error| io_error("inspect history directory entry", &entry.path(), error))?;
+            let file_type = entry.file_type().map_err(|error| {
+                io_error("inspect history directory entry", &entry.path(), error)
+            })?;
             if !file_type.is_file() {
                 continue;
             }
@@ -623,7 +635,8 @@ fn parse_generation_file_name(name: &std::ffi::OsStr) -> Option<u64> {
 }
 
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, BrowsingHistoryError> {
-    let file = File::open(path).map_err(|error| io_error("open history generation", path, error))?;
+    let file =
+        File::open(path).map_err(|error| io_error("open history generation", path, error))?;
     let mut bytes = Vec::new();
     file.take((limit + 1) as u64)
         .read_to_end(&mut bytes)
@@ -918,7 +931,11 @@ mod tests {
         assert_eq!(decoded.generation(), 7);
         assert_eq!(decoded.visits(), snapshot.visits());
         assert_eq!(
-            decoded.record_visit(30, "https://three.test").unwrap().id().get(),
+            decoded
+                .record_visit(30, "https://three.test")
+                .unwrap()
+                .id()
+                .get(),
             3
         );
     }
@@ -958,12 +975,7 @@ mod tests {
 
     #[test]
     fn unsupported_newer_schema_fails_before_current_format_decoding() {
-        let bytes = raw_record(
-            4,
-            BROWSING_HISTORY_SCHEMA_VERSION + 1,
-            0,
-            &[],
-        );
+        let bytes = raw_record(4, BROWSING_HISTORY_SCHEMA_VERSION + 1, 0, &[]);
         assert!(matches!(
             decode_history(&bytes, 4),
             Err(DecodeError::UnsupportedSchema(schema))
@@ -1002,7 +1014,9 @@ mod tests {
         let stale = first.clone();
 
         let mut second_input = first;
-        second_input.record_visit(2_000, "https://two.test").unwrap();
+        second_input
+            .record_visit(2_000, "https://two.test")
+            .unwrap();
         let second = store.save(&second_input).unwrap().into_snapshot();
         assert_eq!(second.generation(), 2);
 
@@ -1043,13 +1057,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
         assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
-        assert!(results.iter().filter_map(|result| result.as_ref().err()).all(
-            |error| matches!(
-                error,
-                BrowsingHistoryError::ConcurrentWrite { .. }
-                    | BrowsingHistoryError::StaleGeneration { .. }
-            )
-        ));
+        assert!(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .all(|error| matches!(
+                    error,
+                    BrowsingHistoryError::ConcurrentWrite { .. }
+                        | BrowsingHistoryError::StaleGeneration { .. }
+                ))
+        );
 
         let loaded = store.load().unwrap();
         assert_eq!(loaded.snapshot().generation(), 1);
