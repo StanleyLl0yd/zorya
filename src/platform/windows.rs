@@ -192,6 +192,32 @@ fn current_unix_millis() -> Result<u64, String> {
         .map_err(|_| "system time exceeds browsing-history timestamp range".to_string())
 }
 
+fn next_profile_cycle_root(
+    entries: &[ProfileCatalogEntry],
+    active: ProfileStorageId,
+) -> Result<Option<PathBuf>, String> {
+    let complete = entries
+        .iter()
+        .filter(|entry| entry.storage_id().is_some() && entry.metadata().is_some())
+        .collect::<Vec<_>>();
+    let Some(active_index) = complete
+        .iter()
+        .position(|entry| entry.storage_id() == Some(active))
+    else {
+        return Err(format!(
+            "active profile storage identity {active} is missing from the discovered catalog"
+        ));
+    };
+    if complete.len() < 2 {
+        return Ok(None);
+    }
+    Ok(Some(
+        complete[(active_index + 1) % complete.len()]
+            .root()
+            .to_owned(),
+    ))
+}
+
 fn browser_navigation_quiescent(browser: &BrowserApp, window: BrowserWindowId) -> bool {
     browser.window(window).is_some_and(|window| {
         window
@@ -636,12 +662,195 @@ impl NativeShell {
     }
 
     fn profile_transition_in_progress(&self) -> bool {
-        self.profile_runtime.pending_selection().is_some()
+        self.pending_profile_catalog_discovery.is_some()
+            || self.profile_runtime.pending_selection().is_some()
+            || self.pending_profile_selection_submission.is_some()
             || self.pending_profile_replacement.is_some()
+            || self.pending_profile_session_reset.is_pending()
             || self.replaced_profile_lock.is_some()
             || self.pending_profile_lock_release.is_some_and(|pending| {
                 pending.purpose == ProfileLockReleasePurpose::ReplacedProfile
             })
+    }
+
+    fn update_window_title(&self) {
+        let title = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| format!("Zorya — {}", profile.metadata().display_name()))
+            .unwrap_or_else(|| "Zorya".to_string());
+        if let Some(window) = &self.window {
+            window.set_title(&title);
+        }
+    }
+
+    fn begin_profile_cycle(&mut self) -> Result<(), String> {
+        if self.shutdown_requested || self.profile_transition_in_progress() {
+            return Ok(());
+        }
+        self.active_profile_id()?;
+        let intent = ProfileCatalogDiscoverIntent::new(self.profiles_root.clone());
+        self.pending_profile_catalog_discovery = Some(PendingProfileCatalogDiscovery {
+            intent,
+            submitted: false,
+        });
+        self.drive_profile_catalog_discovery()
+    }
+
+    fn drive_profile_catalog_discovery(&mut self) -> Result<(), String> {
+        let Some(pending) = self.pending_profile_catalog_discovery.as_ref() else {
+            return Ok(());
+        };
+        if pending.submitted {
+            return Ok(());
+        }
+        let intent = pending.intent.clone();
+        let worker = self
+            .profile_worker
+            .as_ref()
+            .ok_or_else(|| "profile worker is unavailable for catalog discovery".to_string())?;
+        match worker.discover_profiles(intent) {
+            Ok(()) => {
+                self.pending_profile_catalog_discovery
+                    .as_mut()
+                    .expect("catalog discovery remains pending")
+                    .submitted = true;
+                Ok(())
+            }
+            Err(error) if error.is_full() => {
+                let returned = error.into_work();
+                self.pending_profile_catalog_discovery
+                    .as_mut()
+                    .expect("catalog discovery remains pending")
+                    .intent = returned;
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let returned = error.into_work();
+                let expected = self
+                    .pending_profile_catalog_discovery
+                    .take()
+                    .expect("catalog discovery remains pending")
+                    .intent;
+                debug_assert_eq!(returned, expected);
+                Err(format!("failed to submit profile catalog discovery: {message}"))
+            }
+        }
+    }
+
+    fn complete_profile_cycle(
+        &mut self,
+        entries: Vec<ProfileCatalogEntry>,
+    ) -> Result<(), String> {
+        let active = self
+            .profile_runtime
+            .active_profile()
+            .ok_or_else(|| "profile catalog selection requires an active profile".to_string())?
+            .storage_id();
+        let Some(root) = next_profile_cycle_root(&entries, active)? else {
+            return Ok(());
+        };
+        let start = self
+            .profile_runtime
+            .begin_selection(root)
+            .map_err(|error| format!("failed to begin profile selection: {error}"))?;
+        if start.superseded().is_some() {
+            return Err("profile cycle unexpectedly superseded an existing selection".into());
+        }
+        self.pending_profile_selection_submission = Some(start.into_intent());
+        self.drive_pending_profile_selection_submission()
+    }
+
+    fn drive_pending_profile_selection_submission(&mut self) -> Result<(), String> {
+        let Some(intent) = self.pending_profile_selection_submission.take() else {
+            return Ok(());
+        };
+        let selection = intent.id();
+        let worker = self
+            .profile_worker
+            .as_ref()
+            .ok_or_else(|| "profile worker is unavailable for profile selection".to_string())?;
+        match worker.prepare(intent) {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_full() => {
+                let returned = error.into_work();
+                debug_assert_eq!(returned.id(), selection);
+                self.pending_profile_selection_submission = Some(returned);
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let returned = error.into_work();
+                debug_assert_eq!(returned.id(), selection);
+                self.profile_runtime
+                    .cancel_selection(selection)
+                    .map_err(|cancel| {
+                        format!(
+                            "failed to submit profile selection {}: {message}; failed to cancel selection: {cancel}",
+                            selection.get()
+                        )
+                    })?;
+                Err(format!(
+                    "failed to submit profile selection {}: {message}",
+                    selection.get()
+                ))
+            }
+        }
+    }
+
+    fn reset_native_session_for_profile_switch(&mut self) -> Result<(), String> {
+        if self.pending_profile_session_reset.is_pending() {
+            return Err("profile session reset is already pending".into());
+        }
+        if !self.profile_replacement_browser_quiescent() {
+            return Err("profile session reset requires a quiescent browser".into());
+        }
+        let fresh_tab = self
+            .browser
+            .reset_window_for_profile_switch(self.browser_window)
+            .map_err(|error| format!("failed to reset browser session for profile switch: {error}"))?;
+        self.tab = fresh_tab;
+        self.presentation = TabPresentationHandoff::new(fresh_tab);
+        self.pending_target_permit = None;
+        self.surface_recovery_permit = None;
+        self.pending_tab_create = None;
+        self.pending_view_close = None;
+        self.pending_navigation_targets.clear();
+        self.rapid_smoke_tabs.clear();
+        self.restore_focus_after_activation = false;
+        self.pending_navigation_cancel = None;
+        self.pending_frame.invalidate();
+        self.pending_surface.invalidate();
+
+        let navigation = self
+            .browser
+            .begin_navigation(self.browser_window, fresh_tab, START_LOCATION)
+            .map_err(|error| format!("failed to begin fresh profile navigation: {error}"))?
+            .intent()
+            .id();
+        self.initial_navigation = Some(navigation);
+        let target = self
+            .requests
+            .allocate(self.browser_window, fresh_tab)
+            .map_err(|error| error.to_string())?;
+        self.pending_profile_session_reset
+            .begin(target)
+            .map_err(|error| error.to_string())?;
+        self.worker_ready = false;
+        self.needs_redraw = true;
+        self.update_window_title();
+
+        let result = self
+            .worker
+            .as_ref()
+            .ok_or_else(|| "render worker is unavailable for profile session reset".to_string())?
+            .reset_profile_session(target, self.presentation.generation());
+        if let Err(error) = result {
+            self.pending_profile_session_reset.complete_if_current(target);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn profile_replacement_browser_quiescent(&self) -> bool {
