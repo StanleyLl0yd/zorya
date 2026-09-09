@@ -1,5 +1,6 @@
 use crate::browsing_history::{
-    BrowsingHistoryRecovery, BrowsingHistorySnapshot, BrowsingHistoryStore,
+    BrowsingHistoryError, BrowsingHistoryRecovery, BrowsingHistorySave, BrowsingHistorySnapshot,
+    BrowsingHistoryStore,
 };
 use crate::profile::{ProfileStorageError, ProfileStore, SettingsRecovery, SettingsSnapshot};
 use std::fmt;
@@ -337,10 +338,97 @@ impl ActiveProfile {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProfileHistorySaveId(u64);
+
+impl ProfileHistorySaveId {
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileHistorySaveIntent {
+    id: ProfileHistorySaveId,
+    profile: ProfileId,
+    root: PathBuf,
+    snapshot: BrowsingHistorySnapshot,
+}
+
+impl ProfileHistorySaveIntent {
+    pub const fn id(&self) -> ProfileHistorySaveId {
+        self.id
+    }
+
+    pub const fn profile(&self) -> ProfileId {
+        self.profile
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub const fn snapshot(&self) -> &BrowsingHistorySnapshot {
+        &self.snapshot
+    }
+
+    pub fn execute(self) -> ProfileHistorySaveCompletion {
+        let base_generation = self.snapshot.generation();
+        let result = BrowsingHistoryStore::open(self.root.clone())
+            .and_then(|store| store.save(&self.snapshot));
+        ProfileHistorySaveCompletion {
+            id: self.id,
+            profile: self.profile,
+            root: self.root,
+            base_generation,
+            result,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileHistorySaveCompletion {
+    id: ProfileHistorySaveId,
+    profile: ProfileId,
+    root: PathBuf,
+    base_generation: u64,
+    result: Result<BrowsingHistorySave, BrowsingHistoryError>,
+}
+
+impl ProfileHistorySaveCompletion {
+    pub const fn id(&self) -> ProfileHistorySaveId {
+        self.id
+    }
+
+    pub const fn profile(&self) -> ProfileId {
+        self.profile
+    }
+
+    pub const fn base_generation(&self) -> u64 {
+        self.base_generation
+    }
+
+    pub const fn result(&self) -> &Result<BrowsingHistorySave, BrowsingHistoryError> {
+        &self.result
+    }
+
+    pub fn into_result(self) -> Result<BrowsingHistorySave, BrowsingHistoryError> {
+        self.result
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingProfileHistorySave {
+    id: ProfileHistorySaveId,
+    profile: ProfileId,
+    base_generation: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileSelectionCommit {
     active_profile: ProfileId,
     replaced_profile: Option<ActiveProfile>,
+    invalidated_browsing_history_save: Option<ProfileHistorySaveId>,
 }
 
 impl ProfileSelectionCommit {
@@ -352,6 +440,10 @@ impl ProfileSelectionCommit {
         self.replaced_profile.as_ref()
     }
 
+    pub const fn invalidated_browsing_history_save(&self) -> Option<ProfileHistorySaveId> {
+        self.invalidated_browsing_history_save
+    }
+
     pub fn into_replaced_profile(self) -> Option<ActiveProfile> {
         self.replaced_profile
     }
@@ -361,6 +453,22 @@ impl ProfileSelectionCommit {
 pub enum ProfileRuntimeError {
     ProfileIdExhausted,
     ProfileSelectionIdExhausted,
+    ProfileHistorySaveIdExhausted,
+    BrowsingHistorySaveAlreadyPending {
+        pending: ProfileHistorySaveId,
+    },
+    StaleBrowsingHistorySave {
+        expected: Option<ProfileHistorySaveId>,
+        actual: ProfileHistorySaveId,
+    },
+    BrowsingHistorySaveTargetMismatch {
+        save: ProfileHistorySaveId,
+    },
+    BrowsingHistorySaveGenerationMismatch {
+        expected_generation: u64,
+        current_generation: u64,
+        saved_generation: u64,
+    },
     StaleSelection {
         expected: Option<ProfileSelectionId>,
         actual: ProfileSelectionId,
@@ -383,6 +491,40 @@ impl fmt::Display for ProfileRuntimeError {
             Self::ProfileSelectionIdExhausted => {
                 formatter.write_str("profile selection identifier space is exhausted")
             }
+            Self::ProfileHistorySaveIdExhausted => {
+                formatter.write_str("profile browsing-history save identifier space is exhausted")
+            }
+            Self::BrowsingHistorySaveAlreadyPending { pending } => write!(
+                formatter,
+                "profile browsing-history save {} is already pending",
+                pending.get()
+            ),
+            Self::StaleBrowsingHistorySave { expected, actual } => match expected {
+                Some(expected) => write!(
+                    formatter,
+                    "profile browsing-history save {} is stale; current save is {}",
+                    actual.get(),
+                    expected.get()
+                ),
+                None => write!(
+                    formatter,
+                    "profile browsing-history save {} is stale; no save is pending",
+                    actual.get()
+                ),
+            },
+            Self::BrowsingHistorySaveTargetMismatch { save } => write!(
+                formatter,
+                "profile browsing-history save {} does not match its active profile target",
+                save.get()
+            ),
+            Self::BrowsingHistorySaveGenerationMismatch {
+                expected_generation,
+                current_generation,
+                saved_generation,
+            } => write!(
+                formatter,
+                "profile browsing-history save expected in-memory generation {expected_generation}, found {current_generation}, saved {saved_generation}"
+            ),
             Self::StaleSelection { expected, actual } => match expected {
                 Some(expected) => write!(
                     formatter,
@@ -424,8 +566,10 @@ impl std::error::Error for ProfileRuntimeError {}
 pub struct ProfileRuntime {
     next_profile_id: u64,
     next_selection_id: u64,
+    next_history_save_id: u64,
     active: Option<ActiveProfile>,
     pending: Option<ProfileSelectionIntent>,
+    pending_history_save: Option<PendingProfileHistorySave>,
 }
 
 impl Default for ProfileRuntime {
@@ -439,8 +583,10 @@ impl ProfileRuntime {
         Self {
             next_profile_id: 1,
             next_selection_id: 1,
+            next_history_save_id: 1,
             active: None,
             pending: None,
+            pending_history_save: None,
         }
     }
 
@@ -450,6 +596,13 @@ impl ProfileRuntime {
 
     pub const fn pending_selection(&self) -> Option<&ProfileSelectionIntent> {
         self.pending.as_ref()
+    }
+
+    pub const fn pending_browsing_history_save(&self) -> Option<ProfileHistorySaveId> {
+        match self.pending_history_save {
+            Some(pending) => Some(pending.id),
+            None => None,
+        }
     }
 
     pub fn begin_selection(
@@ -521,10 +674,13 @@ impl ProfileRuntime {
             browsing_history: prepared.browsing_history,
             browsing_history_recovery: prepared.browsing_history_recovery,
         };
+        let invalidated_browsing_history_save =
+            self.pending_history_save.take().map(|pending| pending.id);
         let replaced_profile = self.active.replace(active);
         Ok(ProfileSelectionCommit {
             active_profile: id,
             replaced_profile,
+            invalidated_browsing_history_save,
         })
     }
 
@@ -581,6 +737,98 @@ impl ProfileRuntime {
             .expect("active profile was validated")
             .browsing_history)
     }
+
+    pub fn begin_browsing_history_save(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<ProfileHistorySaveIntent, ProfileRuntimeError> {
+        let expected = self.active.as_ref().map(ActiveProfile::id);
+        if expected != Some(profile) {
+            return Err(ProfileRuntimeError::StaleProfile {
+                expected,
+                actual: profile,
+            });
+        }
+        if let Some(pending) = self.pending_history_save {
+            return Err(ProfileRuntimeError::BrowsingHistorySaveAlreadyPending {
+                pending: pending.id,
+            });
+        }
+
+        let active = self.active.as_ref().expect("active profile was validated");
+        let root = active.root.clone();
+        let snapshot = active.browsing_history.clone();
+        let base_generation = snapshot.generation();
+        let id = ProfileHistorySaveId(self.next_history_save_id);
+        self.next_history_save_id = self
+            .next_history_save_id
+            .checked_add(1)
+            .ok_or(ProfileRuntimeError::ProfileHistorySaveIdExhausted)?;
+        self.pending_history_save = Some(PendingProfileHistorySave {
+            id,
+            profile,
+            base_generation,
+        });
+        Ok(ProfileHistorySaveIntent {
+            id,
+            profile,
+            root,
+            snapshot,
+        })
+    }
+
+    pub fn complete_browsing_history_save(
+        &mut self,
+        completion: ProfileHistorySaveCompletion,
+    ) -> Result<ProfileHistorySaveCompletion, ProfileRuntimeError> {
+        let expected = self.pending_history_save.map(|pending| pending.id);
+        if expected != Some(completion.id) {
+            return Err(ProfileRuntimeError::StaleBrowsingHistorySave {
+                expected,
+                actual: completion.id,
+            });
+        }
+
+        let pending = self
+            .pending_history_save
+            .expect("pending history save was validated");
+        let active = self
+            .active
+            .as_ref()
+            .ok_or(ProfileRuntimeError::BrowsingHistorySaveTargetMismatch {
+                save: completion.id,
+            })?;
+        if pending.profile != completion.profile
+            || pending.base_generation != completion.base_generation
+            || active.id != completion.profile
+            || active.root != completion.root
+        {
+            return Err(ProfileRuntimeError::BrowsingHistorySaveTargetMismatch {
+                save: completion.id,
+            });
+        }
+
+        self.pending_history_save = None;
+        if let Ok(saved) = &completion.result {
+            let active = self
+                .active
+                .as_mut()
+                .expect("history save target was validated");
+            let current_generation = active.browsing_history.generation();
+            let saved_generation = saved.snapshot().generation();
+            if !active
+                .browsing_history
+                .advance_generation_after_save(pending.base_generation, saved_generation)
+            {
+                return Err(ProfileRuntimeError::BrowsingHistorySaveGenerationMismatch {
+                    expected_generation: pending.base_generation,
+                    current_generation,
+                    saved_generation,
+                });
+            }
+        }
+        Ok(completion)
+    }
 }
 
 #[cfg(test)]
@@ -622,6 +870,12 @@ mod tests {
             browsing_history: BrowsingHistorySnapshot::default(),
             browsing_history_recovery: None,
         }
+    }
+
+    fn load_profile(runtime: &mut ProfileRuntime, root: &Path) -> ProfileId {
+        let intent = runtime.begin_selection(root).unwrap().into_intent();
+        let prepared = PreparedProfile::load(&intent).unwrap();
+        runtime.commit_selection(prepared).unwrap().active_profile()
     }
 
     #[test]
@@ -834,5 +1088,168 @@ mod tests {
                 actual,
             }) if expected == second && actual == first
         ));
+    }
+
+    #[test]
+    fn history_save_advances_generation_without_losing_newer_in_memory_visits() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        runtime
+            .active_browsing_history_mut(profile)
+            .unwrap()
+            .record_visit(100, "https://example.test/first")
+            .unwrap();
+
+        let intent = runtime.begin_browsing_history_save(profile).unwrap();
+        let first_save = intent.id();
+        assert_eq!(intent.snapshot().generation(), 0);
+        assert_eq!(intent.snapshot().len(), 1);
+        assert_eq!(runtime.pending_browsing_history_save(), Some(first_save));
+
+        runtime
+            .active_browsing_history_mut(profile)
+            .unwrap()
+            .record_visit(200, "https://example.test/second")
+            .unwrap();
+
+        let completion = intent.execute();
+        assert!(completion.result().is_ok());
+        runtime
+            .complete_browsing_history_save(completion)
+            .unwrap();
+        let active = runtime.active_browsing_history(profile).unwrap();
+        assert_eq!(active.generation(), 1);
+        assert_eq!(active.len(), 2);
+        assert!(runtime.pending_browsing_history_save().is_none());
+
+        let persisted = BrowsingHistoryStore::open(root.path())
+            .unwrap()
+            .load()
+            .unwrap()
+            .into_snapshot();
+        assert_eq!(persisted.generation(), 1);
+        assert_eq!(persisted.len(), 1);
+
+        let completion = runtime
+            .begin_browsing_history_save(profile)
+            .unwrap()
+            .execute();
+        runtime
+            .complete_browsing_history_save(completion)
+            .unwrap();
+        let persisted = BrowsingHistoryStore::open(root.path())
+            .unwrap()
+            .load()
+            .unwrap()
+            .into_snapshot();
+        assert_eq!(persisted.generation(), 2);
+        assert_eq!(persisted.len(), 2);
+    }
+
+    #[test]
+    fn overlapping_history_save_is_rejected_until_exact_completion() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        let intent = runtime.begin_browsing_history_save(profile).unwrap();
+
+        assert!(matches!(
+            runtime.begin_browsing_history_save(profile),
+            Err(ProfileRuntimeError::BrowsingHistorySaveAlreadyPending { pending })
+                if pending == intent.id()
+        ));
+
+        let completion = intent.execute();
+        runtime
+            .complete_browsing_history_save(completion)
+            .unwrap();
+        assert!(runtime.begin_browsing_history_save(profile).is_ok());
+    }
+
+    #[test]
+    fn concurrent_history_writer_failure_does_not_advance_runtime_generation() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        runtime
+            .active_browsing_history_mut(profile)
+            .unwrap()
+            .record_visit(100, "https://example.test/runtime")
+            .unwrap();
+        let intent = runtime.begin_browsing_history_save(profile).unwrap();
+
+        let store = BrowsingHistoryStore::open(root.path()).unwrap();
+        let external = store.load().unwrap().into_snapshot();
+        store.save(&external).unwrap();
+
+        let completion = intent.execute();
+        assert!(matches!(
+            completion.result(),
+            Err(BrowsingHistoryError::StaleGeneration {
+                current: 1,
+                provided: 0,
+            })
+        ));
+        runtime
+            .complete_browsing_history_save(completion)
+            .unwrap();
+        let active = runtime.active_browsing_history(profile).unwrap();
+        assert_eq!(active.generation(), 0);
+        assert_eq!(active.len(), 1);
+        assert!(runtime.pending_browsing_history_save().is_none());
+    }
+
+    #[test]
+    fn profile_replacement_invalidates_pending_history_save_and_rejects_completion() {
+        let first_root = TempRoot::new();
+        let second_root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let first = load_profile(&mut runtime, first_root.path());
+        runtime
+            .active_browsing_history_mut(first)
+            .unwrap()
+            .record_visit(100, "https://example.test/old")
+            .unwrap();
+        let intent = runtime.begin_browsing_history_save(first).unwrap();
+        let save = intent.id();
+
+        let selection = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
+        let prepared = PreparedProfile::load(&selection).unwrap();
+        let commit = runtime.commit_selection(prepared).unwrap();
+        let second = commit.active_profile();
+        assert_eq!(commit.invalidated_browsing_history_save(), Some(save));
+        assert!(runtime.pending_browsing_history_save().is_none());
+
+        let completion = intent.execute();
+        assert_eq!(
+            runtime.complete_browsing_history_save(completion),
+            Err(ProfileRuntimeError::StaleBrowsingHistorySave {
+                expected: None,
+                actual: save,
+            })
+        );
+        assert_eq!(
+            runtime.active_browsing_history(second).unwrap().generation(),
+            0
+        );
+        assert!(runtime.active_browsing_history(second).unwrap().is_empty());
+    }
+
+    #[test]
+    fn history_save_id_exhaustion_does_not_create_pending_work() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        runtime.next_history_save_id = u64::MAX;
+
+        assert_eq!(
+            runtime.begin_browsing_history_save(profile),
+            Err(ProfileRuntimeError::ProfileHistorySaveIdExhausted)
+        );
+        assert!(runtime.pending_browsing_history_save().is_none());
     }
 }

@@ -42,9 +42,10 @@ pub use profile::{
     SettingsCleanupWarning, SettingsLoad, SettingsRecovery, SettingsSave, SettingsSnapshot,
 };
 pub use profile_runtime::{
-    ActiveProfile, ColorSchemePreference, PreparedProfile, ProductSettings, ProfileId,
-    ProfilePreparationError, ProfileRuntime, ProfileRuntimeError, ProfileSelectionCommit,
-    ProfileSelectionId, ProfileSelectionIntent, ProfileSelectionStart, ProfileSettingsError,
+    ActiveProfile, ColorSchemePreference, PreparedProfile, ProductSettings, ProfileHistorySaveCompletion,
+    ProfileHistorySaveId, ProfileHistorySaveIntent, ProfileId, ProfilePreparationError,
+    ProfileRuntime, ProfileRuntimeError, ProfileSelectionCommit, ProfileSelectionId,
+    ProfileSelectionIntent, ProfileSelectionStart, ProfileSettingsError,
 };
 pub use tab_activation::{
     TabActivationId, TabActivationIntent, TabActivationStart, TabCycleDirection,
