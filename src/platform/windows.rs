@@ -2390,6 +2390,11 @@ impl NativeShell {
             {
                 self.handle_browser_command(BrowserCommand::ReloadOrStop)
             }
+            Key::Character(character)
+                if self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("m") =>
+            {
+                self.begin_profile_cycle()
+            }
             Key::Named(NamedKey::Tab) => {
                 let direction = if self.modifiers.shift_key() {
                     TabCycleDirection::Previous
@@ -2985,6 +2990,24 @@ impl NativeShell {
         if self.shutdown_requested {
             return;
         }
+        if self
+            .pending_profile_catalog_discovery
+            .as_ref()
+            .is_some_and(|pending| !pending.submitted)
+        {
+            self.pending_profile_catalog_discovery = None;
+        }
+        if let Some(intent) = self.pending_profile_selection_submission.take() {
+            let selection = intent.id();
+            if let Err(error) = self.profile_runtime.cancel_selection(selection)
+                && self.fatal_error.is_none()
+            {
+                self.fatal_error = Some(format!(
+                    "failed to cancel unsubmitted profile selection {} during shutdown: {error}",
+                    selection.get()
+                ));
+            }
+        }
         if let Some(prepared) = self.pending_profile_replacement.take() {
             let selection = prepared.selection();
             if let Err(error) = self.profile_runtime.cancel_selection(selection)
@@ -3009,6 +3032,7 @@ impl NativeShell {
         self.pending_init.invalidate();
         self.pending_frame.invalidate();
         self.pending_surface.invalidate();
+        self.pending_profile_session_reset.invalidate();
         self.pending_navigation_cancel = None;
         self.http_smoke_frame = None;
         self.pending_target_permit = None;
@@ -3083,6 +3107,17 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.shutdown_requested {
+            if let Err(error) = self.drive_profile_catalog_discovery() {
+                self.fail(event_loop, error);
+                return;
+            }
+            if let Err(error) = self.drive_pending_profile_selection_submission() {
+                self.fail(event_loop, error);
+                return;
+            }
+        }
+
         let flush = self.shutdown_requested || self.replacement_flush_requested();
         if let Err(error) = self.drive_profile_saves(flush) {
             self.fail(event_loop, error);
