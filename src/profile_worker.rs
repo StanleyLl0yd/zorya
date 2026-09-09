@@ -605,13 +605,25 @@ mod tests {
             panic!("expected prepared profile completion");
         };
         assert_eq!(selection, first_id);
+        let rejection = runtime.commit_selection(result.unwrap()).unwrap_err();
         assert!(matches!(
-            runtime.commit_selection(result.unwrap()),
-            Err(ProfileRuntimeError::StaleSelection {
+            rejection.error(),
+            ProfileRuntimeError::StaleSelection {
                 expected: Some(expected),
                 actual,
-            }) if expected == second_id && actual == first_id
+            } if *expected == second_id && *actual == first_id
         ));
+        let rejected_lock = rejection.into_parts().1.into_profile_lock();
+        let rejected_owner = rejected_lock.owner();
+        worker.release_lock(rejected_lock).unwrap();
+        let (_, completion) = receive(&receiver);
+        let ProfileWorkerCompletion::LockReleased { owner, result } = completion else {
+            panic!("expected rejected profile-lock release completion");
+        };
+        assert_eq!(owner, rejected_owner);
+        assert!(result.is_ok());
+        let reacquired = ProfileLock::acquire(first_root.path()).unwrap();
+        reacquired.release().unwrap();
 
         worker.prepare(second).unwrap();
         let (_, completion) = receive(&receiver);

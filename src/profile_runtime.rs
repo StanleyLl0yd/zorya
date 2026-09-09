@@ -304,6 +304,10 @@ impl PreparedProfile {
     pub const fn browsing_history_recovery(&self) -> Option<&BrowsingHistoryRecovery> {
         self.browsing_history_recovery.as_ref()
     }
+
+    pub(crate) fn into_profile_lock(self) -> ProfileLock {
+        self.lock
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -623,6 +627,39 @@ impl ProfileSelectionCommit {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[must_use = "a rejected prepared profile still owns its exact profile lock"]
+pub struct ProfileSelectionCommitError {
+    error: ProfileRuntimeError,
+    prepared: PreparedProfile,
+}
+
+impl ProfileSelectionCommitError {
+    pub const fn error(&self) -> &ProfileRuntimeError {
+        &self.error
+    }
+
+    pub const fn prepared(&self) -> &PreparedProfile {
+        &self.prepared
+    }
+
+    pub fn into_parts(self) -> (ProfileRuntimeError, PreparedProfile) {
+        (self.error, self.prepared)
+    }
+}
+
+impl fmt::Display for ProfileSelectionCommitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ProfileSelectionCommitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfileRuntimeError {
     ProfileIdExhausted,
     ProfileSelectionIdExhausted,
@@ -888,12 +925,15 @@ impl ProfileRuntime {
     pub fn commit_selection(
         &mut self,
         prepared: PreparedProfile,
-    ) -> Result<ProfileSelectionCommit, ProfileRuntimeError> {
+    ) -> Result<ProfileSelectionCommit, ProfileSelectionCommitError> {
         let expected = self.pending.as_ref().map(ProfileSelectionIntent::id);
         if expected != Some(prepared.selection) {
-            return Err(ProfileRuntimeError::StaleSelection {
-                expected,
-                actual: prepared.selection,
+            return Err(ProfileSelectionCommitError {
+                error: ProfileRuntimeError::StaleSelection {
+                    expected,
+                    actual: prepared.selection,
+                },
+                prepared,
             });
         }
         if self
@@ -901,16 +941,21 @@ impl ProfileRuntime {
             .as_ref()
             .is_some_and(|intent| intent.root != prepared.root)
         {
-            return Err(ProfileRuntimeError::SelectionTargetMismatch {
-                selection: prepared.selection,
+            let selection = prepared.selection;
+            return Err(ProfileSelectionCommitError {
+                error: ProfileRuntimeError::SelectionTargetMismatch { selection },
+                prepared,
             });
         }
 
         let id = ProfileId(self.next_profile_id);
-        self.next_profile_id = self
-            .next_profile_id
-            .checked_add(1)
-            .ok_or(ProfileRuntimeError::ProfileIdExhausted)?;
+        let Some(next_profile_id) = self.next_profile_id.checked_add(1) else {
+            return Err(ProfileSelectionCommitError {
+                error: ProfileRuntimeError::ProfileIdExhausted,
+                prepared,
+            });
+        };
+        self.next_profile_id = next_profile_id;
         self.pending = None;
         let active = ActiveProfile {
             id,
@@ -1424,14 +1469,23 @@ mod tests {
         assert_eq!(second_start.superseded(), Some(&first));
         let second = second_start.into_intent();
 
+        let rejection = runtime.commit_selection(first_prepared).unwrap_err();
         assert_eq!(
-            runtime.commit_selection(first_prepared),
-            Err(ProfileRuntimeError::StaleSelection {
+            rejection.error(),
+            &ProfileRuntimeError::StaleSelection {
                 expected: Some(second.id()),
                 actual: first.id(),
-            })
+            }
         );
+        rejection
+            .into_parts()
+            .1
+            .into_profile_lock()
+            .release()
+            .unwrap();
         assert!(runtime.active_profile().is_none());
+        let reacquired = ProfileLock::acquire(first_root.path()).unwrap();
+        reacquired.release().unwrap();
 
         let commit = runtime.commit_selection(prepared(&second)).unwrap();
         assert_eq!(commit.active_profile().get(), 1);
@@ -1514,12 +1568,18 @@ mod tests {
         let root = TempRoot::new();
         let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
         runtime.next_profile_id = u64::MAX;
-        assert_eq!(
-            runtime.commit_selection(prepared(&intent)),
-            Err(ProfileRuntimeError::ProfileIdExhausted)
-        );
+        let rejection = runtime.commit_selection(prepared(&intent)).unwrap_err();
+        assert_eq!(rejection.error(), &ProfileRuntimeError::ProfileIdExhausted);
+        rejection
+            .into_parts()
+            .1
+            .into_profile_lock()
+            .release()
+            .unwrap();
         assert_eq!(runtime.pending_selection(), Some(&intent));
         assert!(runtime.active_profile().is_none());
+        let reacquired = ProfileLock::acquire(root.path()).unwrap();
+        reacquired.release().unwrap();
     }
 
     #[test]

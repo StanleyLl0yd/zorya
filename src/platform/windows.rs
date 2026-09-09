@@ -11,7 +11,7 @@ use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     NavigationId, NavigationStart, PresentationFramePermit, PresentationGeneration,
     PresentationHandoffError, ProfileHistorySavePolicy, ProfileHistorySaveScheduler,
-    ProfileHistorySaveUrgency, ProfileLockOwner, ProfileRuntime, ProfileSelectionIntent,
+    ProfileHistorySaveUrgency, ProfileLock, ProfileLockOwner, ProfileRuntime, ProfileSelectionIntent,
     ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency,
     ProfileWorker, ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection,
     TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
@@ -421,6 +421,18 @@ impl WorkerHandle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProfileLockReleasePurpose {
+    RejectedSelection,
+    ActiveShutdown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingProfileLockRelease {
+    owner: ProfileLockOwner,
+    purpose: ProfileLockReleasePurpose,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingNativeTabCreate {
     target: AsyncTarget,
     navigation: NavigationId,
@@ -474,7 +486,8 @@ struct NativeShell {
     needs_redraw: bool,
     run_mode: RunMode,
     shutdown_requested: bool,
-    pending_profile_lock_release: Option<ProfileLockOwner>,
+    rejected_profile_lock: Option<ProfileLock>,
+    pending_profile_lock_release: Option<PendingProfileLockRelease>,
     profile_lock_release_completed: bool,
     fatal_error: Option<String>,
 }
@@ -531,6 +544,7 @@ impl NativeShell {
             needs_redraw: false,
             run_mode,
             shutdown_requested: false,
+            rejected_profile_lock: None,
             pending_profile_lock_release: None,
             profile_lock_release_completed: false,
             fatal_error: None,
@@ -708,6 +722,51 @@ impl NativeShell {
             return;
         }
 
+        if let Some(lock) = self.rejected_profile_lock.take() {
+            let owner = lock.owner();
+            let Some(worker) = self.profile_worker.as_ref() else {
+                self.rejected_profile_lock = Some(lock);
+                if self.fatal_error.is_none() {
+                    self.fatal_error = Some(
+                        "profile worker is unavailable for rejected profile-lock release"
+                            .to_string(),
+                    );
+                }
+                self.finish_shutdown(event_loop);
+                return;
+            };
+            match worker.release_lock(lock) {
+                Ok(()) => {
+                    self.pending_profile_lock_release = Some(PendingProfileLockRelease {
+                        owner,
+                        purpose: ProfileLockReleasePurpose::RejectedSelection,
+                    });
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                }
+                Err(error) if error.is_full() => {
+                    let returned = error.into_work();
+                    debug_assert_eq!(returned.owner(), owner);
+                    self.rejected_profile_lock = Some(returned);
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let returned = error.into_work();
+                    debug_assert_eq!(returned.owner(), owner);
+                    self.rejected_profile_lock = Some(returned);
+                    if self.fatal_error.is_none() {
+                        self.fatal_error = Some(format!(
+                            "failed to submit rejected profile-lock release for owner {}:{}: {message}",
+                            owner.process_id(),
+                            owner.owner_id()
+                        ));
+                    }
+                    self.finish_shutdown(event_loop);
+                }
+            }
+            return;
+        }
+
         let Some(lock) = self
             .profile_runtime
             .active_profile()
@@ -728,7 +787,10 @@ impl NativeShell {
 
         match worker.release_lock(lock) {
             Ok(()) => {
-                self.pending_profile_lock_release = Some(owner);
+                self.pending_profile_lock_release = Some(PendingProfileLockRelease {
+                    owner,
+                    purpose: ProfileLockReleasePurpose::ActiveShutdown,
+                });
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
             Err(error) if error.is_full() => {
@@ -750,6 +812,27 @@ impl NativeShell {
                 self.finish_shutdown(event_loop);
             }
         }
+    }
+
+    fn fail_with_rejected_profile(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        prepared: crate::PreparedProfile,
+        error: impl std::fmt::Display,
+    ) {
+        let message = error.to_string();
+        let navigation_failure = self.fail_initial_navigation(&message).err();
+        if self.fatal_error.is_none() {
+            self.fatal_error = Some(match navigation_failure {
+                Some(failure) => format!("{message}; {failure}"),
+                None => message,
+            });
+        }
+        debug_assert!(self.rejected_profile_lock.is_none());
+        if self.rejected_profile_lock.is_none() {
+            self.rejected_profile_lock = Some(prepared.into_profile_lock());
+        }
+        self.shutdown(event_loop);
     }
 
     fn submit_initial_profile_selection(&mut self) -> Result<(), String> {
@@ -812,20 +895,24 @@ impl NativeShell {
                 };
 
                 if prepared.selection() != selection {
-                    self.fail(
+                    let actual = prepared.selection();
+                    self.fail_with_rejected_profile(
                         event_loop,
+                        prepared,
                         format!(
                             "profile worker completion {} returned prepared selection {}",
                             selection.get(),
-                            prepared.selection().get()
+                            actual.get()
                         ),
                     );
                     return;
                 }
 
-                if let Err(error) = self.profile_runtime.commit_selection(prepared) {
-                    self.fail(
+                if let Err(rejection) = self.profile_runtime.commit_selection(prepared) {
+                    let (error, prepared) = rejection.into_parts();
+                    self.fail_with_rejected_profile(
                         event_loop,
+                        prepared,
                         format!(
                             "failed to commit prepared profile selection {}: {error}",
                             selection.get()
@@ -840,7 +927,7 @@ impl NativeShell {
             }
             ProfileWorkerCompletion::LockReleased { owner, result } => {
                 let expected = self.pending_profile_lock_release;
-                if expected != Some(owner) {
+                if expected.map(|pending| pending.owner) != Some(owner) {
                     if self.fatal_error.is_none() {
                         self.fatal_error = Some(format!(
                             "profile-lock release {}:{} is stale; expected {:?}",
@@ -852,8 +939,10 @@ impl NativeShell {
                     self.finish_shutdown(event_loop);
                     return;
                 }
-                self.pending_profile_lock_release = None;
-                self.profile_lock_release_completed = true;
+                let pending = self
+                    .pending_profile_lock_release
+                    .take()
+                    .expect("profile-lock release owner was validated");
                 if let Err(error) = result {
                     if self.fatal_error.is_none() {
                         self.fatal_error = Some(format!(
@@ -862,8 +951,22 @@ impl NativeShell {
                             owner.owner_id()
                         ));
                     }
+                    self.finish_shutdown(event_loop);
+                    return;
                 }
-                self.finish_shutdown(event_loop);
+                match pending.purpose {
+                    ProfileLockReleasePurpose::RejectedSelection => {
+                        match self.profile_flush_complete() {
+                            Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
+                            Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                            Err(error) => self.fail(event_loop, error),
+                        }
+                    }
+                    ProfileLockReleasePurpose::ActiveShutdown => {
+                        self.profile_lock_release_completed = true;
+                        self.finish_shutdown(event_loop);
+                    }
+                }
             }
             ProfileWorkerCompletion::SettingsSaved(completion) => {
                 let save = completion.id();

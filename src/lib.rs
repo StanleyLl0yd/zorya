@@ -57,7 +57,7 @@ pub use profile_runtime::{
     ActiveProfile, ColorSchemePreference, PreparedProfile, ProductSettings,
     ProfileHistorySaveCompletion, ProfileHistorySaveId, ProfileHistorySaveIntent, ProfileId,
     ProfilePreparationError, ProfileRuntime, ProfileRuntimeError, ProfileSelectionCommit,
-    ProfileSelectionId, ProfileSelectionIntent, ProfileSelectionStart, ProfileSettingsError,
+    ProfileSelectionCommitError, ProfileSelectionId, ProfileSelectionIntent, ProfileSelectionStart, ProfileSettingsError,
     ProfileSettingsSaveCompletion, ProfileSettingsSaveId, ProfileSettingsSaveIntent,
 };
 pub use profile_settings_scheduler::{
