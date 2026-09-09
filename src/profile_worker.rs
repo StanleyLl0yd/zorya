@@ -1,6 +1,7 @@
 use crate::profile_runtime::{
     PreparedProfile, ProfileHistorySaveCompletion, ProfileHistorySaveIntent,
     ProfilePreparationError, ProfileSelectionId, ProfileSelectionIntent,
+    ProfileSettingsSaveCompletion, ProfileSettingsSaveIntent,
 };
 use std::fmt;
 use std::io;
@@ -11,6 +12,7 @@ pub const PROFILE_WORKER_COMMAND_QUEUE_CAPACITY: usize = 1;
 
 enum ProfileWorkerCommand {
     Prepare(ProfileSelectionIntent),
+    SaveSettings(ProfileSettingsSaveIntent),
     SaveHistory(ProfileHistorySaveIntent),
 }
 
@@ -20,6 +22,7 @@ pub enum ProfileWorkerCompletion {
         selection: ProfileSelectionId,
         result: Result<PreparedProfile, ProfilePreparationError>,
     },
+    SettingsSaved(ProfileSettingsSaveCompletion),
     HistorySaved(ProfileHistorySaveCompletion),
 }
 
@@ -117,9 +120,35 @@ impl ProfileWorker {
             Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(intent))) => {
                 Err(ProfileWorkerSubmitError::Unavailable(intent))
             }
-            Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
+            Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
             | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_))) => {
                 unreachable!("prepare submission preserves its command variant")
+            }
+        }
+    }
+
+    pub fn save_settings(
+        &self,
+        intent: ProfileSettingsSaveIntent,
+    ) -> Result<(), ProfileWorkerSubmitError<ProfileSettingsSaveIntent>> {
+        match self
+            .sender
+            .try_send(ProfileWorkerCommand::SaveSettings(intent))
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(intent))) => {
+                Err(ProfileWorkerSubmitError::Full(intent))
+            }
+            Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(intent))) => {
+                Err(ProfileWorkerSubmitError::Unavailable(intent))
+            }
+            Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_))) => {
+                unreachable!("settings-save submission preserves its command variant")
             }
         }
     }
@@ -140,7 +169,9 @@ impl ProfileWorker {
                 Err(ProfileWorkerSubmitError::Unavailable(intent))
             }
             Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_))) => {
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_))) => {
                 unreachable!("history-save submission preserves its command variant")
             }
         }
@@ -162,6 +193,9 @@ fn profile_worker_main(
                 let result = PreparedProfile::load(&intent);
                 ProfileWorkerCompletion::Prepared { selection, result }
             }
+            ProfileWorkerCommand::SaveSettings(intent) => {
+                ProfileWorkerCompletion::SettingsSaved(intent.execute())
+            }
             ProfileWorkerCommand::SaveHistory(intent) => {
                 ProfileWorkerCompletion::HistorySaved(intent.execute())
             }
@@ -173,7 +207,7 @@ fn profile_worker_main(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ProfileRuntime, ProfileRuntimeError};
+    use crate::{ColorSchemePreference, ProfileRuntime, ProfileRuntimeError};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
@@ -274,6 +308,38 @@ mod tests {
     }
 
     #[test]
+    fn settings_save_executes_on_worker_and_reconciles_runtime() {
+        let root = TempRoot::new("settings-save");
+        let mut runtime = ProfileRuntime::new();
+        let selection = runtime.begin_selection(root.path()).unwrap().into_intent();
+        let prepared = PreparedProfile::load(&selection).unwrap();
+        let profile = runtime.commit_selection(prepared).unwrap().active_profile();
+        runtime
+            .active_settings_mut(profile)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+        let intent = runtime
+            .begin_settings_save_if_dirty(profile)
+            .unwrap()
+            .unwrap();
+        let save = intent.id();
+        let (worker, receiver) = worker_channel();
+
+        worker.save_settings(intent).unwrap();
+        let (thread_name, completion) = receive(&receiver);
+        assert_eq!(thread_name, "zorya-profile");
+        let ProfileWorkerCompletion::SettingsSaved(completion) = completion else {
+            panic!("expected settings-save completion");
+        };
+        assert_eq!(completion.id(), save);
+        assert!(completion.result().is_ok());
+        runtime.complete_settings_save(completion).unwrap();
+        assert!(!runtime.settings_is_dirty(profile).unwrap());
+        assert_eq!(runtime.active_profile().unwrap().settings().generation(), 1);
+    }
+
+    #[test]
     fn history_save_executes_on_worker_and_reconciles_runtime() {
         let root = TempRoot::new("history-save");
         let mut runtime = ProfileRuntime::new();
@@ -348,6 +414,69 @@ mod tests {
         let error = worker.prepare(third).unwrap_err();
         assert!(error.is_full());
         assert_eq!(error.into_work().id(), third_id);
+
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn settings_queue_failure_preserves_exact_work_for_runtime_cancellation() {
+        let blocking_root = TempRoot::new("settings-queue-blocking");
+        let queued_root = TempRoot::new("settings-queue-queued");
+        let settings_root = TempRoot::new("settings-queue-save");
+        let mut queue_runtime = ProfileRuntime::new();
+        let blocking = queue_runtime
+            .begin_selection(blocking_root.path())
+            .unwrap()
+            .into_intent();
+        let queued = queue_runtime
+            .begin_selection(queued_root.path())
+            .unwrap()
+            .into_intent();
+
+        let mut settings_runtime = ProfileRuntime::new();
+        let selection = settings_runtime
+            .begin_selection(settings_root.path())
+            .unwrap()
+            .into_intent();
+        let prepared = PreparedProfile::load(&selection).unwrap();
+        let profile = settings_runtime
+            .commit_selection(prepared)
+            .unwrap()
+            .active_profile();
+        settings_runtime
+            .active_settings_mut(profile)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+        let intent = settings_runtime
+            .begin_settings_save_if_dirty(profile)
+            .unwrap()
+            .unwrap();
+        let save = intent.id();
+
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let mut block_first_completion = true;
+        let worker = ProfileWorker::spawn(move |_| {
+            if block_first_completion {
+                block_first_completion = false;
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+        })
+        .unwrap();
+
+        worker.prepare(blocking).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.prepare(queued).unwrap();
+        let error = worker.save_settings(intent).unwrap_err();
+        assert!(error.is_full());
+        let intent = error.into_work();
+        assert_eq!(intent.id(), save);
+
+        settings_runtime.cancel_settings_save(save).unwrap();
+        assert_eq!(settings_runtime.pending_settings_save(), None);
+        assert!(settings_runtime.settings_is_dirty(profile).unwrap());
 
         release_tx.send(()).unwrap();
     }
