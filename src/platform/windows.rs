@@ -13,10 +13,9 @@ use crate::{
     PresentationGeneration, PresentationHandoffError, ProfileHistorySavePolicy,
     ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileId, ProfileLock,
     ProfileLockOwner, ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent,
-    ProfileSettingsSavePolicy,
-    ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency, ProfileWorker,
-    ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection, TabId,
-    TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
+    ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency,
+    ProfileWorker, ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection,
+    TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -3736,8 +3735,7 @@ mod tests {
             .release()
             .unwrap();
 
-        let error =
-            record_profile_navigation_at(&mut runtime, first, 1_234, commit).unwrap_err();
+        let error = record_profile_navigation_at(&mut runtime, first, 1_234, commit).unwrap_err();
         assert!(error.contains("stale"));
         assert!(runtime.active_browsing_history(second).unwrap().is_empty());
 
