@@ -1,4 +1,9 @@
 use crate::profile_lock::{ProfileLock, ProfileLockError};
+use crate::profile_metadata::{
+    PROFILE_METADATA_DIRECTORY_NAME, ProfileDisplayName, ProfileDisplayNameError, ProfileMetadata,
+    ProfileMetadataError, load_or_create_profile_metadata, load_profile_metadata,
+    save_profile_metadata,
+};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
@@ -13,8 +18,10 @@ pub const PROFILE_IDENTITY_DIRECTORY_NAME: &str = ".zorya-profile.id";
 pub const MAX_PROFILE_IDENTITY_DIRECTORY_ENTRIES: usize = 4;
 pub const MAX_PROFILE_CATALOG_DIRECTORY_ENTRIES: usize = 128;
 pub const MAX_DISCOVERED_PROFILES: usize = 32;
+pub const PROFILE_READY_DIRECTORY_NAME: &str = ".zorya-profile.ready";
 
 const LEGACY_DEFAULT_DIRECTORY_NAME: &str = "Default";
+const GENERATED_PROFILE_DIRECTORY_PREFIX: &str = "Profile-";
 const PROFILE_IDENTITY_RECORD_PREFIX: &str = "v1-";
 const PROFILE_IDENTITY_HEX_DIGITS: usize = 32;
 static NEXT_PROFILE_STORAGE_ID: AtomicU64 = AtomicU64::new(1);
@@ -25,6 +32,10 @@ pub struct ProfileStorageId(u128);
 impl ProfileStorageId {
     pub const fn get(self) -> u128 {
         self.0
+    }
+
+    pub(crate) const fn from_raw(value: u128) -> Option<Self> {
+        if value == 0 { None } else { Some(Self(value)) }
     }
 }
 
@@ -146,6 +157,18 @@ pub enum ProfileCatalogError {
         root: PathBuf,
         error: ProfileIdentityError,
     },
+    MissingMetadata {
+        root: PathBuf,
+    },
+    Metadata {
+        root: PathBuf,
+        error: ProfileMetadataError,
+    },
+    RootIdentityMismatch {
+        root: PathBuf,
+        expected: ProfileStorageId,
+        actual: ProfileStorageId,
+    },
 }
 
 impl fmt::Display for ProfileCatalogError {
@@ -193,6 +216,25 @@ impl fmt::Display for ProfileCatalogError {
                 "failed to inspect profile identity for {}: {error}",
                 root.display()
             ),
+            Self::MissingMetadata { root } => write!(
+                formatter,
+                "profile {} has no persisted display metadata",
+                root.display()
+            ),
+            Self::Metadata { root, error } => write!(
+                formatter,
+                "failed to inspect profile metadata for {}: {error}",
+                root.display()
+            ),
+            Self::RootIdentityMismatch {
+                root,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "generated profile root {} encodes identity {expected}, but persisted identity is {actual}",
+                root.display()
+            ),
         }
     }
 }
@@ -201,6 +243,7 @@ impl std::error::Error for ProfileCatalogError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Identity { error, .. } => Some(error),
+            Self::Metadata { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -210,6 +253,7 @@ impl std::error::Error for ProfileCatalogError {
 pub struct ProfileCatalogEntry {
     root: PathBuf,
     storage_id: Option<ProfileStorageId>,
+    metadata: Option<ProfileMetadata>,
 }
 
 impl ProfileCatalogEntry {
@@ -221,8 +265,18 @@ impl ProfileCatalogEntry {
         self.storage_id
     }
 
+    pub const fn metadata(&self) -> Option<&ProfileMetadata> {
+        self.metadata.as_ref()
+    }
+
+    pub fn display_name(&self) -> Option<&str> {
+        self.metadata
+            .as_ref()
+            .map(|metadata| metadata.display_name().as_str())
+    }
+
     pub const fn requires_legacy_bootstrap(&self) -> bool {
-        self.storage_id.is_none()
+        self.storage_id.is_none() || self.metadata.is_none()
     }
 }
 
