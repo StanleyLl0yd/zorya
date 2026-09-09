@@ -1026,11 +1026,17 @@ mod tests {
         let store = ProfileStore::open(directory.path()).expect("open profile");
         let lock = ProfileLock::acquire(directory.path()).unwrap();
         let initial = snapshot_with("browser.mode", "first");
-        let first = store.save_settings(&lock, &initial).unwrap().into_snapshot();
+        let first = store
+            .save_settings(&lock, &initial)
+            .unwrap()
+            .into_snapshot();
         let stale = first.clone();
         let mut current = first;
         current.set("browser.mode", "second").unwrap();
-        let second = store.save_settings(&lock, &current).unwrap().into_snapshot();
+        let second = store
+            .save_settings(&lock, &current)
+            .unwrap()
+            .into_snapshot();
 
         assert!(matches!(
             store.save_settings(&lock, &stale),
@@ -1092,7 +1098,10 @@ mod tests {
         assert_eq!(recovered.generation(), first.generation());
         let mut next_input = recovered;
         next_input.set("browser.mode", "third").unwrap();
-        let saved = store.save_settings(&lock, &next_input).unwrap().into_snapshot();
+        let saved = store
+            .save_settings(&lock, &next_input)
+            .unwrap()
+            .into_snapshot();
 
         assert_eq!(saved.generation(), corrupt_generation + 1);
         assert_eq!(saved.get("browser.mode"), Some("third"));
@@ -1206,7 +1215,10 @@ mod tests {
             snapshot
                 .set("browser.sequence", index.to_string())
                 .expect("setting");
-            snapshot = store.save_settings(&lock, &snapshot).unwrap().into_snapshot();
+            snapshot = store
+                .save_settings(&lock, &snapshot)
+                .unwrap()
+                .into_snapshot();
         }
 
         let generations = store.discover_generations().unwrap();
