@@ -281,10 +281,12 @@ mod tests {
         let profile = load_profile(&mut runtime, root.path());
         let mut scheduler = ProfileSettingsSaveScheduler::new(policy(10, 100, 3));
 
-        assert!(scheduler
-            .poll(&mut runtime, profile, 0, ProfileSettingsSaveUrgency::Normal)
-            .unwrap()
-            .is_none());
+        assert!(
+            scheduler
+                .poll(&mut runtime, profile, 0, ProfileSettingsSaveUrgency::Normal)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(scheduler.next_save_due_millis(), None);
     }
 
@@ -296,19 +298,35 @@ mod tests {
         let mut scheduler = ProfileSettingsSaveScheduler::new(policy(10, 100, 3));
 
         mutate(&mut runtime, profile);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 5, ProfileSettingsSaveUrgency::Normal)
-            .unwrap()
-            .is_none());
+        assert!(
+            scheduler
+                .poll(&mut runtime, profile, 5, ProfileSettingsSaveUrgency::Normal)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(scheduler.next_save_due_millis(), Some(15));
-        assert!(scheduler
-            .poll(&mut runtime, profile, 14, ProfileSettingsSaveUrgency::Normal)
-            .unwrap()
-            .is_none());
-        assert!(scheduler
-            .poll(&mut runtime, profile, 15, ProfileSettingsSaveUrgency::Normal)
-            .unwrap()
-            .is_some());
+        assert!(
+            scheduler
+                .poll(
+                    &mut runtime,
+                    profile,
+                    14,
+                    ProfileSettingsSaveUrgency::Normal
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            scheduler
+                .poll(
+                    &mut runtime,
+                    profile,
+                    15,
+                    ProfileSettingsSaveUrgency::Normal
+                )
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -320,10 +338,12 @@ mod tests {
 
         mutate(&mut runtime, profile);
         mutate(&mut runtime, profile);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 1, ProfileSettingsSaveUrgency::Normal)
-            .unwrap()
-            .is_some());
+        assert!(
+            scheduler
+                .poll(&mut runtime, profile, 1, ProfileSettingsSaveUrgency::Normal)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -335,17 +355,34 @@ mod tests {
 
         mutate(&mut runtime, profile);
         scheduler
-            .poll(&mut runtime, profile, 10, ProfileSettingsSaveUrgency::Normal)
+            .poll(
+                &mut runtime,
+                profile,
+                10,
+                ProfileSettingsSaveUrgency::Normal,
+            )
             .unwrap();
         mutate(&mut runtime, profile);
         scheduler
-            .poll(&mut runtime, profile, 80, ProfileSettingsSaveUrgency::Normal)
+            .poll(
+                &mut runtime,
+                profile,
+                80,
+                ProfileSettingsSaveUrgency::Normal,
+            )
             .unwrap();
         mutate(&mut runtime, profile);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 110, ProfileSettingsSaveUrgency::Normal)
-            .unwrap()
-            .is_some());
+        assert!(
+            scheduler
+                .poll(
+                    &mut runtime,
+                    profile,
+                    110,
+                    ProfileSettingsSaveUrgency::Normal
+                )
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -356,10 +393,12 @@ mod tests {
         let mut scheduler = ProfileSettingsSaveScheduler::new(policy(100, 1_000, 10));
 
         mutate(&mut runtime, profile);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 1, ProfileSettingsSaveUrgency::Flush)
-            .unwrap()
-            .is_some());
+        assert!(
+            scheduler
+                .poll(&mut runtime, profile, 1, ProfileSettingsSaveUrgency::Flush)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -375,17 +414,31 @@ mod tests {
             .unwrap()
             .unwrap();
         mutate(&mut runtime, profile);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 20, ProfileSettingsSaveUrgency::Normal)
-            .unwrap()
-            .is_none());
+        assert!(
+            scheduler
+                .poll(
+                    &mut runtime,
+                    profile,
+                    20,
+                    ProfileSettingsSaveUrgency::Normal
+                )
+                .unwrap()
+                .is_none()
+        );
 
         let completion = intent.execute();
         runtime.complete_settings_save(completion).unwrap();
-        assert!(scheduler
-            .poll(&mut runtime, profile, 30, ProfileSettingsSaveUrgency::Normal)
-            .unwrap()
-            .is_some());
+        assert!(
+            scheduler
+                .poll(
+                    &mut runtime,
+                    profile,
+                    30,
+                    ProfileSettingsSaveUrgency::Normal
+                )
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -396,12 +449,24 @@ mod tests {
         let mut scheduler = ProfileSettingsSaveScheduler::new(policy(100, 1_000, 10));
 
         scheduler
-            .poll(&mut runtime, profile, 500, ProfileSettingsSaveUrgency::Normal)
+            .poll(
+                &mut runtime,
+                profile,
+                500,
+                ProfileSettingsSaveUrgency::Normal,
+            )
             .unwrap();
         mutate(&mut runtime, profile);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 400, ProfileSettingsSaveUrgency::Normal)
-            .unwrap()
-            .is_some());
+        assert!(
+            scheduler
+                .poll(
+                    &mut runtime,
+                    profile,
+                    400,
+                    ProfileSettingsSaveUrgency::Normal
+                )
+                .unwrap()
+                .is_some()
+        );
     }
 }
