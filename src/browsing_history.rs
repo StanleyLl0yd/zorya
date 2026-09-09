@@ -1,3 +1,4 @@
+use crate::profile_lock::{ProfileLock, ProfileLockError};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -224,6 +225,7 @@ impl BrowsingHistorySave {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowsingHistoryError {
+    Lock(ProfileLockError),
     Io {
         operation: &'static str,
         path: PathBuf,
@@ -274,6 +276,7 @@ pub enum BrowsingHistoryError {
 impl fmt::Display for BrowsingHistoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Lock(error) => error.fmt(formatter),
             Self::Io {
                 operation,
                 path,
@@ -395,8 +398,11 @@ impl BrowsingHistoryStore {
 
     pub fn save(
         &self,
+        lock: &ProfileLock,
         snapshot: &BrowsingHistorySnapshot,
     ) -> Result<BrowsingHistorySave, BrowsingHistoryError> {
+        lock.verify_for_root(&self.root)
+            .map_err(BrowsingHistoryError::Lock)?;
         validate_snapshot(snapshot)?;
         let loaded = self.load()?;
         let current_generation = loaded.snapshot().generation();
@@ -444,6 +450,11 @@ impl BrowsingHistoryStore {
             ));
         }
         drop(file);
+
+        if let Err(error) = lock.verify_for_root(&self.root) {
+            let _ = fs::remove_file(&pending_path);
+            return Err(BrowsingHistoryError::Lock(error));
+        }
 
         match fs::hard_link(&pending_path, &final_path) {
             Ok(()) => {}
@@ -831,6 +842,7 @@ fn io_error(operation: &'static str, path: &Path, error: io::Error) -> BrowsingH
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile_lock::ProfileLock;
     use std::sync::{Arc, Barrier};
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -999,7 +1011,8 @@ mod tests {
     fn unpublished_pending_file_is_ignored() {
         let directory = TestDirectory::new();
         let store = BrowsingHistoryStore::open(directory.path()).unwrap();
-        let first = store.save(&snapshot_with("https://one.test")).unwrap();
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
+        let first = store.save(&lock, &snapshot_with("https://one.test")).unwrap();
 
         let pending = store.history_directory.join(format!(
             "{PENDING_FILE_PREFIX}{:020}-{:010}-{:020}.tmp",
@@ -1019,8 +1032,9 @@ mod tests {
     fn save_load_and_stale_writer_rejection_preserve_data() {
         let directory = TestDirectory::new();
         let store = BrowsingHistoryStore::open(directory.path()).unwrap();
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let first = store
-            .save(&snapshot_with("https://one.test"))
+            .save(&lock, &snapshot_with("https://one.test"))
             .unwrap()
             .into_snapshot();
         let stale = first.clone();
@@ -1029,11 +1043,11 @@ mod tests {
         second_input
             .record_visit(2_000, "https://two.test")
             .unwrap();
-        let second = store.save(&second_input).unwrap().into_snapshot();
+        let second = store.save(&lock, &second_input).unwrap().into_snapshot();
         assert_eq!(second.generation(), 2);
 
         assert_eq!(
-            store.save(&stale),
+            store.save(&lock, &stale),
             Err(BrowsingHistoryError::StaleGeneration {
                 current: 2,
                 provided: 1,
@@ -1047,17 +1061,19 @@ mod tests {
     fn concurrent_saves_have_one_durable_winner() {
         let directory = TestDirectory::new();
         let store = Arc::new(BrowsingHistoryStore::open(directory.path()).unwrap());
+        let lock = Arc::new(ProfileLock::acquire(directory.path()).unwrap());
         let barrier = Arc::new(Barrier::new(3));
 
         let workers = ["https://one.test", "https://two.test"]
             .into_iter()
             .map(|location| {
                 let store = Arc::clone(&store);
+                let lock = Arc::clone(&lock);
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     let snapshot = snapshot_with(location);
                     barrier.wait();
-                    store.save(&snapshot)
+                    store.save(lock.as_ref(), &snapshot)
                 })
             })
             .collect::<Vec<_>>();
@@ -1089,15 +1105,16 @@ mod tests {
     fn corrupt_newest_generation_recovers_previous_explicitly() {
         let directory = TestDirectory::new();
         let store = BrowsingHistoryStore::open(directory.path()).unwrap();
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let first = store
-            .save(&snapshot_with("https://one.test"))
+            .save(&lock, &snapshot_with("https://one.test"))
             .unwrap()
             .into_snapshot();
         let mut second_input = first.clone();
         second_input
             .record_visit(2_000, "https://two.test")
             .unwrap();
-        let second = store.save(&second_input).unwrap().into_snapshot();
+        let second = store.save(&lock, &second_input).unwrap().into_snapshot();
 
         let path = store.history_path(second.generation());
         let mut bytes = fs::read(&path).unwrap();
@@ -1117,8 +1134,9 @@ mod tests {
     fn newer_schema_generation_fails_closed_without_fallback() {
         let directory = TestDirectory::new();
         let store = BrowsingHistoryStore::open(directory.path()).unwrap();
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let first = store
-            .save(&snapshot_with("https://one.test"))
+            .save(&lock, &snapshot_with("https://one.test"))
             .unwrap()
             .into_snapshot();
         let newer_generation = first.generation() + 1;
@@ -1146,13 +1164,14 @@ mod tests {
     fn retained_generation_window_is_bounded() {
         let directory = TestDirectory::new();
         let store = BrowsingHistoryStore::open(directory.path()).unwrap();
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let mut snapshot = BrowsingHistorySnapshot::default();
 
         for index in 0..7u64 {
             snapshot
                 .record_visit(index, format!("https://example.test/{index}"))
                 .unwrap();
-            snapshot = store.save(&snapshot).unwrap().into_snapshot();
+            snapshot = store.save(&lock, &snapshot).unwrap().into_snapshot();
         }
 
         let generations = store.discover_generations().unwrap();
@@ -1164,6 +1183,7 @@ mod tests {
     fn directory_scan_limit_is_enforced() {
         let directory = TestDirectory::new();
         let store = BrowsingHistoryStore::open(directory.path()).unwrap();
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         for index in 0..=MAX_HISTORY_DIRECTORY_ENTRIES {
             fs::write(
                 store.history_directory.join(format!("noise-{index:03}")),
