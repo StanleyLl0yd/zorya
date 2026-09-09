@@ -1,4 +1,9 @@
+use crate::profile_catalog::{
+    ProfileCatalogCreateError, ProfileCatalogCreateIntent, ProfileCatalogDiscoverIntent,
+    ProfileCatalogEntry, ProfileCatalogError, ProfileCatalogRenameError, ProfileCatalogRenameIntent,
+};
 use crate::profile_lock::{ProfileLock, ProfileLockError, ProfileLockOwner};
+use crate::profile_metadata::ProfileMetadata;
 use crate::profile_runtime::{
     PreparedProfile, ProfileHistorySaveCompletion, ProfileHistorySaveIntent,
     ProfilePreparationError, ProfileSelectionId, ProfileSelectionIntent,
@@ -15,6 +20,9 @@ enum ProfileWorkerCommand {
     Prepare(ProfileSelectionIntent),
     SaveSettings(ProfileSettingsSaveIntent),
     SaveHistory(ProfileHistorySaveIntent),
+    DiscoverCatalog(ProfileCatalogDiscoverIntent),
+    CreateProfile(ProfileCatalogCreateIntent),
+    RenameProfile(ProfileCatalogRenameIntent),
     ReleaseLock(ProfileLock),
 }
 
@@ -26,6 +34,18 @@ pub enum ProfileWorkerCompletion {
     },
     SettingsSaved(ProfileSettingsSaveCompletion),
     HistorySaved(ProfileHistorySaveCompletion),
+    CatalogDiscovered {
+        intent: ProfileCatalogDiscoverIntent,
+        result: Result<Vec<ProfileCatalogEntry>, ProfileCatalogError>,
+    },
+    ProfileCreated {
+        intent: ProfileCatalogCreateIntent,
+        result: Result<ProfileCatalogEntry, ProfileCatalogCreateError>,
+    },
+    ProfileRenamed {
+        intent: ProfileCatalogRenameIntent,
+        result: Result<ProfileMetadata, ProfileCatalogRenameError>,
+    },
     LockReleased {
         owner: ProfileLockOwner,
         result: Result<(), ProfileLockError>,
