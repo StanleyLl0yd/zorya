@@ -11,10 +11,11 @@ use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     NavigationId, NavigationStart, PreparedProfile, PresentationFramePermit,
     PresentationGeneration, PresentationHandoffError, ProfileHistorySavePolicy,
-    ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileId, ProfileLock,
-    ProfileLockOwner, ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent,
-    ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency,
-    ProfileWorker, ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection,
+    ProfileCatalogDiscoverIntent, ProfileCatalogEntry, ProfileHistorySaveScheduler,
+    ProfileHistorySaveUrgency, ProfileId, ProfileLock, ProfileLockOwner, ProfileRuntime,
+    ProfileRuntimeError, ProfileSelectionIntent, ProfileSettingsSavePolicy,
+    ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency, ProfileStorageId, ProfileWorker,
+    ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection,
     TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
@@ -161,19 +162,22 @@ fn spawn_http_smoke_server() -> Result<String, std::io::Error> {
     Ok(format!("http://{address}/zorya-http-smoke"))
 }
 
-fn profile_root_from_local_app_data(local_app_data: Option<OsString>) -> io::Result<PathBuf> {
+fn profiles_root_from_local_app_data(local_app_data: Option<OsString>) -> io::Result<PathBuf> {
     let local_app_data = local_app_data
         .filter(|value| !value.as_os_str().is_empty())
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "LOCALAPPDATA is unavailable for the default Zorya profile",
+                "LOCALAPPDATA is unavailable for Zorya profiles",
             )
         })?;
     Ok(PathBuf::from(local_app_data)
         .join(PRODUCT_DATA_DIRECTORY)
-        .join(PROFILES_DIRECTORY)
-        .join(DEFAULT_PROFILE_DIRECTORY))
+        .join(PROFILES_DIRECTORY))
+}
+
+fn profile_root_from_local_app_data(local_app_data: Option<OsString>) -> io::Result<PathBuf> {
+    Ok(profiles_root_from_local_app_data(local_app_data)?.join(DEFAULT_PROFILE_DIRECTORY))
 }
 
 fn default_profile_root() -> io::Result<PathBuf> {
@@ -240,9 +244,10 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         .intent()
         .id();
     let proxy = event_loop.create_proxy();
+    let profiles_root = profiles_root_from_local_app_data(std::env::var_os("LOCALAPPDATA"))?;
     let mut profile_runtime = ProfileRuntime::new();
     let initial_profile_selection = profile_runtime
-        .begin_selection(default_profile_root()?)?
+        .begin_selection(profiles_root.join(DEFAULT_PROFILE_DIRECTORY))?
         .into_intent();
     let profile_worker = ProfileWorker::spawn({
         let proxy = proxy.clone();
@@ -258,6 +263,7 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         profile_runtime,
         profile_worker,
         initial_profile_selection,
+        profiles_root,
         http_smoke_location,
     };
     let mut shell = NativeShell::new(startup, proxy, mode);
@@ -305,6 +311,10 @@ enum WorkerEvent {
         target: WorkerNavigationTarget,
         result: Result<bool, String>,
     },
+    ProfileSessionReset {
+        target: AsyncTarget,
+        result: Result<(), String>,
+    },
 }
 
 enum WorkerCommand {
@@ -333,6 +343,10 @@ enum WorkerCommand {
     },
     CancelNavigation {
         target: WorkerNavigationTarget,
+    },
+    ResetProfileSession {
+        target: AsyncTarget,
+        generation: PresentationGeneration,
     },
 }
 
@@ -419,6 +433,14 @@ impl WorkerHandle {
         self.send(WorkerCommand::CancelNavigation { target })
     }
 
+    fn reset_profile_session(
+        &self,
+        target: AsyncTarget,
+        generation: PresentationGeneration,
+    ) -> Result<(), String> {
+        self.send(WorkerCommand::ResetProfileSession { target, generation })
+    }
+
     fn send(&self, command: WorkerCommand) -> Result<(), String> {
         if self.cancellation.is_cancelled() {
             return Err("render worker is cancelled".into());
@@ -457,6 +479,12 @@ struct PendingNativeTabCreate {
     activate_after_create: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingProfileCatalogDiscovery {
+    intent: ProfileCatalogDiscoverIntent,
+    submitted: bool,
+}
+
 struct NativeShellStartup {
     browser: BrowserApp,
     browser_window: BrowserWindowId,
@@ -465,6 +493,7 @@ struct NativeShellStartup {
     profile_runtime: ProfileRuntime,
     profile_worker: ProfileWorker,
     initial_profile_selection: ProfileSelectionIntent,
+    profiles_root: PathBuf,
     http_smoke_location: Option<String>,
 }
 
@@ -477,7 +506,11 @@ struct NativeShell {
     history_scheduler: ProfileHistorySaveScheduler,
     profile_clock: NativeProfileClock,
     initial_profile_selection: Option<ProfileSelectionIntent>,
+    profiles_root: PathBuf,
+    pending_profile_catalog_discovery: Option<PendingProfileCatalogDiscovery>,
+    pending_profile_selection_submission: Option<ProfileSelectionIntent>,
     pending_profile_replacement: Option<PreparedProfile>,
+    pending_profile_session_reset: PendingRequest,
     tab: TabId,
     presentation: TabPresentationHandoff,
     pending_target_permit: Option<TargetFramePermit>,
@@ -527,6 +560,7 @@ impl NativeShell {
             profile_runtime,
             profile_worker,
             initial_profile_selection,
+            profiles_root,
             http_smoke_location,
         } = startup;
         Self {
@@ -538,7 +572,11 @@ impl NativeShell {
             history_scheduler: ProfileHistorySaveScheduler::new(native_history_save_policy()),
             profile_clock: NativeProfileClock::new(),
             initial_profile_selection: Some(initial_profile_selection),
+            profiles_root,
+            pending_profile_catalog_discovery: None,
+            pending_profile_selection_submission: None,
             pending_profile_replacement: None,
+            pending_profile_session_reset: PendingRequest::default(),
             tab,
             presentation: TabPresentationHandoff::new(tab),
             pending_target_permit: None,
