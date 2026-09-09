@@ -774,18 +774,23 @@ impl NativeShell {
         selection: crate::ProfileSelectionId,
         prepared: PreparedProfile,
     ) {
+        if self.replaced_profile_lock.is_some()
+            || self
+                .pending_profile_lock_release
+                .is_some_and(|pending| pending.purpose == ProfileLockReleasePurpose::ReplacedProfile)
+        {
+            self.fail_with_rejected_profile(
+                event_loop,
+                prepared,
+                "profile selection completed before the prior replaced lock was released",
+            );
+            return;
+        }
+
         match self.profile_runtime.commit_selection(prepared) {
             Ok(commit) => {
                 if let Some(replaced) = commit.into_replaced_profile() {
                     debug_assert!(self.pending_profile_replacement.is_none());
-                    debug_assert!(self.replaced_profile_lock.is_none());
-                    if self.replaced_profile_lock.is_some() {
-                        self.fail(
-                            event_loop,
-                            "profile replacement committed before the prior replaced lock was released",
-                        );
-                        return;
-                    }
                     self.replaced_profile_lock = Some(replaced.into_profile_lock());
                     match self.drive_replaced_profile_lock_release() {
                         Ok(true) => {}
