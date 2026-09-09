@@ -1,6 +1,7 @@
 use crate::profile_runtime::{
     PreparedProfile, ProfileHistorySaveCompletion, ProfileHistorySaveIntent,
     ProfilePreparationError, ProfileSelectionId, ProfileSelectionIntent,
+    ProfileSettingsSaveCompletion, ProfileSettingsSaveIntent,
 };
 use std::fmt;
 use std::io;
@@ -11,6 +12,7 @@ pub const PROFILE_WORKER_COMMAND_QUEUE_CAPACITY: usize = 1;
 
 enum ProfileWorkerCommand {
     Prepare(ProfileSelectionIntent),
+    SaveSettings(ProfileSettingsSaveIntent),
     SaveHistory(ProfileHistorySaveIntent),
 }
 
@@ -20,6 +22,7 @@ pub enum ProfileWorkerCompletion {
         selection: ProfileSelectionId,
         result: Result<PreparedProfile, ProfilePreparationError>,
     },
+    SettingsSaved(ProfileSettingsSaveCompletion),
     HistorySaved(ProfileHistorySaveCompletion),
 }
 
@@ -117,9 +120,35 @@ impl ProfileWorker {
             Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(intent))) => {
                 Err(ProfileWorkerSubmitError::Unavailable(intent))
             }
-            Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
+            Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
             | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_))) => {
                 unreachable!("prepare submission preserves its command variant")
+            }
+        }
+    }
+
+    pub fn save_settings(
+        &self,
+        intent: ProfileSettingsSaveIntent,
+    ) -> Result<(), ProfileWorkerSubmitError<ProfileSettingsSaveIntent>> {
+        match self
+            .sender
+            .try_send(ProfileWorkerCommand::SaveSettings(intent))
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(intent))) => {
+                Err(ProfileWorkerSubmitError::Full(intent))
+            }
+            Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(intent))) => {
+                Err(ProfileWorkerSubmitError::Unavailable(intent))
+            }
+            Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_))) => {
+                unreachable!("settings-save submission preserves its command variant")
             }
         }
     }
@@ -140,7 +169,9 @@ impl ProfileWorker {
                 Err(ProfileWorkerSubmitError::Unavailable(intent))
             }
             Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_))) => {
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_))) => {
                 unreachable!("history-save submission preserves its command variant")
             }
         }
@@ -162,6 +193,9 @@ fn profile_worker_main(
                 let result = PreparedProfile::load(&intent);
                 ProfileWorkerCompletion::Prepared { selection, result }
             }
+            ProfileWorkerCommand::SaveSettings(intent) => {
+                ProfileWorkerCompletion::SettingsSaved(intent.execute())
+            }
             ProfileWorkerCommand::SaveHistory(intent) => {
                 ProfileWorkerCompletion::HistorySaved(intent.execute())
             }
@@ -173,7 +207,7 @@ fn profile_worker_main(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ProfileRuntime, ProfileRuntimeError};
+    use crate::{ColorSchemePreference, ProfileRuntime, ProfileRuntimeError};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
@@ -271,6 +305,41 @@ mod tests {
         assert_eq!(completed_selection, selection);
         assert!(result.is_err());
         assert!(runtime.pending_selection().is_some());
+    }
+
+    #[test]
+    fn settings_save_executes_on_worker_and_reconciles_runtime() {
+        let root = TempRoot::new("settings-save");
+        let mut runtime = ProfileRuntime::new();
+        let selection = runtime.begin_selection(root.path()).unwrap().into_intent();
+        let prepared = PreparedProfile::load(&selection).unwrap();
+        let profile = runtime.commit_selection(prepared).unwrap().active_profile();
+        runtime
+            .active_settings_mut(profile)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+        let intent = runtime
+            .begin_settings_save_if_dirty(profile)
+            .unwrap()
+            .unwrap();
+        let save = intent.id();
+        let (worker, receiver) = worker_channel();
+
+        worker.save_settings(intent).unwrap();
+        let (thread_name, completion) = receive(&receiver);
+        assert_eq!(thread_name, "zorya-profile");
+        let ProfileWorkerCompletion::SettingsSaved(completion) = completion else {
+            panic!("expected settings-save completion");
+        };
+        assert_eq!(completion.id(), save);
+        assert!(completion.result().is_ok());
+        runtime.complete_settings_save(completion).unwrap();
+        assert!(!runtime.settings_is_dirty(profile).unwrap());
+        assert_eq!(
+            runtime.active_profile().unwrap().settings().generation(),
+            1
+        );
     }
 
     #[test]
