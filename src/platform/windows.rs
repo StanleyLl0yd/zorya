@@ -8,11 +8,11 @@ use crate::engine::{
     EngineNavigationRequest, Viewport,
 };
 use crate::{
-    BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserWindowId, NavigationId,
-    NavigationStart, PresentationFramePermit, PresentationGeneration, PresentationHandoffError,
-    ProfileRuntime, ProfileSelectionIntent, ProfileWorker, ProfileWorkerCompletion,
-    TabActivationStart, TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff,
-    TargetFramePermit, WebContentPresentation,
+    BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
+    NavigationId, NavigationStart, PresentationFramePermit, PresentationGeneration,
+    PresentationHandoffError, ProfileRuntime, ProfileSelectionIntent, ProfileWorker,
+    ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection, TabId,
+    TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
@@ -123,6 +123,34 @@ fn profile_root_from_local_app_data(local_app_data: Option<OsString>) -> io::Res
 
 fn default_profile_root() -> io::Result<PathBuf> {
     profile_root_from_local_app_data(std::env::var_os("LOCALAPPDATA"))
+}
+
+fn current_unix_millis() -> Result<u64, String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock precedes Unix epoch: {error}"))?;
+    u64::try_from(elapsed.as_millis())
+        .map_err(|_| "system time exceeds browsing-history timestamp range".to_string())
+}
+
+fn record_profile_navigation_at(
+    runtime: &mut ProfileRuntime,
+    visited_unix_millis: u64,
+    commit: BrowserNavigationCommit,
+) -> Result<(), String> {
+    if commit.location() == START_LOCATION {
+        return Ok(());
+    }
+    let profile = runtime
+        .active_profile()
+        .ok_or_else(|| "no active profile for committed navigation history".to_string())?
+        .id();
+    runtime
+        .record_committed_navigation(profile, visited_unix_millis, commit)
+        .map(|_| ())
+        .map_err(|error| {
+            format!("failed to record committed navigation in active profile: {error}")
+        })
 }
 
 pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
@@ -448,6 +476,11 @@ impl NativeShell {
             run_mode,
             fatal_error: None,
         }
+    }
+
+    fn record_navigation_commit(&mut self, commit: BrowserNavigationCommit) -> Result<(), String> {
+        let visited_unix_millis = current_unix_millis()?;
+        record_profile_navigation_at(&mut self.profile_runtime, visited_unix_millis, commit)
     }
 
     fn submit_initial_profile_selection(&mut self) -> Result<(), String> {
@@ -1353,7 +1386,8 @@ impl NativeShell {
             return Err(error);
         }
 
-        self.browser
+        let commit = self
+            .browser
             .commit_navigation(
                 self.browser_window,
                 target.tab(),
@@ -1361,6 +1395,7 @@ impl NativeShell {
                 START_LOCATION,
             )
             .map_err(|error| format!("failed to commit new-tab navigation: {error}"))?;
+        self.record_navigation_commit(commit)?;
 
         if pending.activate_after_create {
             let start = self
@@ -1481,16 +1516,23 @@ impl NativeShell {
                                 return;
                             }
                         }
-                        if let Err(error) = self.browser.commit_navigation(
+                        let commit = match self.browser.commit_navigation(
                             target.window,
                             target.tab,
                             target.navigation,
                             &location,
                         ) {
-                            self.fail(
-                                event_loop,
-                                format!("failed to commit browser navigation: {error}"),
-                            );
+                            Ok(commit) => commit,
+                            Err(error) => {
+                                self.fail(
+                                    event_loop,
+                                    format!("failed to commit browser navigation: {error}"),
+                                );
+                                return;
+                            }
+                        };
+                        if let Err(error) = self.record_navigation_commit(commit) {
+                            self.fail(event_loop, error);
                             return;
                         }
                         if self.http_smoke_navigation == Some(target.navigation) {
@@ -1780,9 +1822,11 @@ impl NativeShell {
         let navigation = self
             .initial_navigation
             .ok_or_else(|| "initial browser navigation is already resolved".to_string())?;
-        self.browser
+        let commit = self
+            .browser
             .commit_navigation(self.browser_window, self.tab, navigation, START_LOCATION)
             .map_err(|error| format!("failed to commit initial browser navigation: {error}"))?;
+        self.record_navigation_commit(commit)?;
         self.initial_navigation = None;
         Ok(())
     }
@@ -2673,6 +2717,58 @@ impl WebContentSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PreparedProfile;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_PROFILE_ROOT: AtomicU64 = AtomicU64::new(1);
+
+    struct TestProfileRoot(PathBuf);
+
+    impl TestProfileRoot {
+        fn new() -> Self {
+            let id = NEXT_PROFILE_ROOT.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "zorya-windows-profile-history-{}-{id}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            Self(root)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestProfileRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn active_profile_runtime() -> (TestProfileRoot, ProfileRuntime) {
+        let root = TestProfileRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
+        let prepared = PreparedProfile::load(&intent).unwrap();
+        runtime.commit_selection(prepared).unwrap();
+        (root, runtime)
+    }
+
+    fn committed_navigation(location: &str) -> BrowserNavigationCommit {
+        let mut browser = BrowserApp::bootstrap().unwrap();
+        let window = browser.windows().next().unwrap().id();
+        let tab = browser.window(window).unwrap().active_tab_id().unwrap();
+        let navigation = browser
+            .begin_navigation(window, tab, location)
+            .unwrap()
+            .intent()
+            .id();
+        browser
+            .commit_navigation(window, tab, navigation, location)
+            .unwrap()
+    }
 
     #[test]
     fn default_profile_root_is_stable_under_local_app_data() {
@@ -2695,5 +2791,32 @@ mod tests {
 
         let empty = profile_root_from_local_app_data(Some(OsString::new())).unwrap_err();
         assert_eq!(empty.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn committed_native_navigation_records_exact_active_profile_visit() {
+        let (_root, mut runtime) = active_profile_runtime();
+        let profile = runtime.active_profile().unwrap().id();
+        let commit = committed_navigation("https://example.test/final");
+
+        record_profile_navigation_at(&mut runtime, 1_234, commit).unwrap();
+
+        let history = runtime.active_browsing_history(profile).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.visits()[0].visited_unix_millis(), 1_234);
+        assert_eq!(history.visits()[0].location(), "https://example.test/final");
+        assert!(runtime.browsing_history_is_dirty(profile).unwrap());
+    }
+
+    #[test]
+    fn service_about_blank_commit_is_not_persisted() {
+        let (_root, mut runtime) = active_profile_runtime();
+        let profile = runtime.active_profile().unwrap().id();
+        let commit = committed_navigation(START_LOCATION);
+
+        record_profile_navigation_at(&mut runtime, 1_234, commit).unwrap();
+
+        assert!(runtime.active_browsing_history(profile).unwrap().is_empty());
+        assert!(!runtime.browsing_history_is_dirty(profile).unwrap());
     }
 }
