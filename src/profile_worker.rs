@@ -299,6 +299,30 @@ mod tests {
     }
 
     #[test]
+    fn lock_release_executes_on_named_worker() {
+        let root = TempRoot::new("lock-release");
+        let lock = ProfileLock::acquire(root.path()).unwrap();
+        let owner = lock.owner();
+        let (worker, receiver) = worker_channel();
+
+        worker.release_lock(lock).unwrap();
+        let (thread_name, completion) = receive(&receiver);
+        assert_eq!(thread_name, "zorya-profile");
+        let ProfileWorkerCompletion::LockReleased {
+            owner: completed_owner,
+            result,
+        } = completion
+        else {
+            panic!("expected profile-lock release completion");
+        };
+        assert_eq!(completed_owner, owner);
+        assert!(result.is_ok());
+
+        let reacquired = ProfileLock::acquire(root.path()).unwrap();
+        reacquired.release().unwrap();
+    }
+
+    #[test]
     fn preparation_runs_on_named_worker_and_preserves_selection_identity() {
         let root = TempRoot::new("prepare");
         let mut runtime = ProfileRuntime::new();
