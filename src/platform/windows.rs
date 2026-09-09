@@ -180,9 +180,6 @@ fn profile_root_from_local_app_data(local_app_data: Option<OsString>) -> io::Res
     Ok(profiles_root_from_local_app_data(local_app_data)?.join(DEFAULT_PROFILE_DIRECTORY))
 }
 
-fn default_profile_root() -> io::Result<PathBuf> {
-    profile_root_from_local_app_data(std::env::var_os("LOCALAPPDATA"))
-}
 
 fn current_unix_millis() -> Result<u64, String> {
     let elapsed = SystemTime::now()
@@ -270,10 +267,15 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         .intent()
         .id();
     let proxy = event_loop.create_proxy();
-    let profiles_root = profiles_root_from_local_app_data(std::env::var_os("LOCALAPPDATA"))?;
+    let initial_profile_root =
+        profile_root_from_local_app_data(std::env::var_os("LOCALAPPDATA"))?;
+    let profiles_root = initial_profile_root
+        .parent()
+        .expect("default profile root has a Profiles parent")
+        .to_owned();
     let mut profile_runtime = ProfileRuntime::new();
     let initial_profile_selection = profile_runtime
-        .begin_selection(profiles_root.join(DEFAULT_PROFILE_DIRECTORY))?
+        .begin_selection(initial_profile_root)?
         .into_intent();
     let profile_worker = ProfileWorker::spawn({
         let proxy = proxy.clone();
