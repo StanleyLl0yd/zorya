@@ -619,6 +619,168 @@ impl ProfileCatalog {
     }
 }
 
+fn generated_profile_root_name(storage_id: ProfileStorageId) -> String {
+    format!("{GENERATED_PROFILE_DIRECTORY_PREFIX}{storage_id}")
+}
+
+fn generated_profile_root_storage_id(name: &OsStr) -> Option<ProfileStorageId> {
+    let name = name.to_str()?;
+    let encoded = name.strip_prefix(GENERATED_PROFILE_DIRECTORY_PREFIX)?;
+    if encoded.len() != PROFILE_IDENTITY_HEX_DIGITS
+        || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let value = u128::from_str_radix(encoded, 16).ok()?;
+    ProfileStorageId::from_raw(value)
+}
+
+fn profile_publication_ready(root: &Path) -> Result<bool, ProfileCatalogError> {
+    let marker = root.join(PROFILE_READY_DIRECTORY_NAME);
+    let metadata = match fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(catalog_io_error(
+                "inspect profile publication marker",
+                &marker,
+                error,
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ProfileCatalogError::UnsupportedEntry { path: marker });
+    }
+    let mut entries = fs::read_dir(&marker)
+        .map_err(|error| catalog_io_error("read profile publication marker", &marker, error))?;
+    if entries.next().is_some() {
+        return Err(ProfileCatalogError::UnsupportedEntry { path: marker });
+    }
+    Ok(true)
+}
+
+fn create_profile(
+    intent: &ProfileCatalogCreateIntent,
+) -> Result<ProfileCatalogEntry, ProfileCatalogCreateError> {
+    let catalog = ProfileCatalog::open(intent.catalog_root.clone())
+        .map_err(ProfileCatalogCreateError::Catalog)?;
+    let existing = catalog
+        .discover()
+        .map_err(ProfileCatalogCreateError::Catalog)?;
+    if existing.len() >= MAX_DISCOVERED_PROFILES {
+        return Err(ProfileCatalogCreateError::Catalog(
+            ProfileCatalogError::ProfileLimitExceeded {
+                found: existing.len().saturating_add(1),
+                limit: MAX_DISCOVERED_PROFILES,
+            },
+        ));
+    }
+
+    let storage_id = next_profile_storage_id().map_err(ProfileCatalogCreateError::Identity)?;
+    let root = catalog.root.join(generated_profile_root_name(storage_id));
+    match fs::create_dir(&root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(ProfileCatalogCreateError::RootCollision { path: root });
+        }
+        Err(error) => {
+            return Err(profile_create_io_error(
+                "create profile staging root",
+                &root,
+                error,
+            ));
+        }
+    }
+
+    let lock = ProfileLock::acquire(root.clone()).map_err(ProfileCatalogCreateError::Lock)?;
+    let initialization = (|| {
+        publish_profile_storage_id(&lock, storage_id)
+            .map_err(ProfileCatalogCreateError::Identity)?;
+        load_or_create_profile_metadata(&lock, storage_id, intent.display_name.clone())
+            .map_err(ProfileCatalogCreateError::Metadata)
+    })();
+
+    let metadata = match initialization {
+        Ok(metadata) => match lock.release() {
+            Ok(()) => metadata,
+            Err(release) => {
+                return Err(ProfileCatalogCreateError::LockRelease {
+                    initialization: None,
+                    release,
+                });
+            }
+        },
+        Err(initialization) => {
+            return match lock.release() {
+                Ok(()) => Err(initialization),
+                Err(release) => Err(ProfileCatalogCreateError::LockRelease {
+                    initialization: Some(Box::new(initialization)),
+                    release,
+                }),
+            };
+        }
+    };
+
+    let ready = root.join(PROFILE_READY_DIRECTORY_NAME);
+    match fs::create_dir(&ready) {
+        Ok(()) => {}
+        Err(error) => {
+            return Err(profile_create_io_error(
+                "publish completed profile root",
+                &ready,
+                error,
+            ));
+        }
+    }
+
+    Ok(ProfileCatalogEntry {
+        root,
+        storage_id: Some(storage_id),
+        metadata: Some(metadata),
+    })
+}
+
+fn rename_profile(
+    intent: &ProfileCatalogRenameIntent,
+) -> Result<ProfileMetadata, ProfileCatalogRenameError> {
+    let lock =
+        ProfileLock::acquire(intent.root.clone()).map_err(ProfileCatalogRenameError::Lock)?;
+    let operation = save_profile_metadata(
+        &lock,
+        intent.storage_id,
+        intent.expected_generation,
+        intent.display_name.clone(),
+    );
+    let release = lock.release();
+
+    match (operation, release) {
+        (Ok(metadata), Ok(())) => Ok(metadata),
+        (Err(operation), Ok(())) => Err(ProfileCatalogRenameError::Metadata(operation)),
+        (Err(operation), Err(release)) => Err(ProfileCatalogRenameError::LockRelease {
+            operation: Some(Box::new(operation)),
+            committed: None,
+            release,
+        }),
+        (Ok(metadata), Err(release)) => Err(ProfileCatalogRenameError::LockRelease {
+            operation: None,
+            committed: Some(metadata),
+            release,
+        }),
+    }
+}
+
+fn profile_create_io_error(
+    operation: &'static str,
+    path: &Path,
+    error: io::Error,
+) -> ProfileCatalogCreateError {
+    ProfileCatalogCreateError::Io {
+        operation,
+        path: path.to_owned(),
+        kind: error.kind(),
+    }
+}
+
 pub(crate) fn load_or_create_profile_storage_id(
     lock: &ProfileLock,
 ) -> Result<ProfileStorageId, ProfileIdentityError> {
