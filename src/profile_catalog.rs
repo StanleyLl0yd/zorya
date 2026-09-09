@@ -1061,11 +1061,6 @@ mod tests {
         }
     }
 
-    fn fixture_identity(root: &Path, id: ProfileStorageId) {
-        let directory = root.join(PROFILE_IDENTITY_DIRECTORY_NAME);
-        fs::create_dir_all(directory.join(identity_record_name(id))).unwrap();
-    }
-
     fn fixture_profile(root: &Path, id: ProfileStorageId, display_name: &str) {
         let lock = ProfileLock::acquire(root).unwrap();
         publish_profile_storage_id(&lock, id).unwrap();
