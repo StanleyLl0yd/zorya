@@ -1,3 +1,4 @@
+use crate::profile_lock::{ProfileLock, ProfileLockError, ProfileLockOwner};
 use crate::profile_runtime::{
     PreparedProfile, ProfileHistorySaveCompletion, ProfileHistorySaveIntent,
     ProfilePreparationError, ProfileSelectionId, ProfileSelectionIntent,
@@ -14,6 +15,7 @@ enum ProfileWorkerCommand {
     Prepare(ProfileSelectionIntent),
     SaveSettings(ProfileSettingsSaveIntent),
     SaveHistory(ProfileHistorySaveIntent),
+    ReleaseLock(ProfileLock),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -24,6 +26,10 @@ pub enum ProfileWorkerCompletion {
     },
     SettingsSaved(ProfileSettingsSaveCompletion),
     HistorySaved(ProfileHistorySaveCompletion),
+    LockReleased {
+        owner: ProfileLockOwner,
+        result: Result<(), ProfileLockError>,
+    },
 }
 
 #[derive(Debug)]
@@ -123,7 +129,9 @@ impl ProfileWorker {
             Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
             | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
             | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_))) => {
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(_))) => {
                 unreachable!("prepare submission preserves its command variant")
             }
         }
@@ -147,7 +155,9 @@ impl ProfileWorker {
             Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
             | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
             | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_))) => {
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(_))) => {
                 unreachable!("settings-save submission preserves its command variant")
             }
         }
@@ -171,8 +181,33 @@ impl ProfileWorker {
             Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
             | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
             | Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_))) => {
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(_))) => {
                 unreachable!("history-save submission preserves its command variant")
+            }
+        }
+    }
+
+    pub fn release_lock(
+        &self,
+        lock: ProfileLock,
+    ) -> Result<(), ProfileWorkerSubmitError<ProfileLock>> {
+        match self.sender.try_send(ProfileWorkerCommand::ReleaseLock(lock)) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(lock))) => {
+                Err(ProfileWorkerSubmitError::Full(lock))
+            }
+            Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(lock))) => {
+                Err(ProfileWorkerSubmitError::Unavailable(lock))
+            }
+            Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_))) => {
+                unreachable!("lock-release submission preserves its command variant")
             }
         }
     }
@@ -198,6 +233,11 @@ fn profile_worker_main(
             }
             ProfileWorkerCommand::SaveHistory(intent) => {
                 ProfileWorkerCompletion::HistorySaved(intent.execute())
+            }
+            ProfileWorkerCommand::ReleaseLock(lock) => {
+                let owner = lock.owner();
+                let result = lock.release();
+                ProfileWorkerCompletion::LockReleased { owner, result }
             }
         };
         completion_handler(completion);
