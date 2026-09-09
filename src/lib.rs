@@ -18,7 +18,8 @@ mod tab_close;
 mod tab_strip;
 
 pub use app::{
-    BrowserApp, BrowserModelError, BrowserWindow, BrowserWindowId, Tab, TabCloseResult, TabId,
+    BrowserApp, BrowserModelError, BrowserNavigationCommit, BrowserWindow, BrowserWindowId, Tab,
+    TabCloseResult, TabId,
 };
 pub use browsing_history::{
     BROWSING_HISTORY_SCHEMA_VERSION, BrowsingHistoryCleanupWarning, BrowsingHistoryError,

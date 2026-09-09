@@ -27,6 +27,25 @@ impl TabId {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserNavigationCommit {
+    window: BrowserWindowId,
+    tab: TabId,
+    navigation: NavigationId,
+    history_entry: HistoryEntryId,
+    kind: NavigationIntentKind,
+    location: String,
+}
+
+impl BrowserNavigationCommit {
+    pub const fn window(&self) -> BrowserWindowId { self.window }
+    pub const fn tab(&self) -> TabId { self.tab }
+    pub const fn navigation(&self) -> NavigationId { self.navigation }
+    pub const fn history_entry(&self) -> HistoryEntryId { self.history_entry }
+    pub const fn kind(&self) -> NavigationIntentKind { self.kind }
+    pub fn location(&self) -> &str { &self.location }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrowserModelError {
     WindowIdExhausted,
@@ -744,19 +763,18 @@ impl BrowserApp {
         tab: TabId,
         navigation: NavigationId,
         committed_location: impl Into<String>,
-    ) -> Result<HistoryEntryId, BrowserModelError> {
+    ) -> Result<BrowserNavigationCommit, BrowserModelError> {
         let kind = self.pending_kind(window, tab, navigation)?;
         let committed_location = committed_location.into();
 
-        match kind {
+        let history_entry = match kind {
             NavigationIntentKind::NewDocument => {
                 let entry_id = self.allocate_history_entry_id()?;
-                let entry = HistoryEntry::new(entry_id, committed_location);
-                Ok(self
-                    .tab_mut(window, tab)?
+                let entry = HistoryEntry::new(entry_id, committed_location.clone());
+                self.tab_mut(window, tab)?
                     .navigation
                     .commit_new(navigation, entry)
-                    .expect("pending navigation validated before commit"))
+                    .expect("pending navigation validated before commit")
             }
             NavigationIntentKind::Reload { entry }
             | NavigationIntentKind::TraverseHistory { entry } => {
@@ -768,13 +786,21 @@ impl BrowserApp {
                     return Err(BrowserModelError::MissingHistoryEntry { window, tab, entry });
                 }
 
-                Ok(self
-                    .tab_mut(window, tab)?
+                self.tab_mut(window, tab)?
                     .navigation
-                    .commit_existing(navigation, entry, committed_location)
-                    .expect("pending history navigation validated before commit"))
+                    .commit_existing(navigation, entry, committed_location.clone())
+                    .expect("pending history navigation validated before commit")
             }
-        }
+        };
+
+        Ok(BrowserNavigationCommit {
+            window,
+            tab,
+            navigation,
+            history_entry,
+            kind,
+            location: committed_location,
+        })
     }
 
     pub fn fail_navigation(
@@ -995,6 +1021,38 @@ mod tests {
     }
 
     #[test]
+    fn committed_navigation_reports_exact_product_identity_and_location() {
+        let mut app = BrowserApp::bootstrap().expect("bootstrap");
+        let (window, tab) = bootstrap_ids(&app);
+        let navigation = app
+            .begin_navigation(window, tab, "https://requested.example/")
+            .expect("begin navigation")
+            .intent()
+            .id();
+
+        let commit = app
+            .commit_navigation(
+                window,
+                tab,
+                navigation,
+                "https://committed.example/final",
+            )
+            .expect("commit navigation");
+
+        assert_eq!(commit.window(), window);
+        assert_eq!(commit.tab(), tab);
+        assert_eq!(commit.navigation(), navigation);
+        assert_eq!(commit.kind(), NavigationIntentKind::NewDocument);
+        assert_eq!(commit.location(), "https://committed.example/final");
+        assert_eq!(
+            app.window(window)
+                .and_then(|window| window.tab(tab))
+                .and_then(|tab| tab.navigation().current_entry_id()),
+            Some(commit.history_entry())
+        );
+    }
+
+    #[test]
     fn stale_navigation_cannot_commit_after_supersession() {
         let mut app = BrowserApp::bootstrap().expect("bootstrap");
         let (window, tab) = bootstrap_ids(&app);
@@ -1040,7 +1098,8 @@ mod tests {
             .id();
         let first_entry = app
             .commit_navigation(window, tab, first_navigation, "https://a.example/")
-            .expect("commit a");
+            .expect("commit a")
+            .history_entry();
 
         let second_navigation = app
             .begin_navigation(window, tab, "https://b.example/")
@@ -1049,7 +1108,8 @@ mod tests {
             .id();
         let second_entry = app
             .commit_navigation(window, tab, second_navigation, "https://b.example/")
-            .expect("commit b");
+            .expect("commit b")
+            .history_entry();
 
         let back = app
             .begin_back_navigation(window, tab)
@@ -1069,7 +1129,8 @@ mod tests {
             .id();
         let third_entry = app
             .commit_navigation(window, tab, navigation, "https://c.example/")
-            .expect("commit c");
+            .expect("commit c")
+            .history_entry();
 
         let state = app
             .window(window)
@@ -1095,7 +1156,8 @@ mod tests {
             .id();
         let entry = app
             .commit_navigation(window, tab, navigation, "https://example.com/")
-            .expect("commit");
+            .expect("commit")
+            .history_entry();
 
         let reload = app
             .begin_reload(window, tab)
@@ -1119,7 +1181,9 @@ mod tests {
             .and_then(|window| window.tab(tab))
             .expect("tab")
             .navigation();
-        assert_eq!(committed, entry);
+        assert_eq!(committed.history_entry(), entry);
+        assert_eq!(committed.kind(), NavigationIntentKind::Reload { entry });
+        assert_eq!(committed.location(), "https://example.com/final");
         assert_eq!(state.history().len(), 1);
         assert_eq!(state.current_entry_id(), Some(entry));
         assert_eq!(
@@ -1183,7 +1247,8 @@ mod tests {
                 first_navigation,
                 "https://first.example/",
             )
-            .expect("first commit");
+            .expect("first commit")
+            .history_entry();
 
         let second_navigation = app
             .begin_navigation(window, second_tab, "https://second.example/")
@@ -1197,7 +1262,8 @@ mod tests {
                 second_navigation,
                 "https://second.example/",
             )
-            .expect("second commit");
+            .expect("second commit")
+            .history_entry();
 
         assert!(second_navigation.get() > first_navigation.get());
         assert!(second_entry.get() > first_entry.get());
@@ -1992,7 +2058,8 @@ mod tests {
             .id();
         let entry = app
             .commit_navigation(window, tab, initial, "https://committed.example/")
-            .expect("initial commit");
+            .expect("initial commit")
+            .history_entry();
 
         let failing = app
             .begin_navigation(window, tab, "https://fail.example/")
