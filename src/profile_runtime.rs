@@ -810,10 +810,7 @@ mod tests {
         );
         assert!(loaded.browsing_history_recovery().is_none());
 
-        let first = runtime
-            .commit_selection(loaded)
-            .unwrap()
-            .active_profile();
+        let first = runtime.commit_selection(loaded).unwrap().active_profile();
         runtime
             .active_browsing_history_mut(first)
             .unwrap()
