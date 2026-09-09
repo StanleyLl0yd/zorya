@@ -2248,6 +2248,7 @@ impl NativeShell {
                 match result {
                     Ok(()) => {
                         self.pending_view_close = None;
+                        self.pending_navigation_targets.remove(&tab);
                         if self.run_mode == RunMode::ExitAfterTabClose {
                             self.shutdown(event_loop);
                             return;
