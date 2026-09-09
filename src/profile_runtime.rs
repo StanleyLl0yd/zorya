@@ -1650,7 +1650,9 @@ mod tests {
             .unwrap()
             .active_profile();
 
-        let identity_directory = first_root.path().join(crate::PROFILE_IDENTITY_DIRECTORY_NAME);
+        let identity_directory = first_root
+            .path()
+            .join(crate::PROFILE_IDENTITY_DIRECTORY_NAME);
         let identity_record = fs::read_dir(&identity_directory)
             .unwrap()
             .next()
@@ -1669,7 +1671,9 @@ mod tests {
             .begin_selection(second_root.path())
             .unwrap()
             .into_intent();
-        let rejection = runtime.commit_selection(prepared(&second_intent)).unwrap_err();
+        let rejection = runtime
+            .commit_selection(prepared(&second_intent))
+            .unwrap_err();
         assert_eq!(
             rejection.error(),
             &ProfileRuntimeError::DuplicateStorageIdentity {
