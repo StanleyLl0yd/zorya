@@ -1590,21 +1590,28 @@ mod tests {
     }
 
     #[test]
-    fn prepared_and_active_profile_preserve_persisted_storage_identity() {
+    fn prepared_and_active_profile_preserve_persisted_identity_and_metadata() {
         let root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
         let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
         let prepared = PreparedProfile::load(&intent).unwrap();
         let storage_id = prepared.storage_id();
+        let metadata = prepared.metadata().clone();
 
         assert_ne!(storage_id.get(), 0);
         assert_eq!(
             crate::load_profile_storage_id(root.path()).unwrap(),
             Some(storage_id)
         );
+        assert_eq!(
+            crate::load_profile_metadata(root.path(), storage_id).unwrap(),
+            Some(metadata.clone())
+        );
 
         runtime.commit_selection(prepared).unwrap();
-        assert_eq!(runtime.active_profile().unwrap().storage_id(), storage_id);
+        let active = runtime.active_profile().unwrap();
+        assert_eq!(active.storage_id(), storage_id);
+        assert_eq!(active.metadata(), &metadata);
     }
 
     #[test]
