@@ -1110,15 +1110,17 @@ impl NativeShell {
             return;
         }
 
+        let replacing = self.profile_runtime.active_profile().is_some();
+        if replacing && let Err(error) = self.enter_native_neutral() {
+            self.fail_with_rejected_profile(event_loop, prepared, error);
+            return;
+        }
+
         match self.profile_runtime.commit_selection(prepared) {
             Ok(commit) => {
                 if let Some(replaced) = commit.into_replaced_profile() {
                     debug_assert!(self.pending_profile_replacement.is_none());
                     self.replaced_profile_lock = Some(replaced.into_profile_lock());
-                    if let Err(error) = self.enter_native_neutral() {
-                        self.fail(event_loop, error);
-                        return;
-                    }
                     if let Err(error) = self.reset_native_session_for_profile_switch() {
                         self.fail(event_loop, error);
                         return;
@@ -1206,6 +1208,10 @@ impl NativeShell {
     fn continue_shutdown_after_profile_flush(&mut self, event_loop: &ActiveEventLoop) {
         if self.profile_lock_release_completed {
             self.finish_shutdown(event_loop);
+            return;
+        }
+        if self.profile_runtime.pending_selection().is_some() {
+            event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
         if self.pending_profile_lock_release.is_some() {
