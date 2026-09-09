@@ -12,9 +12,9 @@ use crate::{
     NavigationId, NavigationStart, PresentationFramePermit, PresentationGeneration,
     PresentationHandoffError, ProfileHistorySavePolicy, ProfileHistorySaveScheduler,
     ProfileHistorySaveUrgency, ProfileLockOwner, ProfileRuntime, ProfileSelectionIntent,
-    ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency, ProfileWorker,
-    ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection, TabId,
-    TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
+    ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency,
+    ProfileWorker, ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection,
+    TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
