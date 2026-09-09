@@ -684,6 +684,12 @@ impl NativeShell {
             })
     }
 
+    fn profile_cycle_smoke_trace(&self, stage: &str) {
+        if self.run_mode == RunMode::ExitAfterProfileCycle {
+            eprintln!("zorya profile-cycle smoke: {stage}");
+        }
+    }
+
     fn update_window_title(&self) {
         let title = self
             .profile_runtime
@@ -713,6 +719,7 @@ impl NativeShell {
         )
         .map_err(|error| format!("failed to build profile-cycle smoke profile: {error}"))?;
         self.profile_cycle_smoke_start = Some(active);
+        self.profile_cycle_smoke_trace("begin create");
         self.pending_profile_smoke_create = Some(PendingProfileSmokeCreate {
             intent,
             submitted: false,
@@ -734,6 +741,7 @@ impl NativeShell {
             .ok_or_else(|| "profile worker is unavailable for profile-cycle smoke".to_string())?;
         match worker.create_profile(intent) {
             Ok(()) => {
+                self.profile_cycle_smoke_trace("create submitted");
                 self.pending_profile_smoke_create
                     .as_mut()
                     .expect("profile-cycle smoke creation remains pending")
@@ -769,6 +777,7 @@ impl NativeShell {
             return Ok(());
         }
         self.active_profile_id()?;
+        self.profile_cycle_smoke_trace("begin catalog discovery");
         let intent = ProfileCatalogDiscoverIntent::new(self.profiles_root.clone());
         self.pending_profile_catalog_discovery = Some(PendingProfileCatalogDiscovery {
             intent,
@@ -791,6 +800,7 @@ impl NativeShell {
             .ok_or_else(|| "profile worker is unavailable for catalog discovery".to_string())?;
         match worker.discover_profiles(intent) {
             Ok(()) => {
+                self.profile_cycle_smoke_trace("catalog discovery submitted");
                 self.pending_profile_catalog_discovery
                     .as_mut()
                     .expect("catalog discovery remains pending")
@@ -837,6 +847,7 @@ impl NativeShell {
         if start.superseded().is_some() {
             return Err("profile cycle unexpectedly superseded an existing selection".into());
         }
+        self.profile_cycle_smoke_trace("catalog selected replacement");
         self.pending_profile_selection_submission = Some(start.into_intent());
         self.drive_pending_profile_selection_submission()
     }
@@ -851,7 +862,10 @@ impl NativeShell {
             .as_ref()
             .ok_or_else(|| "profile worker is unavailable for profile selection".to_string())?;
         match worker.prepare(intent) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.profile_cycle_smoke_trace("selection prepare submitted");
+                Ok(())
+            }
             Err(error) if error.is_full() => {
                 let returned = error.into_work();
                 debug_assert_eq!(returned.id(), selection);
@@ -931,6 +945,7 @@ impl NativeShell {
                 .complete_if_current(target);
             return Err(error);
         }
+        self.profile_cycle_smoke_trace("session reset submitted");
         Ok(())
     }
 
@@ -1201,6 +1216,7 @@ impl NativeShell {
                 if let Some(replaced) = commit.into_replaced_profile() {
                     debug_assert!(self.pending_profile_replacement.is_none());
                     self.replaced_profile_lock = Some(replaced.into_profile_lock());
+                    self.profile_cycle_smoke_trace("selection committed");
                     if let Err(error) = self.reset_native_session_for_profile_switch() {
                         self.fail(event_loop, error);
                         return;
@@ -1540,6 +1556,7 @@ impl NativeShell {
                     return;
                 }
 
+                self.profile_cycle_smoke_trace("selection prepared");
                 self.commit_prepared_profile(event_loop, selection, prepared);
             }
             ProfileWorkerCompletion::LockReleased { owner, result } => {
@@ -1596,6 +1613,7 @@ impl NativeShell {
                     }
                     ProfileLockReleasePurpose::ReplacedProfile => {
                         self.replaced_profile_lock = None;
+                        self.profile_cycle_smoke_trace("replaced lock released");
                         if self.shutdown_requested {
                             match self.profile_flush_complete() {
                                 Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
@@ -1706,6 +1724,7 @@ impl NativeShell {
                 }
             }
             ProfileWorkerCompletion::CatalogDiscovered { intent, result } => {
+                self.profile_cycle_smoke_trace("catalog discovery completed");
                 let Some(pending) = self.pending_profile_catalog_discovery.take() else {
                     self.fail(
                         event_loop,
@@ -1743,6 +1762,7 @@ impl NativeShell {
                 }
             }
             ProfileWorkerCompletion::ProfileCreated { intent, result } => {
+                self.profile_cycle_smoke_trace("create completed");
                 let Some(pending) = self.pending_profile_smoke_create.take() else {
                     self.fail(
                         event_loop,
@@ -2819,6 +2839,7 @@ impl NativeShell {
                 }
             }
             WorkerEvent::ProfileSessionReset { target, result } => {
+                self.profile_cycle_smoke_trace("session reset completion event");
                 if !self
                     .pending_profile_session_reset
                     .complete_if_current(target)
@@ -3018,6 +3039,7 @@ impl NativeShell {
                                 self.request_redraw();
                             }
                         } else if self.run_mode == RunMode::ExitAfterProfileCycle {
+                            self.profile_cycle_smoke_trace("profile-cycle frame presented");
                             if let Some(start) = self.profile_cycle_smoke_start {
                                 let Some(active) = self
                                     .profile_runtime
