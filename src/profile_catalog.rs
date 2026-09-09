@@ -513,6 +513,11 @@ impl ProfileCatalog {
         let root = root.into();
         fs::create_dir_all(&root)
             .map_err(|error| catalog_io_error("create profile catalog root", &root, error))?;
+        let metadata = fs::symlink_metadata(&root)
+            .map_err(|error| catalog_io_error("inspect profile catalog root", &root, error))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ProfileCatalogError::UnsupportedEntry { path: root });
+        }
         Ok(Self { root })
     }
 
