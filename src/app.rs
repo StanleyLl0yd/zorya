@@ -485,16 +485,30 @@ impl BrowserApp {
         self.windows.remove(&id)
     }
 
+    pub fn reset_window_for_profile_switch(
+        &mut self,
+        window: BrowserWindowId,
+    ) -> Result<TabId, BrowserModelError> {
+        if !self.windows.contains_key(&window) {
+            return Err(BrowserModelError::UnknownWindow(window));
+        }
+
+        let tab = self.allocate_tab_id()?;
+        let mut replacement = BrowserWindow::new(window);
+        replacement.insert_tab(Tab {
+            id: tab,
+            navigation: TabNavigation::default(),
+        });
+        self.windows.insert(window, replacement);
+        Ok(tab)
+    }
+
     pub fn create_tab(&mut self, window: BrowserWindowId) -> Result<TabId, BrowserModelError> {
         if !self.windows.contains_key(&window) {
             return Err(BrowserModelError::UnknownWindow(window));
         }
 
-        let id = TabId(self.next_tab_id);
-        self.next_tab_id = self
-            .next_tab_id
-            .checked_add(1)
-            .ok_or(BrowserModelError::TabIdExhausted)?;
+        let id = self.allocate_tab_id()?;
 
         self.windows
             .get_mut(&window)
@@ -896,6 +910,15 @@ impl BrowserApp {
         self.tab(window, tab).map(|_| ())
     }
 
+    fn allocate_tab_id(&mut self) -> Result<TabId, BrowserModelError> {
+        let id = TabId(self.next_tab_id);
+        self.next_tab_id = self
+            .next_tab_id
+            .checked_add(1)
+            .ok_or(BrowserModelError::TabIdExhausted)?;
+        Ok(id)
+    }
+
     fn allocate_tab_activation_id(&mut self) -> Result<TabActivationId, BrowserModelError> {
         let id = TabActivationId(self.next_tab_activation_id);
         self.next_tab_activation_id = self
@@ -945,6 +968,43 @@ mod tests {
         assert_eq!(windows[0].tabs().len(), 1);
         assert_eq!(windows[0].active_tab_id(), Some(windows[0].tabs()[0].id()));
         assert!(windows[0].tabs()[0].navigation().history().is_empty());
+    }
+
+    #[test]
+    fn profile_switch_reset_replaces_all_tab_session_state_with_fresh_identity() {
+        let mut app = BrowserApp::bootstrap().expect("bootstrap");
+        let (window, first) = bootstrap_ids(&app);
+        let navigation = app
+            .begin_navigation(window, first, "https://old.example/")
+            .expect("old navigation")
+            .intent()
+            .id();
+        app.commit_navigation(window, first, navigation, "https://old.example/")
+            .expect("old commit");
+        let second = app.create_tab(window).expect("second tab");
+        app.set_active_tab(window, second).expect("activate second");
+        app.begin_address_bar_edit(window).expect("address edit");
+
+        let fresh = app
+            .reset_window_for_profile_switch(window)
+            .expect("profile switch reset");
+
+        assert!(fresh.get() > second.get());
+        let reset = app.window(window).expect("window survives reset");
+        assert_eq!(reset.tabs().len(), 1);
+        assert_eq!(reset.active_tab_id(), Some(fresh));
+        assert!(reset.tabs()[0].navigation().history().is_empty());
+        assert!(reset.tabs()[0].navigation().pending().is_none());
+        assert!(reset.pending_tab_activation().is_none());
+        assert!(reset.address_bar().edit().is_none());
+        assert!(matches!(
+            app.set_active_tab(window, first),
+            Err(BrowserModelError::UnknownTab { tab, .. }) if tab == first
+        ));
+        assert!(matches!(
+            app.set_active_tab(window, second),
+            Err(BrowserModelError::UnknownTab { tab, .. }) if tab == second
+        ));
     }
 
     #[test]
