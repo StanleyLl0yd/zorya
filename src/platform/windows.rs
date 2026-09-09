@@ -2278,6 +2278,7 @@ impl NativeShell {
                     return;
                 }
                 if !self.navigation_target_is_current(target) {
+                    self.clear_navigation_target_if_current(target);
                     return;
                 }
 
