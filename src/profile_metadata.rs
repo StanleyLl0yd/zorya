@@ -321,14 +321,20 @@ fn publish_metadata_record(
     display_name: ProfileDisplayName,
 ) -> Result<ProfileMetadata, ProfileMetadataError> {
     let directory = ensure_metadata_directory(lock.root())?;
-    let count = fs::read_dir(&directory)
-        .map_err(|error| metadata_io_error("read profile metadata directory", &directory, error))?
-        .count();
-    if count >= MAX_PROFILE_METADATA_DIRECTORY_ENTRIES {
-        return Err(ProfileMetadataError::DirectoryEntryLimitExceeded {
-            found: count,
-            limit: MAX_PROFILE_METADATA_DIRECTORY_ENTRIES,
-        });
+    let entries = fs::read_dir(&directory)
+        .map_err(|error| metadata_io_error("read profile metadata directory", &directory, error))?;
+    let mut count = 0_usize;
+    for entry in entries {
+        entry.map_err(|error| {
+            metadata_io_error("read profile metadata entry", &directory, error)
+        })?;
+        count = count.saturating_add(1);
+        if count >= MAX_PROFILE_METADATA_DIRECTORY_ENTRIES {
+            return Err(ProfileMetadataError::DirectoryEntryLimitExceeded {
+                found: count,
+                limit: MAX_PROFILE_METADATA_DIRECTORY_ENTRIES,
+            });
+        }
     }
 
     let metadata = ProfileMetadata {
