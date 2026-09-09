@@ -583,6 +583,88 @@ mod tests {
     }
 
     #[test]
+    fn replacement_flushes_old_profile_before_worker_lock_release() {
+        let first_root = TempRoot::new("replacement-first");
+        let second_root = TempRoot::new("replacement-second");
+        let mut runtime = ProfileRuntime::new();
+        let first_selection = runtime
+            .begin_selection(first_root.path())
+            .unwrap()
+            .into_intent();
+        let first = runtime
+            .commit_selection(PreparedProfile::load(&first_selection).unwrap())
+            .unwrap()
+            .active_profile();
+        runtime
+            .active_settings_mut(first)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+        runtime
+            .active_browsing_history_mut(first)
+            .unwrap()
+            .record_visit(1, "https://example.test/old")
+            .unwrap();
+
+        let second_selection = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
+        let (worker, receiver) = worker_channel();
+        worker.prepare(second_selection).unwrap();
+        let (_, completion) = receive(&receiver);
+        let ProfileWorkerCompletion::Prepared { result, .. } = completion else {
+            panic!("expected prepared replacement profile");
+        };
+        let rejection = runtime.commit_selection(result.unwrap()).unwrap_err();
+        assert_eq!(
+            rejection.error(),
+            &ProfileRuntimeError::ActiveProfileNotDurable { profile: first }
+        );
+        let prepared = rejection.into_parts().1;
+
+        let settings = runtime.begin_settings_save(first).unwrap();
+        worker.save_settings(settings).unwrap();
+        let (_, completion) = receive(&receiver);
+        let ProfileWorkerCompletion::SettingsSaved(completion) = completion else {
+            panic!("expected settings-save completion");
+        };
+        runtime.complete_settings_save(completion).unwrap();
+
+        let history = runtime.begin_browsing_history_save(first).unwrap();
+        worker.save_history(history).unwrap();
+        let (_, completion) = receive(&receiver);
+        let ProfileWorkerCompletion::HistorySaved(completion) = completion else {
+            panic!("expected history-save completion");
+        };
+        runtime.complete_browsing_history_save(completion).unwrap();
+
+        assert!(!runtime.settings_is_dirty(first).unwrap());
+        assert!(!runtime.browsing_history_is_dirty(first).unwrap());
+        let commit = runtime.commit_selection(prepared).unwrap();
+        let second = commit.active_profile();
+        assert_ne!(first, second);
+
+        let replaced = commit.into_replaced_profile().unwrap();
+        let lock = replaced.into_profile_lock();
+        let owner = lock.owner();
+        worker.release_lock(lock).unwrap();
+        let (_, completion) = receive(&receiver);
+        let ProfileWorkerCompletion::LockReleased {
+            owner: completed_owner,
+            result,
+        } = completion
+        else {
+            panic!("expected replaced profile-lock release completion");
+        };
+        assert_eq!(completed_owner, owner);
+        assert!(result.is_ok());
+
+        let reacquired = ProfileLock::acquire(first_root.path()).unwrap();
+        reacquired.release().unwrap();
+    }
+
+    #[test]
     fn stale_preparation_completion_is_rejected_by_profile_runtime() {
         let first_root = TempRoot::new("stale-first");
         let second_root = TempRoot::new("stale-second");
