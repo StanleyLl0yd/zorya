@@ -12,6 +12,7 @@ mod navigation;
 mod platform;
 mod presentation_handoff;
 mod profile;
+mod profile_history_scheduler;
 mod profile_runtime;
 mod tab_activation;
 mod tab_close;
@@ -41,6 +42,10 @@ pub use profile::{
     MAX_SETTING_KEY_BYTES, MAX_SETTING_VALUE_BYTES, MAX_SETTINGS_ENTRIES,
     MAX_SETTINGS_RECORD_BYTES, ProfileStorageError, ProfileStore, SETTINGS_SCHEMA_VERSION,
     SettingsCleanupWarning, SettingsLoad, SettingsRecovery, SettingsSave, SettingsSnapshot,
+};
+pub use profile_history_scheduler::{
+    ProfileHistorySavePolicy, ProfileHistorySavePolicyError, ProfileHistorySaveScheduler,
+    ProfileHistorySaveUrgency,
 };
 pub use profile_runtime::{
     ActiveProfile, ColorSchemePreference, PreparedProfile, ProductSettings,

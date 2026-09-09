@@ -779,6 +779,24 @@ impl ProfileRuntime {
         Ok(self.browsing_history_unsaved_mutations(profile)? != 0)
     }
 
+    pub fn browsing_history_mutation_revision(
+        &self,
+        profile: ProfileId,
+    ) -> Result<u64, ProfileRuntimeError> {
+        let expected = self.active.as_ref().map(ActiveProfile::id);
+        if expected != Some(profile) {
+            return Err(ProfileRuntimeError::StaleProfile {
+                expected,
+                actual: profile,
+            });
+        }
+        Ok(self
+            .active
+            .as_ref()
+            .expect("active profile was validated")
+            .browsing_history_revision)
+    }
+
     pub fn active_browsing_history(
         &self,
         profile: ProfileId,
