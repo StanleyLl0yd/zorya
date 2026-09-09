@@ -1,6 +1,6 @@
 use crate::profile_runtime::{
-    PreparedProfile, ProfileHistorySaveCompletion, ProfileHistorySaveIntent, ProfilePreparationError,
-    ProfileSelectionId, ProfileSelectionIntent,
+    PreparedProfile, ProfileHistorySaveCompletion, ProfileHistorySaveIntent,
+    ProfilePreparationError, ProfileSelectionId, ProfileSelectionIntent,
 };
 use std::fmt;
 use std::io;
