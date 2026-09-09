@@ -1,3 +1,4 @@
+use crate::profile_lock::{ProfileLock, ProfileLockError, ProfileLockOwner};
 use crate::profile_runtime::{
     PreparedProfile, ProfileHistorySaveCompletion, ProfileHistorySaveIntent,
     ProfilePreparationError, ProfileSelectionId, ProfileSelectionIntent,
@@ -14,6 +15,7 @@ enum ProfileWorkerCommand {
     Prepare(ProfileSelectionIntent),
     SaveSettings(ProfileSettingsSaveIntent),
     SaveHistory(ProfileHistorySaveIntent),
+    ReleaseLock(ProfileLock),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -24,6 +26,10 @@ pub enum ProfileWorkerCompletion {
     },
     SettingsSaved(ProfileSettingsSaveCompletion),
     HistorySaved(ProfileHistorySaveCompletion),
+    LockReleased {
+        owner: ProfileLockOwner,
+        result: Result<(), ProfileLockError>,
+    },
 }
 
 #[derive(Debug)]
@@ -52,8 +58,8 @@ impl std::error::Error for ProfileWorkerSpawnError {}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProfileWorkerSubmitError<T> {
-    Full(T),
-    Unavailable(T),
+    Full(Box<T>),
+    Unavailable(Box<T>),
 }
 
 impl<T> ProfileWorkerSubmitError<T> {
@@ -63,7 +69,7 @@ impl<T> ProfileWorkerSubmitError<T> {
 
     pub fn into_work(self) -> T {
         match self {
-            Self::Full(work) | Self::Unavailable(work) => work,
+            Self::Full(work) | Self::Unavailable(work) => *work,
         }
     }
 }
@@ -115,15 +121,17 @@ impl ProfileWorker {
         match self.sender.try_send(ProfileWorkerCommand::Prepare(intent)) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(ProfileWorkerCommand::Prepare(intent))) => {
-                Err(ProfileWorkerSubmitError::Full(intent))
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
             }
             Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(intent))) => {
-                Err(ProfileWorkerSubmitError::Unavailable(intent))
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
             }
             Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
             | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
             | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_))) => {
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(_))) => {
                 unreachable!("prepare submission preserves its command variant")
             }
         }
@@ -139,15 +147,17 @@ impl ProfileWorker {
         {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(intent))) => {
-                Err(ProfileWorkerSubmitError::Full(intent))
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
             }
             Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(intent))) => {
-                Err(ProfileWorkerSubmitError::Unavailable(intent))
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
             }
             Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
             | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
             | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_))) => {
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(_))) => {
                 unreachable!("settings-save submission preserves its command variant")
             }
         }
@@ -163,16 +173,44 @@ impl ProfileWorker {
         {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(intent))) => {
-                Err(ProfileWorkerSubmitError::Full(intent))
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
             }
             Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(intent))) => {
-                Err(ProfileWorkerSubmitError::Unavailable(intent))
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
             }
             Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
             | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
             | Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_))) => {
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(_))) => {
                 unreachable!("history-save submission preserves its command variant")
+            }
+        }
+    }
+
+    pub fn release_lock(
+        &self,
+        lock: ProfileLock,
+    ) -> Result<(), ProfileWorkerSubmitError<ProfileLock>> {
+        match self
+            .sender
+            .try_send(ProfileWorkerCommand::ReleaseLock(lock))
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(lock))) => {
+                Err(ProfileWorkerSubmitError::Full(Box::new(lock)))
+            }
+            Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(lock))) => {
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(lock)))
+            }
+            Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
+            | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
+            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_))) => {
+                unreachable!("lock-release submission preserves its command variant")
             }
         }
     }
@@ -198,6 +236,11 @@ fn profile_worker_main(
             }
             ProfileWorkerCommand::SaveHistory(intent) => {
                 ProfileWorkerCompletion::HistorySaved(intent.execute())
+            }
+            ProfileWorkerCommand::ReleaseLock(lock) => {
+                let owner = lock.owner();
+                let result = lock.release();
+                ProfileWorkerCompletion::LockReleased { owner, result }
             }
         };
         completion_handler(completion);
@@ -256,6 +299,30 @@ mod tests {
         receiver: &mpsc::Receiver<(String, ProfileWorkerCompletion)>,
     ) -> (String, ProfileWorkerCompletion) {
         receiver.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+
+    #[test]
+    fn lock_release_executes_on_named_worker() {
+        let root = TempRoot::new("lock-release");
+        let lock = ProfileLock::acquire(root.path()).unwrap();
+        let owner = lock.owner();
+        let (worker, receiver) = worker_channel();
+
+        worker.release_lock(lock).unwrap();
+        let (thread_name, completion) = receive(&receiver);
+        assert_eq!(thread_name, "zorya-profile");
+        let ProfileWorkerCompletion::LockReleased {
+            owner: completed_owner,
+            result,
+        } = completion
+        else {
+            panic!("expected profile-lock release completion");
+        };
+        assert_eq!(completed_owner, owner);
+        assert!(result.is_ok());
+
+        let reacquired = ProfileLock::acquire(root.path()).unwrap();
+        reacquired.release().unwrap();
     }
 
     #[test]
@@ -538,13 +605,25 @@ mod tests {
             panic!("expected prepared profile completion");
         };
         assert_eq!(selection, first_id);
+        let rejection = runtime.commit_selection(result.unwrap()).unwrap_err();
         assert!(matches!(
-            runtime.commit_selection(result.unwrap()),
-            Err(ProfileRuntimeError::StaleSelection {
+            rejection.error(),
+            ProfileRuntimeError::StaleSelection {
                 expected: Some(expected),
                 actual,
-            }) if expected == second_id && actual == first_id
+            } if *expected == second_id && *actual == first_id
         ));
+        let rejected_lock = rejection.into_parts().1.into_profile_lock();
+        let rejected_owner = rejected_lock.owner();
+        worker.release_lock(rejected_lock).unwrap();
+        let (_, completion) = receive(&receiver);
+        let ProfileWorkerCompletion::LockReleased { owner, result } = completion else {
+            panic!("expected rejected profile-lock release completion");
+        };
+        assert_eq!(owner, rejected_owner);
+        assert!(result.is_ok());
+        let reacquired = ProfileLock::acquire(first_root.path()).unwrap();
+        reacquired.release().unwrap();
 
         worker.prepare(second).unwrap();
         let (_, completion) = receive(&receiver);

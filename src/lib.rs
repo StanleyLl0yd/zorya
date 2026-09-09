@@ -13,6 +13,7 @@ mod platform;
 mod presentation_handoff;
 mod profile;
 mod profile_history_scheduler;
+mod profile_lock;
 mod profile_runtime;
 mod profile_settings_scheduler;
 mod profile_worker;
@@ -49,12 +50,16 @@ pub use profile_history_scheduler::{
     ProfileHistorySavePolicy, ProfileHistorySavePolicyError, ProfileHistorySaveScheduler,
     ProfileHistorySaveUrgency,
 };
+pub use profile_lock::{
+    MAX_PROFILE_LOCK_BYTES, PROFILE_LOCK_FILE_NAME, ProfileLock, ProfileLockError, ProfileLockOwner,
+};
 pub use profile_runtime::{
     ActiveProfile, ColorSchemePreference, PreparedProfile, ProductSettings,
     ProfileHistorySaveCompletion, ProfileHistorySaveId, ProfileHistorySaveIntent, ProfileId,
     ProfilePreparationError, ProfileRuntime, ProfileRuntimeError, ProfileSelectionCommit,
-    ProfileSelectionId, ProfileSelectionIntent, ProfileSelectionStart, ProfileSettingsError,
-    ProfileSettingsSaveCompletion, ProfileSettingsSaveId, ProfileSettingsSaveIntent,
+    ProfileSelectionCommitError, ProfileSelectionId, ProfileSelectionIntent, ProfileSelectionStart,
+    ProfileSettingsError, ProfileSettingsSaveCompletion, ProfileSettingsSaveId,
+    ProfileSettingsSaveIntent,
 };
 pub use profile_settings_scheduler::{
     ProfileSettingsSavePolicy, ProfileSettingsSavePolicyError, ProfileSettingsSaveScheduler,

@@ -6,6 +6,7 @@ use crate::browsing_history::{
 use crate::profile::{
     ProfileStorageError, ProfileStore, SettingsRecovery, SettingsSave, SettingsSnapshot,
 };
+use crate::profile_lock::{ProfileLock, ProfileLockError};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -218,6 +219,7 @@ impl std::error::Error for ProfileSettingsError {
 pub struct PreparedProfile {
     selection: ProfileSelectionId,
     root: PathBuf,
+    lock: ProfileLock,
     settings: ProductSettings,
     settings_recovery: Option<SettingsRecovery>,
     browsing_history: BrowsingHistorySnapshot,
@@ -226,26 +228,52 @@ pub struct PreparedProfile {
 
 impl PreparedProfile {
     pub fn load(intent: &ProfileSelectionIntent) -> Result<Self, ProfilePreparationError> {
-        let store =
-            ProfileStore::open(intent.root.clone()).map_err(ProfilePreparationError::Storage)?;
-        let load = store
-            .load_settings()
-            .map_err(ProfilePreparationError::Storage)?;
-        let settings_recovery = load.recovery().cloned();
-        let settings = ProductSettings::from_snapshot(load.into_snapshot())
-            .map_err(ProfilePreparationError::Settings)?;
+        let lock =
+            ProfileLock::acquire(intent.root.clone()).map_err(ProfilePreparationError::Lock)?;
+        let prepared = (|| {
+            let store = ProfileStore::open(intent.root.clone())
+                .map_err(ProfilePreparationError::Storage)?;
+            let load = store
+                .load_settings()
+                .map_err(ProfilePreparationError::Storage)?;
+            let settings_recovery = load.recovery().cloned();
+            let settings = ProductSettings::from_snapshot(load.into_snapshot())
+                .map_err(ProfilePreparationError::Settings)?;
 
-        let history_store = BrowsingHistoryStore::open(intent.root.clone())
-            .map_err(ProfilePreparationError::BrowsingHistory)?;
-        let history_load = history_store
-            .load()
-            .map_err(ProfilePreparationError::BrowsingHistory)?;
-        let browsing_history_recovery = history_load.recovery().cloned();
-        let browsing_history = history_load.into_snapshot();
+            let history_store = BrowsingHistoryStore::open(intent.root.clone())
+                .map_err(ProfilePreparationError::BrowsingHistory)?;
+            let history_load = history_store
+                .load()
+                .map_err(ProfilePreparationError::BrowsingHistory)?;
+            let browsing_history_recovery = history_load.recovery().cloned();
+            let browsing_history = history_load.into_snapshot();
+
+            Ok((
+                settings,
+                settings_recovery,
+                browsing_history,
+                browsing_history_recovery,
+            ))
+        })();
+
+        let (settings, settings_recovery, browsing_history, browsing_history_recovery) =
+            match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return match lock.release() {
+                        Ok(()) => Err(error),
+                        Err(release) => Err(ProfilePreparationError::LockRelease {
+                            preparation: Box::new(error),
+                            release,
+                        }),
+                    };
+                }
+            };
 
         Ok(Self {
             selection: intent.id,
             root: intent.root.clone(),
+            lock,
             settings,
             settings_recovery,
             browsing_history,
@@ -276,21 +304,39 @@ impl PreparedProfile {
     pub const fn browsing_history_recovery(&self) -> Option<&BrowsingHistoryRecovery> {
         self.browsing_history_recovery.as_ref()
     }
+
+    #[cfg(any(test, target_os = "windows"))]
+    pub(crate) fn into_profile_lock(self) -> ProfileLock {
+        self.lock
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfilePreparationError {
+    Lock(ProfileLockError),
     Storage(ProfileStorageError),
     Settings(ProfileSettingsError),
     BrowsingHistory(crate::browsing_history::BrowsingHistoryError),
+    LockRelease {
+        preparation: Box<ProfilePreparationError>,
+        release: ProfileLockError,
+    },
 }
 
 impl fmt::Display for ProfilePreparationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Lock(error) => error.fmt(formatter),
             Self::Storage(error) => error.fmt(formatter),
             Self::Settings(error) => error.fmt(formatter),
             Self::BrowsingHistory(error) => error.fmt(formatter),
+            Self::LockRelease {
+                preparation,
+                release,
+            } => write!(
+                formatter,
+                "profile preparation failed: {preparation}; failed to release acquired profile lock: {release}"
+            ),
         }
     }
 }
@@ -298,9 +344,11 @@ impl fmt::Display for ProfilePreparationError {
 impl std::error::Error for ProfilePreparationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Lock(error) => Some(error),
             Self::Storage(error) => Some(error),
             Self::Settings(error) => Some(error),
             Self::BrowsingHistory(error) => Some(error),
+            Self::LockRelease { preparation, .. } => Some(preparation.as_ref()),
         }
     }
 }
@@ -309,6 +357,7 @@ impl std::error::Error for ProfilePreparationError {
 pub struct ActiveProfile {
     id: ProfileId,
     root: PathBuf,
+    lock: ProfileLock,
     settings: ProductSettings,
     settings_recovery: Option<SettingsRecovery>,
     browsing_history: BrowsingHistorySnapshot,
@@ -326,6 +375,11 @@ impl ActiveProfile {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) const fn profile_lock(&self) -> &ProfileLock {
+        &self.lock
     }
 
     pub const fn settings(&self) -> &ProductSettings {
@@ -359,6 +413,7 @@ pub struct ProfileSettingsSaveIntent {
     id: ProfileSettingsSaveId,
     profile: ProfileId,
     root: PathBuf,
+    lock: ProfileLock,
     snapshot: SettingsSnapshot,
     mutation_revision: u64,
 }
@@ -387,7 +442,7 @@ impl ProfileSettingsSaveIntent {
     pub fn execute(self) -> ProfileSettingsSaveCompletion {
         let base_generation = self.snapshot.generation();
         let result = ProfileStore::open(self.root.clone())
-            .and_then(|store| store.save_settings(&self.snapshot));
+            .and_then(|store| store.save_settings(&self.lock, &self.snapshot));
         ProfileSettingsSaveCompletion {
             id: self.id,
             profile: self.profile,
@@ -457,6 +512,7 @@ pub struct ProfileHistorySaveIntent {
     id: ProfileHistorySaveId,
     profile: ProfileId,
     root: PathBuf,
+    lock: ProfileLock,
     snapshot: BrowsingHistorySnapshot,
     mutation_revision: u64,
 }
@@ -485,7 +541,7 @@ impl ProfileHistorySaveIntent {
     pub fn execute(self) -> ProfileHistorySaveCompletion {
         let base_generation = self.snapshot.generation();
         let result = BrowsingHistoryStore::open(self.root.clone())
-            .and_then(|store| store.save(&self.snapshot));
+            .and_then(|store| store.save(&self.lock, &self.snapshot));
         ProfileHistorySaveCompletion {
             id: self.id,
             profile: self.profile,
@@ -568,6 +624,39 @@ impl ProfileSelectionCommit {
 
     pub fn into_replaced_profile(self) -> Option<ActiveProfile> {
         self.replaced_profile
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[must_use = "a rejected prepared profile still owns its exact profile lock"]
+pub struct ProfileSelectionCommitError {
+    error: ProfileRuntimeError,
+    prepared: Box<PreparedProfile>,
+}
+
+impl ProfileSelectionCommitError {
+    pub const fn error(&self) -> &ProfileRuntimeError {
+        &self.error
+    }
+
+    pub fn prepared(&self) -> &PreparedProfile {
+        self.prepared.as_ref()
+    }
+
+    pub fn into_parts(self) -> (ProfileRuntimeError, PreparedProfile) {
+        (self.error, *self.prepared)
+    }
+}
+
+impl fmt::Display for ProfileSelectionCommitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ProfileSelectionCommitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }
 
@@ -837,12 +926,15 @@ impl ProfileRuntime {
     pub fn commit_selection(
         &mut self,
         prepared: PreparedProfile,
-    ) -> Result<ProfileSelectionCommit, ProfileRuntimeError> {
+    ) -> Result<ProfileSelectionCommit, ProfileSelectionCommitError> {
         let expected = self.pending.as_ref().map(ProfileSelectionIntent::id);
         if expected != Some(prepared.selection) {
-            return Err(ProfileRuntimeError::StaleSelection {
-                expected,
-                actual: prepared.selection,
+            return Err(ProfileSelectionCommitError {
+                error: ProfileRuntimeError::StaleSelection {
+                    expected,
+                    actual: prepared.selection,
+                },
+                prepared: Box::new(prepared),
             });
         }
         if self
@@ -850,20 +942,26 @@ impl ProfileRuntime {
             .as_ref()
             .is_some_and(|intent| intent.root != prepared.root)
         {
-            return Err(ProfileRuntimeError::SelectionTargetMismatch {
-                selection: prepared.selection,
+            let selection = prepared.selection;
+            return Err(ProfileSelectionCommitError {
+                error: ProfileRuntimeError::SelectionTargetMismatch { selection },
+                prepared: Box::new(prepared),
             });
         }
 
         let id = ProfileId(self.next_profile_id);
-        self.next_profile_id = self
-            .next_profile_id
-            .checked_add(1)
-            .ok_or(ProfileRuntimeError::ProfileIdExhausted)?;
+        let Some(next_profile_id) = self.next_profile_id.checked_add(1) else {
+            return Err(ProfileSelectionCommitError {
+                error: ProfileRuntimeError::ProfileIdExhausted,
+                prepared: Box::new(prepared),
+            });
+        };
+        self.next_profile_id = next_profile_id;
         self.pending = None;
         let active = ActiveProfile {
             id,
             root: prepared.root,
+            lock: prepared.lock,
             settings: prepared.settings,
             settings_recovery: prepared.settings_recovery,
             browsing_history: prepared.browsing_history,
@@ -973,6 +1071,7 @@ impl ProfileRuntime {
 
         let active = self.active.as_ref().expect("active profile was validated");
         let root = active.root.clone();
+        let lock = active.lock.clone();
         let snapshot = active.settings.snapshot().clone();
         let base_generation = snapshot.generation();
         let mutation_revision = active.settings_revision;
@@ -991,6 +1090,7 @@ impl ProfileRuntime {
             id,
             profile,
             root,
+            lock,
             snapshot,
             mutation_revision,
         })
@@ -1203,6 +1303,7 @@ impl ProfileRuntime {
 
         let active = self.active.as_ref().expect("active profile was validated");
         let root = active.root.clone();
+        let lock = active.lock.clone();
         let snapshot = active.browsing_history.clone();
         let base_generation = snapshot.generation();
         let mutation_revision = active.browsing_history_revision;
@@ -1221,6 +1322,7 @@ impl ProfileRuntime {
             id,
             profile,
             root,
+            lock,
             snapshot,
             mutation_revision,
         })
@@ -1329,14 +1431,7 @@ mod tests {
     }
 
     fn prepared(intent: &ProfileSelectionIntent) -> PreparedProfile {
-        PreparedProfile {
-            selection: intent.id,
-            root: intent.root.clone(),
-            settings: ProductSettings::from_snapshot(SettingsSnapshot::default()).unwrap(),
-            settings_recovery: None,
-            browsing_history: BrowsingHistorySnapshot::default(),
-            browsing_history_recovery: None,
-        }
+        PreparedProfile::load(intent).unwrap()
     }
 
     fn load_profile(runtime: &mut ProfileRuntime, root: &Path) -> ProfileId {
@@ -1363,40 +1458,59 @@ mod tests {
 
     #[test]
     fn selection_is_two_phase_and_supersession_is_stale_safe() {
+        let first_root = TempRoot::new();
+        let second_root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
-        let first = runtime.begin_selection("first").unwrap().into_intent();
+        let first = runtime
+            .begin_selection(first_root.path())
+            .unwrap()
+            .into_intent();
         let first_prepared = prepared(&first);
-        let second_start = runtime.begin_selection("second").unwrap();
+        let second_start = runtime.begin_selection(second_root.path()).unwrap();
         assert_eq!(second_start.superseded(), Some(&first));
         let second = second_start.into_intent();
 
+        let rejection = runtime.commit_selection(first_prepared).unwrap_err();
         assert_eq!(
-            runtime.commit_selection(first_prepared),
-            Err(ProfileRuntimeError::StaleSelection {
+            rejection.error(),
+            &ProfileRuntimeError::StaleSelection {
                 expected: Some(second.id()),
                 actual: first.id(),
-            })
+            }
         );
+        rejection
+            .into_parts()
+            .1
+            .into_profile_lock()
+            .release()
+            .unwrap();
         assert!(runtime.active_profile().is_none());
+        let reacquired = ProfileLock::acquire(first_root.path()).unwrap();
+        reacquired.release().unwrap();
 
         let commit = runtime.commit_selection(prepared(&second)).unwrap();
         assert_eq!(commit.active_profile().get(), 1);
         assert!(commit.replaced_profile().is_none());
-        assert_eq!(
-            runtime.active_profile().unwrap().root(),
-            Path::new("second")
-        );
+        assert_eq!(runtime.active_profile().unwrap().root(), second_root.path());
     }
 
     #[test]
     fn committed_profile_survives_pending_selection_and_exact_cancel() {
+        let first_root = TempRoot::new();
+        let second_root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
-        let first = runtime.begin_selection("first").unwrap().into_intent();
+        let first = runtime
+            .begin_selection(first_root.path())
+            .unwrap()
+            .into_intent();
         let first_id = runtime
             .commit_selection(prepared(&first))
             .unwrap()
             .active_profile();
-        let second = runtime.begin_selection("second").unwrap().into_intent();
+        let second = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
 
         assert_eq!(runtime.active_profile().unwrap().id(), first_id);
         assert_eq!(
@@ -1412,13 +1526,21 @@ mod tests {
 
     #[test]
     fn replacing_profile_returns_old_identity_and_rejects_old_mutation() {
+        let first_root = TempRoot::new();
+        let second_root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
-        let first = runtime.begin_selection("first").unwrap().into_intent();
+        let first = runtime
+            .begin_selection(first_root.path())
+            .unwrap()
+            .into_intent();
         let first_id = runtime
             .commit_selection(prepared(&first))
             .unwrap()
             .active_profile();
-        let second = runtime.begin_selection("second").unwrap().into_intent();
+        let second = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
         let commit = runtime.commit_selection(prepared(&second)).unwrap();
         let second_id = commit.active_profile();
 
@@ -1444,14 +1566,21 @@ mod tests {
         assert!(runtime.pending_selection().is_none());
 
         runtime.next_selection_id = 1;
-        let intent = runtime.begin_selection("profile").unwrap().into_intent();
+        let root = TempRoot::new();
+        let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
         runtime.next_profile_id = u64::MAX;
-        assert_eq!(
-            runtime.commit_selection(prepared(&intent)),
-            Err(ProfileRuntimeError::ProfileIdExhausted)
-        );
+        let rejection = runtime.commit_selection(prepared(&intent)).unwrap_err();
+        assert_eq!(rejection.error(), &ProfileRuntimeError::ProfileIdExhausted);
+        rejection
+            .into_parts()
+            .1
+            .into_profile_lock()
+            .release()
+            .unwrap();
         assert_eq!(runtime.pending_selection(), Some(&intent));
         assert!(runtime.active_profile().is_none());
+        let reacquired = ProfileLock::acquire(root.path()).unwrap();
+        reacquired.release().unwrap();
     }
 
     #[test]
@@ -1500,14 +1629,40 @@ mod tests {
     }
 
     #[test]
+    fn preparation_failure_after_acquire_releases_exact_lock() {
+        let root = TempRoot::new();
+        let store = ProfileStore::open(root.path()).unwrap();
+        let mut raw = store.load_settings().unwrap().into_snapshot();
+        raw.set(COLOR_SCHEME_KEY, "sepia").unwrap();
+        let lock = ProfileLock::acquire(root.path()).unwrap();
+        store.save_settings(&lock, &raw).unwrap();
+        lock.release().unwrap();
+
+        let mut runtime = ProfileRuntime::new();
+        let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
+        assert_eq!(
+            PreparedProfile::load(&intent).unwrap_err(),
+            ProfilePreparationError::Settings(ProfileSettingsError::InvalidValue {
+                key: COLOR_SCHEME_KEY,
+                value: "sepia".to_owned(),
+            })
+        );
+
+        let reacquired = ProfileLock::acquire(root.path()).unwrap();
+        reacquired.release().unwrap();
+    }
+
+    #[test]
     fn prepared_profile_loads_recoverable_store_into_typed_settings() {
         let root = TempRoot::new();
         let store = ProfileStore::open(root.path()).unwrap();
         let mut raw = store.load_settings().unwrap().into_snapshot();
         raw.set(COLOR_SCHEME_KEY, "light").unwrap();
         raw.set("future.same_schema.key", "preserved").unwrap();
-        let saved = store.save_settings(&raw).unwrap().into_snapshot();
+        let lock = ProfileLock::acquire(root.path()).unwrap();
+        let saved = store.save_settings(&lock, &raw).unwrap().into_snapshot();
         assert_eq!(saved.generation(), 1);
+        lock.release().unwrap();
 
         let mut runtime = ProfileRuntime::new();
         let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
@@ -1533,8 +1688,10 @@ mod tests {
         snapshot
             .record_visit(123, "https://example.test/first")
             .unwrap();
-        let saved = store.save(&snapshot).unwrap().into_snapshot();
+        let lock = ProfileLock::acquire(root.path()).unwrap();
+        let saved = store.save(&lock, &snapshot).unwrap().into_snapshot();
         assert_eq!(saved.generation(), 1);
+        lock.release().unwrap();
 
         let mut runtime = ProfileRuntime::new();
         let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
@@ -1565,8 +1722,9 @@ mod tests {
             1
         );
 
+        let replacement_root = TempRoot::new();
         let replacement = runtime
-            .begin_selection("replacement")
+            .begin_selection(replacement_root.path())
             .unwrap()
             .into_intent();
         let second = runtime
@@ -1767,7 +1925,8 @@ mod tests {
 
         let store = ProfileStore::open(root.path()).unwrap();
         let external = store.load_settings().unwrap().into_snapshot();
-        store.save_settings(&external).unwrap();
+        let lock = runtime.active.as_ref().unwrap().lock.clone();
+        store.save_settings(&lock, &external).unwrap();
 
         let completion = intent.execute();
         assert!(matches!(
@@ -2154,7 +2313,8 @@ mod tests {
 
         let store = BrowsingHistoryStore::open(root.path()).unwrap();
         let external = store.load().unwrap().into_snapshot();
-        store.save(&external).unwrap();
+        let lock = runtime.active.as_ref().unwrap().lock.clone();
+        store.save(&lock, &external).unwrap();
 
         let completion = intent.execute();
         assert!(matches!(

@@ -1,3 +1,4 @@
+use crate::profile_lock::{ProfileLock, ProfileLockError};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -157,6 +158,7 @@ impl SettingsSave {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfileStorageError {
+    Lock(ProfileLockError),
     Io {
         operation: &'static str,
         path: PathBuf,
@@ -207,6 +209,7 @@ pub enum ProfileStorageError {
 impl fmt::Display for ProfileStorageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Lock(error) => error.fmt(formatter),
             Self::Io {
                 operation,
                 path,
@@ -328,8 +331,11 @@ impl ProfileStore {
 
     pub fn save_settings(
         &self,
+        lock: &ProfileLock,
         snapshot: &SettingsSnapshot,
     ) -> Result<SettingsSave, ProfileStorageError> {
+        lock.verify_for_root(&self.root)
+            .map_err(ProfileStorageError::Lock)?;
         validate_snapshot(snapshot)?;
         let loaded = self.load_settings()?;
         let current_generation = loaded.snapshot().generation();
@@ -376,6 +382,11 @@ impl ProfileStore {
             ));
         }
         drop(file);
+
+        if let Err(error) = lock.verify_for_root(&self.root) {
+            let _ = fs::remove_file(&pending_path);
+            return Err(ProfileStorageError::Lock(error));
+        }
 
         match fs::hard_link(&pending_path, &final_path) {
             Ok(()) => {}
@@ -761,6 +772,7 @@ fn io_error(operation: &'static str, path: &Path, error: io::Error) -> ProfileSt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile_lock::ProfileLock;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -858,8 +870,9 @@ mod tests {
     fn unpublished_pending_file_is_ignored() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let first = store
-            .save_settings(&snapshot_with("browser.mode", "first"))
+            .save_settings(&lock, &snapshot_with("browser.mode", "first"))
             .unwrap()
             .into_snapshot();
 
@@ -878,7 +891,7 @@ mod tests {
         fs::remove_file(pending).unwrap();
         let mut next = loaded.into_snapshot();
         next.set("browser.mode", "second").unwrap();
-        let saved = store.save_settings(&next).unwrap().into_snapshot();
+        let saved = store.save_settings(&lock, &next).unwrap().into_snapshot();
         assert_eq!(saved.generation(), first.generation() + 1);
     }
 
@@ -886,8 +899,9 @@ mod tests {
     fn successful_save_removes_its_pending_publication_file() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let saved = store
-            .save_settings(&snapshot_with("browser.mode", "first"))
+            .save_settings(&lock, &snapshot_with("browser.mode", "first"))
             .unwrap();
         assert!(saved.cleanup_warning().is_none());
 
@@ -904,14 +918,15 @@ mod tests {
     fn corrupt_newest_generation_recovers_previous_explicitly() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let first = store
-            .save_settings(&snapshot_with("browser.mode", "first"))
+            .save_settings(&lock, &snapshot_with("browser.mode", "first"))
             .expect("save first")
             .into_snapshot();
         let mut second_input = first.clone();
         second_input.set("browser.mode", "second").unwrap();
         let second = store
-            .save_settings(&second_input)
+            .save_settings(&lock, &second_input)
             .expect("save second")
             .into_snapshot();
 
@@ -935,14 +950,15 @@ mod tests {
     fn checksum_failure_recovers_previous_generation() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let first = store
-            .save_settings(&snapshot_with("browser.mode", "first"))
+            .save_settings(&lock, &snapshot_with("browser.mode", "first"))
             .expect("save first")
             .into_snapshot();
         let mut second_input = first.clone();
         second_input.set("browser.mode", "second").unwrap();
         let second = store
-            .save_settings(&second_input)
+            .save_settings(&lock, &second_input)
             .expect("save second")
             .into_snapshot();
 
@@ -979,8 +995,9 @@ mod tests {
     fn unsupported_newer_schema_blocks_fallback() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let first = store
-            .save_settings(&snapshot_with("browser.mode", "first"))
+            .save_settings(&lock, &snapshot_with("browser.mode", "first"))
             .expect("save first")
             .into_snapshot();
         let next = first.generation() + 1;
@@ -1007,15 +1024,22 @@ mod tests {
     fn stale_snapshot_cannot_overwrite_newer_generation() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let initial = snapshot_with("browser.mode", "first");
-        let first = store.save_settings(&initial).unwrap().into_snapshot();
+        let first = store
+            .save_settings(&lock, &initial)
+            .unwrap()
+            .into_snapshot();
         let stale = first.clone();
         let mut current = first;
         current.set("browser.mode", "second").unwrap();
-        let second = store.save_settings(&current).unwrap().into_snapshot();
+        let second = store
+            .save_settings(&lock, &current)
+            .unwrap()
+            .into_snapshot();
 
         assert!(matches!(
-            store.save_settings(&stale),
+            store.save_settings(&lock, &stale),
             Err(ProfileStorageError::StaleSettingsGeneration {
                 current,
                 provided
@@ -1033,8 +1057,9 @@ mod tests {
     fn stale_snapshot_cannot_overwrite_a_concurrent_generation() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let first = store
-            .save_settings(&snapshot_with("browser.mode", "first"))
+            .save_settings(&lock, &snapshot_with("browser.mode", "first"))
             .unwrap()
             .into_snapshot();
         let concurrent_generation = first.generation() + 1;
@@ -1049,7 +1074,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            store.save_settings(&first),
+            store.save_settings(&lock, &first),
             Err(ProfileStorageError::StaleSettingsGeneration {
                 current,
                 provided
@@ -1061,8 +1086,9 @@ mod tests {
     fn corrupt_high_generation_is_not_reused_on_next_save() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let first = store
-            .save_settings(&snapshot_with("browser.mode", "first"))
+            .save_settings(&lock, &snapshot_with("browser.mode", "first"))
             .unwrap()
             .into_snapshot();
         let corrupt_generation = first.generation() + 1;
@@ -1072,7 +1098,10 @@ mod tests {
         assert_eq!(recovered.generation(), first.generation());
         let mut next_input = recovered;
         next_input.set("browser.mode", "third").unwrap();
-        let saved = store.save_settings(&next_input).unwrap().into_snapshot();
+        let saved = store
+            .save_settings(&lock, &next_input)
+            .unwrap()
+            .into_snapshot();
 
         assert_eq!(saved.generation(), corrupt_generation + 1);
         assert_eq!(saved.get("browser.mode"), Some("third"));
@@ -1086,8 +1115,9 @@ mod tests {
     fn recovery_save_keeps_the_last_confirmed_valid_generation() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let first = store
-            .save_settings(&snapshot_with("browser.mode", "valid"))
+            .save_settings(&lock, &snapshot_with("browser.mode", "valid"))
             .unwrap()
             .into_snapshot();
 
@@ -1104,7 +1134,7 @@ mod tests {
 
         let mut next = loaded.into_snapshot();
         next.set("browser.mode", "recovered").unwrap();
-        let saved = store.save_settings(&next).unwrap().into_snapshot();
+        let saved = store.save_settings(&lock, &next).unwrap().into_snapshot();
 
         assert_eq!(saved.generation(), 6);
         assert_eq!(
@@ -1125,6 +1155,7 @@ mod tests {
     fn settings_directory_scan_is_bounded_even_for_unrelated_files() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
+        let _lock = ProfileLock::acquire(directory.path()).unwrap();
 
         for index in 0..=MAX_SETTINGS_DIRECTORY_ENTRIES {
             fs::write(
@@ -1150,6 +1181,7 @@ mod tests {
     fn save_reserves_a_directory_slot_before_creating_a_generation() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
 
         for index in 0..MAX_SETTINGS_DIRECTORY_ENTRIES {
             fs::write(
@@ -1163,7 +1195,7 @@ mod tests {
 
         assert!(store.load_settings().is_ok());
         assert!(matches!(
-            store.save_settings(&SettingsSnapshot::default()),
+            store.save_settings(&lock, &SettingsSnapshot::default()),
             Err(ProfileStorageError::SettingsDirectoryEntryLimitExceeded {
                 found,
                 limit
@@ -1176,13 +1208,17 @@ mod tests {
     fn successful_saves_keep_a_bounded_generation_window() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
+        let lock = ProfileLock::acquire(directory.path()).unwrap();
         let mut snapshot = SettingsSnapshot::default();
 
         for index in 0..8 {
             snapshot
                 .set("browser.sequence", index.to_string())
                 .expect("setting");
-            snapshot = store.save_settings(&snapshot).unwrap().into_snapshot();
+            snapshot = store
+                .save_settings(&lock, &snapshot)
+                .unwrap()
+                .into_snapshot();
         }
 
         let generations = store.discover_generations().unwrap();
