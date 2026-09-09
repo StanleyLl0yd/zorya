@@ -1377,6 +1377,7 @@ impl NativeShell {
             return;
         }
 
+        self.profile_cycle_smoke_trace("submitting active lock release");
         let Some(lock) = self
             .profile_runtime
             .active_profile()
@@ -1397,6 +1398,7 @@ impl NativeShell {
 
         match worker.release_lock(lock) {
             Ok(()) => {
+                self.profile_cycle_smoke_trace("active lock release submitted");
                 self.pending_profile_lock_release = Some(PendingProfileLockRelease {
                     owner,
                     purpose: ProfileLockReleasePurpose::ActiveShutdown,
@@ -1628,6 +1630,7 @@ impl NativeShell {
                         }
                     }
                     ProfileLockReleasePurpose::ActiveShutdown => {
+                        self.profile_cycle_smoke_trace("active lock released");
                         self.profile_lock_release_completed = true;
                         self.finish_shutdown(event_loop);
                     }
@@ -3089,6 +3092,7 @@ impl NativeShell {
                                     );
                                     return;
                                 }
+                                self.profile_cycle_smoke_trace("fresh session validated");
                                 self.shutdown(event_loop);
                             } else if let Err(error) = self.begin_profile_cycle_smoke_create() {
                                 self.fail(event_loop, error);
@@ -3286,11 +3290,13 @@ impl NativeShell {
     }
 
     fn finish_shutdown(&mut self, event_loop: &ActiveEventLoop) {
+        self.profile_cycle_smoke_trace("event loop exit");
         drop(self.profile_worker.take());
         event_loop.exit();
     }
 
     fn shutdown(&mut self, event_loop: &ActiveEventLoop) {
+        self.profile_cycle_smoke_trace("shutdown requested");
         self.begin_shutdown();
         if let Err(error) = self.drive_profile_saves(true) {
             if self.fatal_error.is_none() {
