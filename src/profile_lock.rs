@@ -311,7 +311,8 @@ fn read_owner_if_present(path: &Path) -> Result<Option<ProfileLockOwner>, Profil
         let parsed = parse_owner(&bytes).ok_or_else(|| ProfileLockError::Corrupt {
             path: path.to_owned(),
         })?;
-        if entry.file_name() != owner_file_name(parsed).as_str() {
+        let expected_name = owner_file_name(parsed);
+        if entry.file_name().to_str() != Some(expected_name.as_str()) {
             return Err(ProfileLockError::Corrupt {
                 path: path.to_owned(),
             });
@@ -377,15 +378,15 @@ fn remove_exact_owner(
 
     match fs::remove_dir(path) {
         Ok(()) => Ok(()),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
-            ) =>
-        {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
             Err(mismatch(read_owner_if_present(path)?))
         }
-        Err(error) => Err(io_error("remove profile lock directory", path, error)),
+        Err(error) => match read_owner_if_present(path) {
+            Ok(Some(actual)) => Err(mismatch(Some(actual))),
+            Ok(None) => Err(mismatch(None)),
+            Err(ProfileLockError::Corrupt { path }) => Err(ProfileLockError::Corrupt { path }),
+            Err(_) => Err(io_error("remove profile lock directory", path, error)),
+        },
     }
 }
 
