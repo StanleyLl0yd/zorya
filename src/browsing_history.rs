@@ -1012,7 +1012,9 @@ mod tests {
         let directory = TestDirectory::new();
         let store = BrowsingHistoryStore::open(directory.path()).unwrap();
         let lock = ProfileLock::acquire(directory.path()).unwrap();
-        let first = store.save(&lock, &snapshot_with("https://one.test")).unwrap();
+        let first = store
+            .save(&lock, &snapshot_with("https://one.test"))
+            .unwrap();
 
         let pending = store.history_directory.join(format!(
             "{PENDING_FILE_PREFIX}{:020}-{:010}-{:020}.tmp",
