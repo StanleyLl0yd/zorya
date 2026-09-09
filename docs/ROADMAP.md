@@ -48,7 +48,7 @@ The existing rarog-window binary remains a small engine reference host. Product 
 - versioned, bounded and recoverable profile-settings storage foundation with monotonic generation records, corruption fallback reporting and fail-closed newer-schema handling;
 - stable runtime profile identity and two-phase stale-safe profile selection, with profile preparation kept off the UI thread; typed product settings preserve unknown same-schema entries and storage generations while rejecting malformed known values;
 - native profile selection UX, profile locking and broader settings wiring;
-- bounded, versioned and recoverable profile-wide browsing-history generations with stable persisted visit identities, explicit corruption fallback, stale-writer rejection and bounded retention; runtime navigation recording and history UX remain separate;
+- bounded, versioned and recoverable profile-wide browsing-history generations with stable persisted visit identities, explicit corruption fallback, stale-writer rejection and bounded retention; two-phase profile preparation now loads and carries the recoverable history snapshot under stable runtime profile identity, while committed-navigation recording/persistence scheduling and history UX remain separate;
 - bookmarks;
 - downloads;
 - session restore;

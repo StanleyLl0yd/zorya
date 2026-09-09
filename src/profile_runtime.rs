@@ -1,3 +1,6 @@
+use crate::browsing_history::{
+    BrowsingHistoryRecovery, BrowsingHistorySnapshot, BrowsingHistoryStore,
+};
 use crate::profile::{ProfileStorageError, ProfileStore, SettingsRecovery, SettingsSnapshot};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -213,6 +216,8 @@ pub struct PreparedProfile {
     root: PathBuf,
     settings: ProductSettings,
     settings_recovery: Option<SettingsRecovery>,
+    browsing_history: BrowsingHistorySnapshot,
+    browsing_history_recovery: Option<BrowsingHistoryRecovery>,
 }
 
 impl PreparedProfile {
@@ -225,11 +230,22 @@ impl PreparedProfile {
         let settings_recovery = load.recovery().cloned();
         let settings = ProductSettings::from_snapshot(load.into_snapshot())
             .map_err(ProfilePreparationError::Settings)?;
+
+        let history_store = BrowsingHistoryStore::open(intent.root.clone())
+            .map_err(ProfilePreparationError::BrowsingHistory)?;
+        let history_load = history_store
+            .load()
+            .map_err(ProfilePreparationError::BrowsingHistory)?;
+        let browsing_history_recovery = history_load.recovery().cloned();
+        let browsing_history = history_load.into_snapshot();
+
         Ok(Self {
             selection: intent.id,
             root: intent.root.clone(),
             settings,
             settings_recovery,
+            browsing_history,
+            browsing_history_recovery,
         })
     }
 
@@ -248,12 +264,21 @@ impl PreparedProfile {
     pub const fn settings_recovery(&self) -> Option<&SettingsRecovery> {
         self.settings_recovery.as_ref()
     }
+
+    pub const fn browsing_history(&self) -> &BrowsingHistorySnapshot {
+        &self.browsing_history
+    }
+
+    pub const fn browsing_history_recovery(&self) -> Option<&BrowsingHistoryRecovery> {
+        self.browsing_history_recovery.as_ref()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfilePreparationError {
     Storage(ProfileStorageError),
     Settings(ProfileSettingsError),
+    BrowsingHistory(crate::browsing_history::BrowsingHistoryError),
 }
 
 impl fmt::Display for ProfilePreparationError {
@@ -261,6 +286,7 @@ impl fmt::Display for ProfilePreparationError {
         match self {
             Self::Storage(error) => error.fmt(formatter),
             Self::Settings(error) => error.fmt(formatter),
+            Self::BrowsingHistory(error) => error.fmt(formatter),
         }
     }
 }
@@ -270,6 +296,7 @@ impl std::error::Error for ProfilePreparationError {
         match self {
             Self::Storage(error) => Some(error),
             Self::Settings(error) => Some(error),
+            Self::BrowsingHistory(error) => Some(error),
         }
     }
 }
@@ -280,6 +307,8 @@ pub struct ActiveProfile {
     root: PathBuf,
     settings: ProductSettings,
     settings_recovery: Option<SettingsRecovery>,
+    browsing_history: BrowsingHistorySnapshot,
+    browsing_history_recovery: Option<BrowsingHistoryRecovery>,
 }
 
 impl ActiveProfile {
@@ -297,6 +326,14 @@ impl ActiveProfile {
 
     pub const fn settings_recovery(&self) -> Option<&SettingsRecovery> {
         self.settings_recovery.as_ref()
+    }
+
+    pub const fn browsing_history(&self) -> &BrowsingHistorySnapshot {
+        &self.browsing_history
+    }
+
+    pub const fn browsing_history_recovery(&self) -> Option<&BrowsingHistoryRecovery> {
+        self.browsing_history_recovery.as_ref()
     }
 }
 
@@ -481,6 +518,8 @@ impl ProfileRuntime {
             root: prepared.root,
             settings: prepared.settings,
             settings_recovery: prepared.settings_recovery,
+            browsing_history: prepared.browsing_history,
+            browsing_history_recovery: prepared.browsing_history_recovery,
         };
         let replaced_profile = self.active.replace(active);
         Ok(ProfileSelectionCommit {
@@ -505,6 +544,42 @@ impl ProfileRuntime {
             .as_mut()
             .expect("active profile was validated")
             .settings)
+    }
+
+    pub fn active_browsing_history(
+        &self,
+        profile: ProfileId,
+    ) -> Result<&BrowsingHistorySnapshot, ProfileRuntimeError> {
+        let expected = self.active.as_ref().map(ActiveProfile::id);
+        if expected != Some(profile) {
+            return Err(ProfileRuntimeError::StaleProfile {
+                expected,
+                actual: profile,
+            });
+        }
+        Ok(&self
+            .active
+            .as_ref()
+            .expect("active profile was validated")
+            .browsing_history)
+    }
+
+    pub fn active_browsing_history_mut(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<&mut BrowsingHistorySnapshot, ProfileRuntimeError> {
+        let expected = self.active.as_ref().map(ActiveProfile::id);
+        if expected != Some(profile) {
+            return Err(ProfileRuntimeError::StaleProfile {
+                expected,
+                actual: profile,
+            });
+        }
+        Ok(&mut self
+            .active
+            .as_mut()
+            .expect("active profile was validated")
+            .browsing_history)
     }
 }
 
@@ -544,6 +619,8 @@ mod tests {
             root: intent.root.clone(),
             settings: ProductSettings::from_snapshot(SettingsSnapshot::default()).unwrap(),
             settings_recovery: None,
+            browsing_history: BrowsingHistorySnapshot::default(),
+            browsing_history_recovery: None,
         }
     }
 
@@ -709,5 +786,56 @@ mod tests {
         );
         runtime.commit_selection(prepared).unwrap();
         assert_eq!(runtime.active_profile().unwrap().id().get(), 1);
+    }
+
+    #[test]
+    fn prepared_profile_loads_browsing_history_and_runtime_gates_access() {
+        let root = TempRoot::new();
+        let store = BrowsingHistoryStore::open(root.path()).unwrap();
+        let mut snapshot = store.load().unwrap().into_snapshot();
+        snapshot
+            .record_visit(123, "https://example.test/first")
+            .unwrap();
+        let saved = store.save(&snapshot).unwrap().into_snapshot();
+        assert_eq!(saved.generation(), 1);
+
+        let mut runtime = ProfileRuntime::new();
+        let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
+        let prepared = PreparedProfile::load(&intent).unwrap();
+        assert_eq!(prepared.browsing_history().generation(), 1);
+        assert_eq!(prepared.browsing_history().len(), 1);
+        assert_eq!(
+            prepared.browsing_history().visits()[0].location(),
+            "https://example.test/first"
+        );
+        assert!(prepared.browsing_history_recovery().is_none());
+
+        let first = runtime
+            .commit_selection(prepared)
+            .unwrap()
+            .active_profile();
+        runtime
+            .active_browsing_history_mut(first)
+            .unwrap()
+            .record_visit(456, "https://example.test/second")
+            .unwrap();
+        assert_eq!(runtime.active_browsing_history(first).unwrap().len(), 2);
+
+        let replacement = runtime
+            .begin_selection("replacement")
+            .unwrap()
+            .into_intent();
+        let second = runtime
+            .commit_selection(prepared(&replacement))
+            .unwrap()
+            .active_profile();
+        assert_ne!(first, second);
+        assert!(matches!(
+            runtime.active_browsing_history(first),
+            Err(ProfileRuntimeError::StaleProfile {
+                expected: Some(expected),
+                actual,
+            }) if expected == second && actual == first
+        ));
     }
 }
