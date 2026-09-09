@@ -10,7 +10,8 @@ use crate::engine::{
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     NavigationId, NavigationStart, PresentationFramePermit, PresentationGeneration,
-    PresentationHandoffError, ProfileRuntime, ProfileSelectionIntent, ProfileWorker,
+    PresentationHandoffError, ProfileHistorySavePolicy, ProfileHistorySaveScheduler,
+    ProfileHistorySaveUrgency, ProfileRuntime, ProfileSelectionIntent, ProfileWorker,
     ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection, TabId,
     TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
@@ -29,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
@@ -44,6 +45,39 @@ const NAVIGATION_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const PRODUCT_DATA_DIRECTORY: &str = "Zorya";
 const PROFILES_DIRECTORY: &str = "Profiles";
 const DEFAULT_PROFILE_DIRECTORY: &str = "Default";
+const HISTORY_SAVE_DEBOUNCE_MILLIS: u64 = 5_000;
+const HISTORY_SAVE_MAX_DIRTY_MILLIS: u64 = 30_000;
+const HISTORY_SAVE_MUTATION_THRESHOLD: u64 = 32;
+
+#[derive(Debug)]
+struct NativeHistoryClock {
+    origin: Instant,
+}
+
+impl NativeHistoryClock {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+        }
+    }
+
+    fn now_millis(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn deadline(&self, millis: u64) -> Option<Instant> {
+        self.origin.checked_add(Duration::from_millis(millis))
+    }
+}
+
+fn native_history_save_policy() -> ProfileHistorySavePolicy {
+    ProfileHistorySavePolicy::new(
+        HISTORY_SAVE_DEBOUNCE_MILLIS,
+        HISTORY_SAVE_MAX_DIRTY_MILLIS,
+        HISTORY_SAVE_MUTATION_THRESHOLD,
+    )
+    .expect("native browsing-history save policy is valid")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WorkerNavigationTarget {
@@ -396,6 +430,8 @@ struct NativeShell {
     browser_window: BrowserWindowId,
     profile_runtime: ProfileRuntime,
     profile_worker: Option<ProfileWorker>,
+    history_scheduler: ProfileHistorySaveScheduler,
+    history_clock: NativeHistoryClock,
     initial_profile_selection: Option<ProfileSelectionIntent>,
     tab: TabId,
     presentation: TabPresentationHandoff,
@@ -423,6 +459,7 @@ struct NativeShell {
     worker_ready: bool,
     needs_redraw: bool,
     run_mode: RunMode,
+    shutdown_requested: bool,
     fatal_error: Option<String>,
 }
 
@@ -447,6 +484,8 @@ impl NativeShell {
             browser_window,
             profile_runtime,
             profile_worker: Some(profile_worker),
+            history_scheduler: ProfileHistorySaveScheduler::new(native_history_save_policy()),
+            history_clock: NativeHistoryClock::new(),
             initial_profile_selection: Some(initial_profile_selection),
             tab,
             presentation: TabPresentationHandoff::new(tab),
@@ -474,13 +513,85 @@ impl NativeShell {
             worker_ready: false,
             needs_redraw: false,
             run_mode,
+            shutdown_requested: false,
             fatal_error: None,
         }
     }
 
     fn record_navigation_commit(&mut self, commit: BrowserNavigationCommit) -> Result<(), String> {
         let visited_unix_millis = current_unix_millis()?;
-        record_profile_navigation_at(&mut self.profile_runtime, visited_unix_millis, commit)
+        record_profile_navigation_at(&mut self.profile_runtime, visited_unix_millis, commit)?;
+        self.drive_history_save(ProfileHistorySaveUrgency::Normal)
+    }
+
+    fn drive_history_save(&mut self, urgency: ProfileHistorySaveUrgency) -> Result<(), String> {
+        let Some(profile) = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| profile.id())
+        else {
+            return Ok(());
+        };
+        let now_millis = self.history_clock.now_millis();
+        let Some(intent) = self
+            .history_scheduler
+            .poll(&mut self.profile_runtime, profile, now_millis, urgency)
+            .map_err(|error| format!("failed to schedule browsing-history save: {error}"))?
+        else {
+            return Ok(());
+        };
+        let save = intent.id();
+        let worker = self
+            .profile_worker
+            .as_ref()
+            .ok_or_else(|| "profile worker is unavailable for browsing-history save".to_string())?;
+
+        match worker.save_history(intent) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let queue_full = error.is_full();
+                let message = error.to_string();
+                let intent = error.into_work();
+                debug_assert_eq!(intent.id(), save);
+                self.profile_runtime
+                    .cancel_browsing_history_save(save)
+                    .map_err(|cancel| {
+                        format!(
+                            "failed to submit browsing-history save {}: {message}; failed to cancel pending save: {cancel}",
+                            save.get()
+                        )
+                    })?;
+                if queue_full {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "failed to submit browsing-history save {}: {message}",
+                        save.get()
+                    ))
+                }
+            }
+        }
+    }
+
+    fn history_flush_complete(&self) -> Result<bool, String> {
+        let Some(profile) = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| profile.id())
+        else {
+            return Ok(true);
+        };
+        if self
+            .profile_runtime
+            .pending_browsing_history_save()
+            .is_some()
+        {
+            return Ok(false);
+        }
+        self.profile_runtime
+            .browsing_history_is_dirty(profile)
+            .map(|dirty| !dirty)
+            .map_err(|error| format!("failed to inspect browsing-history dirty state: {error}"))
     }
 
     fn submit_initial_profile_selection(&mut self) -> Result<(), String> {
@@ -578,13 +689,32 @@ impl NativeShell {
                 {
                     Ok(_) => {
                         if let Some(error) = storage_error {
-                            self.fail(
-                                event_loop,
-                                format!(
+                            if self.fatal_error.is_none() {
+                                self.fatal_error = Some(format!(
                                     "browsing-history save {} failed on profile worker: {error}",
                                     save.get()
-                                ),
-                            );
+                                ));
+                            }
+                            self.begin_shutdown();
+                            self.finish_shutdown(event_loop);
+                            return;
+                        }
+
+                        let urgency = if self.shutdown_requested {
+                            ProfileHistorySaveUrgency::Flush
+                        } else {
+                            ProfileHistorySaveUrgency::Normal
+                        };
+                        if let Err(error) = self.drive_history_save(urgency) {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+                        if self.shutdown_requested {
+                            match self.history_flush_complete() {
+                                Ok(true) => self.finish_shutdown(event_loop),
+                                Ok(false) => {}
+                                Err(error) => self.fail(event_loop, error),
+                            }
                         }
                     }
                     Err(error) => self.fail(
@@ -1867,7 +1997,11 @@ impl NativeShell {
         }
     }
 
-    fn shutdown(&mut self, event_loop: &ActiveEventLoop) {
+    fn begin_shutdown(&mut self) {
+        if self.shutdown_requested {
+            return;
+        }
+        self.shutdown_requested = true;
         if let Err(error) = self.stop_initial_navigation()
             && self.fatal_error.is_none()
         {
@@ -1884,14 +2018,38 @@ impl NativeShell {
         self.pending_view_close = None;
         self.rapid_smoke_tabs.clear();
         self.worker_ready = false;
-        drop(self.profile_worker.take());
         if let Some(worker) = self.worker.take() {
             worker.shutdown();
         }
         self.gpu = None;
         self.browser.close_window(self.browser_window);
         self.window = None;
+    }
+
+    fn finish_shutdown(&mut self, event_loop: &ActiveEventLoop) {
+        drop(self.profile_worker.take());
         event_loop.exit();
+    }
+
+    fn shutdown(&mut self, event_loop: &ActiveEventLoop) {
+        self.begin_shutdown();
+        if let Err(error) = self.drive_history_save(ProfileHistorySaveUrgency::Flush) {
+            if self.fatal_error.is_none() {
+                self.fatal_error = Some(error);
+            }
+            self.finish_shutdown(event_loop);
+            return;
+        }
+        match self.history_flush_complete() {
+            Ok(true) => self.finish_shutdown(event_loop),
+            Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+            Err(error) => {
+                if self.fatal_error.is_none() {
+                    self.fatal_error = Some(error);
+                }
+                self.finish_shutdown(event_loop);
+            }
+        }
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: impl std::fmt::Display) {
@@ -1923,6 +2081,41 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WorkerEvent) {
         self.handle_worker_event(event_loop, event);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let urgency = if self.shutdown_requested {
+            ProfileHistorySaveUrgency::Flush
+        } else {
+            ProfileHistorySaveUrgency::Normal
+        };
+        if let Err(error) = self.drive_history_save(urgency) {
+            self.fail(event_loop, error);
+            return;
+        }
+
+        if self.shutdown_requested {
+            match self.history_flush_complete() {
+                Ok(true) => self.finish_shutdown(event_loop),
+                Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                Err(error) => self.fail(event_loop, error),
+            }
+            return;
+        }
+
+        let control_flow = if self
+            .profile_runtime
+            .pending_browsing_history_save()
+            .is_some()
+        {
+            ControlFlow::Wait
+        } else {
+            self.history_scheduler
+                .next_save_due_millis()
+                .and_then(|deadline| self.history_clock.deadline(deadline))
+                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
+        };
+        event_loop.set_control_flow(control_flow);
     }
 
     fn window_event(
@@ -2791,6 +2984,15 @@ mod tests {
 
         let empty = profile_root_from_local_app_data(Some(OsString::new())).unwrap_err();
         assert_eq!(empty.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn native_history_save_policy_matches_product_bounds() {
+        let policy = native_history_save_policy();
+
+        assert_eq!(policy.debounce_millis(), 5_000);
+        assert_eq!(policy.max_dirty_millis(), 30_000);
+        assert_eq!(policy.mutation_threshold(), 32);
     }
 
     #[test]
