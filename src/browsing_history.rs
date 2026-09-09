@@ -806,6 +806,7 @@ fn io_error(operation: &'static str, path: &Path, error: io::Error) -> BrowsingH
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -1014,6 +1015,45 @@ mod tests {
         );
         let loaded = store.load().unwrap();
         assert_eq!(loaded.snapshot(), &second);
+    }
+
+    #[test]
+    fn concurrent_saves_have_one_durable_winner() {
+        let directory = TestDirectory::new();
+        let store = Arc::new(BrowsingHistoryStore::open(directory.path()).unwrap());
+        let barrier = Arc::new(Barrier::new(3));
+
+        let workers = ["https://one.test", "https://two.test"]
+            .into_iter()
+            .map(|location| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let snapshot = snapshot_with(location);
+                    barrier.wait();
+                    store.save(&snapshot)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        barrier.wait();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert!(results.iter().filter_map(|result| result.as_ref().err()).all(
+            |error| matches!(
+                error,
+                BrowsingHistoryError::ConcurrentWrite { .. }
+                    | BrowsingHistoryError::StaleGeneration { .. }
+            )
+        ));
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.snapshot().generation(), 1);
+        assert_eq!(loaded.snapshot().len(), 1);
     }
 
     #[test]
