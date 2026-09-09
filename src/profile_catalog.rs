@@ -551,6 +551,11 @@ impl ProfileCatalog {
                 continue;
             }
 
+            let generated_storage_id = generated_profile_root_storage_id(&entry.file_name());
+            if generated_storage_id.is_some() && !profile_publication_ready(&path)? {
+                continue;
+            }
+
             let prospective = profiles.len().saturating_add(1);
             if prospective > MAX_DISCOVERED_PROFILES {
                 return Err(ProfileCatalogError::ProfileLimitExceeded {
@@ -564,10 +569,32 @@ impl ProfileCatalog {
                     root: path.clone(),
                     error,
                 })?;
-            if storage_id.is_none()
-                && entry.file_name().as_os_str() != OsStr::new(LEGACY_DEFAULT_DIRECTORY_NAME)
-            {
+            let legacy_default =
+                entry.file_name().as_os_str() == OsStr::new(LEGACY_DEFAULT_DIRECTORY_NAME);
+            if storage_id.is_none() && !legacy_default {
                 return Err(ProfileCatalogError::MissingIdentity { root: path });
+            }
+
+            if let (Some(expected), Some(actual)) = (generated_storage_id, storage_id)
+                && expected != actual
+            {
+                return Err(ProfileCatalogError::RootIdentityMismatch {
+                    root: path,
+                    expected,
+                    actual,
+                });
+            }
+
+            let metadata = match storage_id {
+                Some(storage_id) => load_profile_metadata(&path, storage_id)
+                    .map_err(|error| ProfileCatalogError::Metadata {
+                        root: path.clone(),
+                        error,
+                    })?,
+                None => None,
+            };
+            if metadata.is_none() && !legacy_default {
+                return Err(ProfileCatalogError::MissingMetadata { root: path });
             }
 
             if let Some(storage_id) = storage_id {
@@ -583,6 +610,7 @@ impl ProfileCatalog {
             profiles.push(ProfileCatalogEntry {
                 root: entry.path(),
                 storage_id,
+                metadata,
             });
         }
 
