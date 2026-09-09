@@ -438,9 +438,9 @@ impl NativeShell {
     }
 
     fn submit_initial_profile_selection(&mut self) -> Result<(), String> {
-        let Some(_) = self.initial_profile_selection else {
+        if self.initial_profile_selection.is_none() {
             return Ok(());
-        };
+        }
         let worker = self
             .profile_worker
             .as_ref()
@@ -2654,5 +2654,34 @@ impl WebContentSurface {
                 error.message()
             )),
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_profile_root_is_stable_under_local_app_data() {
+        let local_app_data = OsString::from(r"C:\Users\Zorya\AppData\Local");
+        let root = profile_root_from_local_app_data(Some(local_app_data)).unwrap();
+
+        assert_eq!(
+            root,
+            PathBuf::from(r"C:\Users\Zorya\AppData\Local")
+                .join(PRODUCT_DATA_DIRECTORY)
+                .join(PROFILES_DIRECTORY)
+                .join(DEFAULT_PROFILE_DIRECTORY)
+        );
+    }
+
+    #[test]
+    fn missing_local_app_data_fails_closed() {
+        let missing = profile_root_from_local_app_data(None).unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+
+        let empty = profile_root_from_local_app_data(Some(OsString::new())).unwrap_err();
+        assert_eq!(empty.kind(), io::ErrorKind::NotFound);
     }
 }
