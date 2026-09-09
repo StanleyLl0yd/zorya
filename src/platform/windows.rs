@@ -680,6 +680,15 @@ impl NativeShell {
                     self.fail(event_loop, error);
                 }
             }
+            ProfileWorkerCompletion::SettingsSaved(completion) => {
+                self.fail(
+                    event_loop,
+                    format!(
+                        "unexpected profile settings-save completion {}",
+                        completion.id().get()
+                    ),
+                );
+            }
             ProfileWorkerCompletion::HistorySaved(completion) => {
                 let save = completion.id();
                 let storage_error = completion.result().as_ref().err().map(ToString::to_string);
