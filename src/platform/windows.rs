@@ -1343,6 +1343,12 @@ impl NativeShell {
                     ),
                 }
             }
+            ProfileWorkerCompletion::CatalogDiscovered { .. }
+            | ProfileWorkerCompletion::ProfileCreated { .. }
+            | ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
+                event_loop,
+                "profile catalog completion arrived before native profile catalog UX is enabled",
+            ),
         }
     }
 
