@@ -1048,12 +1048,7 @@ mod tests {
             .id();
 
         let commit = app
-            .commit_navigation(
-                window,
-                tab,
-                navigation,
-                "https://committed.example/final",
-            )
+            .commit_navigation(window, tab, navigation, "https://committed.example/final")
             .expect("commit navigation");
 
         assert_eq!(commit.window(), window);
