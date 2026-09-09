@@ -1,6 +1,4 @@
-use crate::profile::{
-    ProfileStorageError, ProfileStore, SettingsRecovery, SettingsSnapshot,
-};
+use crate::profile::{ProfileStorageError, ProfileStore, SettingsRecovery, SettingsSnapshot};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -183,10 +181,7 @@ impl ProductSettings {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfileSettingsError {
     Storage(ProfileStorageError),
-    InvalidValue {
-        key: &'static str,
-        value: String,
-    },
+    InvalidValue { key: &'static str, value: String },
 }
 
 impl fmt::Display for ProfileSettingsError {
@@ -194,7 +189,10 @@ impl fmt::Display for ProfileSettingsError {
         match self {
             Self::Storage(error) => error.fmt(formatter),
             Self::InvalidValue { key, value } => {
-                write!(formatter, "invalid value {value:?} for profile setting {key}")
+                write!(
+                    formatter,
+                    "invalid value {value:?} for profile setting {key}"
+                )
             }
         }
     }
@@ -219,8 +217,8 @@ pub struct PreparedProfile {
 
 impl PreparedProfile {
     pub fn load(intent: &ProfileSelectionIntent) -> Result<Self, ProfilePreparationError> {
-        let store = ProfileStore::open(intent.root.clone())
-            .map_err(ProfilePreparationError::Storage)?;
+        let store =
+            ProfileStore::open(intent.root.clone()).map_err(ProfilePreparationError::Storage)?;
         let load = store
             .load_settings()
             .map_err(ProfilePreparationError::Storage)?;
@@ -445,7 +443,10 @@ impl ProfileRuntime {
                 actual: selection,
             });
         }
-        Ok(self.pending.take().expect("pending selection was validated"))
+        Ok(self
+            .pending
+            .take()
+            .expect("pending selection was validated"))
     }
 
     pub fn commit_selection(
@@ -520,10 +521,8 @@ mod tests {
     impl TempRoot {
         fn new() -> Self {
             let id = NEXT_TEMP_ROOT.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir().join(format!(
-                "zorya-profile-runtime-{}-{id}",
-                std::process::id()
-            ));
+            let root = std::env::temp_dir()
+                .join(format!("zorya-profile-runtime-{}-{id}", std::process::id()));
             let _ = fs::remove_dir_all(&root);
             Self(root)
         }
@@ -569,7 +568,10 @@ mod tests {
         let commit = runtime.commit_selection(prepared(&second)).unwrap();
         assert_eq!(commit.active_profile().get(), 1);
         assert!(commit.replaced_profile().is_none());
-        assert_eq!(runtime.active_profile().unwrap().root(), Path::new("second"));
+        assert_eq!(
+            runtime.active_profile().unwrap().root(),
+            Path::new("second")
+        );
     }
 
     #[test]
@@ -702,10 +704,7 @@ mod tests {
         );
         assert_eq!(prepared.settings().generation(), 1);
         assert_eq!(
-            prepared
-                .settings()
-                .snapshot()
-                .get("future.same_schema.key"),
+            prepared.settings().snapshot().get("future.same_schema.key"),
             Some("preserved")
         );
         runtime.commit_selection(prepared).unwrap();
