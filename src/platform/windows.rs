@@ -10,6 +10,7 @@ use crate::engine::{
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserWindowId, NavigationId,
     NavigationStart, PresentationFramePermit, PresentationGeneration, PresentationHandoffError,
+    ProfileRuntime, ProfileSelectionIntent, ProfileWorker, ProfileWorkerCompletion,
     TabActivationStart, TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff,
     TargetFramePermit, WebContentPresentation,
 };
@@ -21,8 +22,10 @@ use rarog_compositor_wgpu::WgpuCompositorBackend;
 use rarog_platform_windows::{WindowsGpuDevice, WindowsGpuError, WindowsGpuSurface};
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::io::{Read, Write};
+use std::ffi::OsString;
+use std::io::{self, Read, Write};
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
@@ -38,6 +41,9 @@ const START_LOCATION: &str = "about:blank";
 const START_PAGE: &str = include_str!("../../assets/z1-start.html");
 const HTTP_SMOKE_BODY: &str = "<main>Zorya real HTTP navigation</main>";
 const NAVIGATION_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const PRODUCT_DATA_DIRECTORY: &str = "Zorya";
+const PROFILES_DIRECTORY: &str = "Profiles";
+const DEFAULT_PROFILE_DIRECTORY: &str = "Default";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WorkerNavigationTarget {
@@ -100,6 +106,25 @@ fn spawn_http_smoke_server() -> Result<String, std::io::Error> {
     Ok(format!("http://{address}/zorya-http-smoke"))
 }
 
+fn profile_root_from_local_app_data(local_app_data: Option<OsString>) -> io::Result<PathBuf> {
+    let local_app_data = local_app_data
+        .filter(|value| !value.as_os_str().is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "LOCALAPPDATA is unavailable for the default Zorya profile",
+            )
+        })?;
+    Ok(PathBuf::from(local_app_data)
+        .join(PRODUCT_DATA_DIRECTORY)
+        .join(PROFILES_DIRECTORY)
+        .join(DEFAULT_PROFILE_DIRECTORY))
+}
+
+fn default_profile_root() -> io::Result<PathBuf> {
+    profile_root_from_local_app_data(std::env::var_os("LOCALAPPDATA"))
+}
+
 pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
     let http_smoke_location = if mode == RunMode::ExitAfterRealHttpNavigation {
         Some(spawn_http_smoke_server()?)
@@ -123,11 +148,24 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         .intent()
         .id();
     let proxy = event_loop.create_proxy();
+    let mut profile_runtime = ProfileRuntime::new();
+    let initial_profile_selection = profile_runtime
+        .begin_selection(default_profile_root()?)?
+        .into_intent();
+    let profile_worker = ProfileWorker::spawn({
+        let proxy = proxy.clone();
+        move |completion| {
+            let _ = proxy.send_event(WorkerEvent::Profile(completion));
+        }
+    })?;
     let mut shell = NativeShell::new(
         browser,
         browser_window,
         tab,
         initial_navigation,
+        profile_runtime,
+        profile_worker,
+        initial_profile_selection,
         proxy,
         mode,
         http_smoke_location,
@@ -142,6 +180,7 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
 }
 
 enum WorkerEvent {
+    Profile(ProfileWorkerCompletion),
     GpuReady {
         target: AsyncTarget,
         result: Result<Arc<WindowsGpuDevice>, String>,
@@ -317,6 +356,9 @@ struct PendingNativeTabCreate {
 struct NativeShell {
     browser: BrowserApp,
     browser_window: BrowserWindowId,
+    profile_runtime: ProfileRuntime,
+    profile_worker: Option<ProfileWorker>,
+    initial_profile_selection: Option<ProfileSelectionIntent>,
     tab: TabId,
     presentation: TabPresentationHandoff,
     pending_target_permit: Option<TargetFramePermit>,
@@ -352,6 +394,9 @@ impl NativeShell {
         browser_window: BrowserWindowId,
         tab: TabId,
         initial_navigation: NavigationId,
+        profile_runtime: ProfileRuntime,
+        profile_worker: ProfileWorker,
+        initial_profile_selection: ProfileSelectionIntent,
         proxy: EventLoopProxy<WorkerEvent>,
         run_mode: RunMode,
         http_smoke_location: Option<String>,
@@ -359,6 +404,9 @@ impl NativeShell {
         Self {
             browser,
             browser_window,
+            profile_runtime,
+            profile_worker: Some(profile_worker),
+            initial_profile_selection: Some(initial_profile_selection),
             tab,
             presentation: TabPresentationHandoff::new(tab),
             pending_target_permit: None,
