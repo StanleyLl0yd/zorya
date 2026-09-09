@@ -174,7 +174,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     struct TempRoot(PathBuf);
 
@@ -362,10 +362,8 @@ mod tests {
 
         worker.prepare(first).unwrap();
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        for _ in 0..10_000 {
-            if worker.is_finished() {
-                break;
-            }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !worker.is_finished() && Instant::now() < deadline {
             thread::yield_now();
         }
         assert!(worker.is_finished());
