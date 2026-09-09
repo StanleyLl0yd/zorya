@@ -1620,8 +1620,11 @@ impl NativeShell {
                                 Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
                                 Err(error) => self.fail(event_loop, error),
                             }
-                        } else if self.needs_redraw {
-                            self.request_redraw();
+                        } else if self.needs_redraw
+                            && !self.profile_transition_in_progress()
+                            && let Err(error) = self.start_frame()
+                        {
+                            self.fail(event_loop, error);
                         }
                     }
                     ProfileLockReleasePurpose::ActiveShutdown => {
@@ -2856,8 +2859,10 @@ impl NativeShell {
                         self.worker_ready = true;
                         self.needs_redraw = true;
                         self.update_window_title();
-                        if !self.profile_transition_in_progress() {
-                            self.request_redraw();
+                        if !self.profile_transition_in_progress()
+                            && let Err(error) = self.start_frame()
+                        {
+                            self.fail(event_loop, error);
                         }
                     }
                     Err(error) => self.fail(
