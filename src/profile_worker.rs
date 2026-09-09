@@ -146,12 +146,7 @@ impl ProfileWorker {
             Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(intent))) => {
                 Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
             }
-            Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(_))) => {
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 unreachable!("prepare submission preserves its command variant")
             }
         }
@@ -172,12 +167,7 @@ impl ProfileWorker {
             Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(intent))) => {
                 Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
             }
-            Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(_))) => {
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 unreachable!("settings-save submission preserves its command variant")
             }
         }
@@ -198,13 +188,71 @@ impl ProfileWorker {
             Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(intent))) => {
                 Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
             }
-            Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(_))) => {
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 unreachable!("history-save submission preserves its command variant")
+            }
+        }
+    }
+
+    pub fn discover_profiles(
+        &self,
+        intent: ProfileCatalogDiscoverIntent,
+    ) -> Result<(), ProfileWorkerSubmitError<ProfileCatalogDiscoverIntent>> {
+        match self
+            .sender
+            .try_send(ProfileWorkerCommand::DiscoverCatalog(intent))
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(ProfileWorkerCommand::DiscoverCatalog(intent))) => {
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
+            }
+            Err(TrySendError::Disconnected(ProfileWorkerCommand::DiscoverCatalog(intent))) => {
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
+            }
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                unreachable!("catalog-discovery submission preserves its command variant")
+            }
+        }
+    }
+
+    pub fn create_profile(
+        &self,
+        intent: ProfileCatalogCreateIntent,
+    ) -> Result<(), ProfileWorkerSubmitError<ProfileCatalogCreateIntent>> {
+        match self
+            .sender
+            .try_send(ProfileWorkerCommand::CreateProfile(intent))
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(ProfileWorkerCommand::CreateProfile(intent))) => {
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
+            }
+            Err(TrySendError::Disconnected(ProfileWorkerCommand::CreateProfile(intent))) => {
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
+            }
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                unreachable!("profile-create submission preserves its command variant")
+            }
+        }
+    }
+
+    pub fn rename_profile(
+        &self,
+        intent: ProfileCatalogRenameIntent,
+    ) -> Result<(), ProfileWorkerSubmitError<ProfileCatalogRenameIntent>> {
+        match self
+            .sender
+            .try_send(ProfileWorkerCommand::RenameProfile(intent))
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(ProfileWorkerCommand::RenameProfile(intent))) => {
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
+            }
+            Err(TrySendError::Disconnected(ProfileWorkerCommand::RenameProfile(intent))) => {
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
+            }
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                unreachable!("profile-rename submission preserves its command variant")
             }
         }
     }
@@ -224,12 +272,7 @@ impl ProfileWorker {
             Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(lock))) => {
                 Err(ProfileWorkerSubmitError::Unavailable(Box::new(lock)))
             }
-            Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_))) => {
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 unreachable!("lock-release submission preserves its command variant")
             }
         }
@@ -256,6 +299,18 @@ fn profile_worker_main(
             }
             ProfileWorkerCommand::SaveHistory(intent) => {
                 ProfileWorkerCompletion::HistorySaved(intent.execute())
+            }
+            ProfileWorkerCommand::DiscoverCatalog(intent) => {
+                let result = intent.execute();
+                ProfileWorkerCompletion::CatalogDiscovered { intent, result }
+            }
+            ProfileWorkerCommand::CreateProfile(intent) => {
+                let result = intent.execute();
+                ProfileWorkerCompletion::ProfileCreated { intent, result }
+            }
+            ProfileWorkerCommand::RenameProfile(intent) => {
+                let result = intent.execute();
+                ProfileWorkerCompletion::ProfileRenamed { intent, result }
             }
             ProfileWorkerCommand::ReleaseLock(lock) => {
                 let owner = lock.owner();
