@@ -1041,6 +1041,18 @@ mod tests {
         fs::create_dir_all(directory.join(identity_record_name(id))).unwrap();
     }
 
+    fn fixture_profile(root: &Path, id: ProfileStorageId, display_name: &str) {
+        let lock = ProfileLock::acquire(root).unwrap();
+        publish_profile_storage_id(&lock, id).unwrap();
+        load_or_create_profile_metadata(
+            &lock,
+            id,
+            ProfileDisplayName::new(display_name).unwrap(),
+        )
+        .unwrap();
+        lock.release().unwrap();
+    }
+
     #[test]
     fn locked_profile_identity_bootstrap_is_stable_across_reacquisition() {
         let root = TestRoot::new("bootstrap");
@@ -1082,14 +1094,15 @@ mod tests {
         let catalog = ProfileCatalog::open(root.path()).unwrap();
         let id = ProfileStorageId(0x1234);
         let first = root.path().join("First");
-        fixture_identity(&first, id);
+        fixture_profile(&first, id, "First");
 
         let entries = catalog.discover().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].storage_id(), Some(id));
+        assert_eq!(entries[0].display_name(), Some("First"));
 
         let second = root.path().join("Second");
-        fixture_identity(&second, id);
+        fixture_profile(&second, id, "Second");
         assert!(matches!(
             catalog.discover(),
             Err(ProfileCatalogError::DuplicateIdentity {
@@ -1139,12 +1152,98 @@ mod tests {
     }
 
     #[test]
+    fn generated_profile_is_invisible_until_ready_marker_is_published() {
+        let root = TestRoot::new("publication");
+        let catalog = ProfileCatalog::open(root.path()).unwrap();
+        let id = ProfileStorageId(0x42);
+        let profile = root.path().join(generated_profile_root_name(id));
+        fixture_profile(&profile, id, "Hidden");
+
+        assert!(catalog.discover().unwrap().is_empty());
+
+        fs::create_dir(profile.join(PROFILE_READY_DIRECTORY_NAME)).unwrap();
+        let entries = catalog.discover().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].storage_id(), Some(id));
+        assert_eq!(entries[0].display_name(), Some("Hidden"));
+    }
+
+    #[test]
+    fn profile_create_publishes_complete_root_and_metadata() {
+        let root = TestRoot::new("create");
+        let intent = ProfileCatalogCreateIntent::new(root.path(), "Personal").unwrap();
+        let created = intent.execute().unwrap();
+
+        let storage_id = created.storage_id().unwrap();
+        assert_eq!(created.display_name(), Some("Personal"));
+        assert_eq!(
+            created.root().file_name().and_then(|name| name.to_str()),
+            Some(generated_profile_root_name(storage_id).as_str())
+        );
+        assert!(created.root().join(PROFILE_READY_DIRECTORY_NAME).is_dir());
+
+        let entries = ProfileCatalog::open(root.path()).unwrap().discover().unwrap();
+        assert_eq!(entries, vec![created]);
+    }
+
+    #[test]
+    fn rename_updates_metadata_generation_without_moving_profile_root() {
+        let root = TestRoot::new("rename");
+        let created = ProfileCatalogCreateIntent::new(root.path(), "Personal")
+            .unwrap()
+            .execute()
+            .unwrap();
+        let storage_id = created.storage_id().unwrap();
+        let generation = created.metadata().unwrap().generation();
+        let profile_root = created.root().to_owned();
+
+        let renamed = ProfileCatalogRenameIntent::new(
+            &profile_root,
+            storage_id,
+            generation,
+            "Work",
+        )
+        .unwrap()
+        .execute()
+        .unwrap();
+        assert_eq!(renamed.generation(), generation + 1);
+        assert_eq!(renamed.display_name().as_str(), "Work");
+        assert!(profile_root.is_dir());
+
+        let stale = ProfileCatalogRenameIntent::new(
+            &profile_root,
+            storage_id,
+            generation,
+            "Stale",
+        )
+        .unwrap()
+        .execute()
+        .unwrap_err();
+        assert!(matches!(
+            stale,
+            ProfileCatalogRenameError::Metadata(ProfileMetadataError::StaleGeneration {
+                expected,
+                actual,
+            }) if expected == generation && actual == generation + 1
+        ));
+
+        let entries = ProfileCatalog::open(root.path()).unwrap().discover().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].root(), profile_root);
+        assert_eq!(entries[0].display_name(), Some("Work"));
+    }
+
+    #[test]
     fn catalog_profile_count_is_bounded() {
         let root = TestRoot::new("bound");
         let catalog = ProfileCatalog::open(root.path()).unwrap();
         for index in 0..=MAX_DISCOVERED_PROFILES {
-            let profile = root.path().join(format!("Profile-{index:03}"));
-            fixture_identity(&profile, ProfileStorageId((index + 1) as u128));
+            let profile = root.path().join(format!("Legacy-{index:03}"));
+            fixture_profile(
+                &profile,
+                ProfileStorageId((index + 1) as u128),
+                &format!("Profile {index}"),
+            );
         }
 
         assert!(matches!(
