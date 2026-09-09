@@ -342,6 +342,10 @@ pub enum ProfileCatalogCreateError {
     RootCollision {
         path: PathBuf,
     },
+    StorageIdentityCollision {
+        storage_id: ProfileStorageId,
+        existing_root: PathBuf,
+    },
     LockRelease {
         initialization: Option<Box<ProfileCatalogCreateError>>,
         release: ProfileLockError,
@@ -368,6 +372,14 @@ impl fmt::Display for ProfileCatalogCreateError {
                 formatter,
                 "generated profile root already exists: {}",
                 path.display()
+            ),
+            Self::StorageIdentityCollision {
+                storage_id,
+                existing_root,
+            } => write!(
+                formatter,
+                "generated profile storage identity {storage_id} already belongs to {}",
+                existing_root.display()
             ),
             Self::LockRelease {
                 initialization,
@@ -681,6 +693,15 @@ fn create_profile(
     }
 
     let storage_id = next_profile_storage_id().map_err(ProfileCatalogCreateError::Identity)?;
+    if let Some(existing) = existing
+        .iter()
+        .find(|entry| entry.storage_id() == Some(storage_id))
+    {
+        return Err(ProfileCatalogCreateError::StorageIdentityCollision {
+            storage_id,
+            existing_root: existing.root().to_owned(),
+        });
+    }
     let root = catalog.root.join(generated_profile_root_name(storage_id));
     match fs::create_dir(&root) {
         Ok(()) => {}
