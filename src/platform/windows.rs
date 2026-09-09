@@ -10,6 +10,7 @@ use crate::engine::{
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserWindowId, NavigationId,
     NavigationStart, PresentationFramePermit, PresentationGeneration, PresentationHandoffError,
+    ProfileRuntime, ProfileSelectionIntent, ProfileWorker, ProfileWorkerCompletion,
     TabActivationStart, TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff,
     TargetFramePermit, WebContentPresentation,
 };
@@ -21,8 +22,10 @@ use rarog_compositor_wgpu::WgpuCompositorBackend;
 use rarog_platform_windows::{WindowsGpuDevice, WindowsGpuError, WindowsGpuSurface};
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::io::{Read, Write};
+use std::ffi::OsString;
+use std::io::{self, Read, Write};
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
@@ -38,6 +41,9 @@ const START_LOCATION: &str = "about:blank";
 const START_PAGE: &str = include_str!("../../assets/z1-start.html");
 const HTTP_SMOKE_BODY: &str = "<main>Zorya real HTTP navigation</main>";
 const NAVIGATION_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const PRODUCT_DATA_DIRECTORY: &str = "Zorya";
+const PROFILES_DIRECTORY: &str = "Profiles";
+const DEFAULT_PROFILE_DIRECTORY: &str = "Default";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WorkerNavigationTarget {
@@ -100,6 +106,25 @@ fn spawn_http_smoke_server() -> Result<String, std::io::Error> {
     Ok(format!("http://{address}/zorya-http-smoke"))
 }
 
+fn profile_root_from_local_app_data(local_app_data: Option<OsString>) -> io::Result<PathBuf> {
+    let local_app_data = local_app_data
+        .filter(|value| !value.as_os_str().is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "LOCALAPPDATA is unavailable for the default Zorya profile",
+            )
+        })?;
+    Ok(PathBuf::from(local_app_data)
+        .join(PRODUCT_DATA_DIRECTORY)
+        .join(PROFILES_DIRECTORY)
+        .join(DEFAULT_PROFILE_DIRECTORY))
+}
+
+fn default_profile_root() -> io::Result<PathBuf> {
+    profile_root_from_local_app_data(std::env::var_os("LOCALAPPDATA"))
+}
+
 pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
     let http_smoke_location = if mode == RunMode::ExitAfterRealHttpNavigation {
         Some(spawn_http_smoke_server()?)
@@ -123,15 +148,27 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         .intent()
         .id();
     let proxy = event_loop.create_proxy();
-    let mut shell = NativeShell::new(
+    let mut profile_runtime = ProfileRuntime::new();
+    let initial_profile_selection = profile_runtime
+        .begin_selection(default_profile_root()?)?
+        .into_intent();
+    let profile_worker = ProfileWorker::spawn({
+        let proxy = proxy.clone();
+        move |completion| {
+            let _ = proxy.send_event(WorkerEvent::Profile(completion));
+        }
+    })?;
+    let startup = NativeShellStartup {
         browser,
         browser_window,
         tab,
         initial_navigation,
-        proxy,
-        mode,
+        profile_runtime,
+        profile_worker,
+        initial_profile_selection,
         http_smoke_location,
-    );
+    };
+    let mut shell = NativeShell::new(startup, proxy, mode);
     event_loop.run_app(&mut shell)?;
 
     if let Some(error) = shell.fatal_error.take() {
@@ -142,6 +179,7 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
 }
 
 enum WorkerEvent {
+    Profile(ProfileWorkerCompletion),
     GpuReady {
         target: AsyncTarget,
         result: Result<Arc<WindowsGpuDevice>, String>,
@@ -314,9 +352,23 @@ struct PendingNativeTabCreate {
     activate_after_create: bool,
 }
 
+struct NativeShellStartup {
+    browser: BrowserApp,
+    browser_window: BrowserWindowId,
+    tab: TabId,
+    initial_navigation: NavigationId,
+    profile_runtime: ProfileRuntime,
+    profile_worker: ProfileWorker,
+    initial_profile_selection: ProfileSelectionIntent,
+    http_smoke_location: Option<String>,
+}
+
 struct NativeShell {
     browser: BrowserApp,
     browser_window: BrowserWindowId,
+    profile_runtime: ProfileRuntime,
+    profile_worker: Option<ProfileWorker>,
+    initial_profile_selection: Option<ProfileSelectionIntent>,
     tab: TabId,
     presentation: TabPresentationHandoff,
     pending_target_permit: Option<TargetFramePermit>,
@@ -348,17 +400,26 @@ struct NativeShell {
 
 impl NativeShell {
     fn new(
-        browser: BrowserApp,
-        browser_window: BrowserWindowId,
-        tab: TabId,
-        initial_navigation: NavigationId,
+        startup: NativeShellStartup,
         proxy: EventLoopProxy<WorkerEvent>,
         run_mode: RunMode,
-        http_smoke_location: Option<String>,
     ) -> Self {
+        let NativeShellStartup {
+            browser,
+            browser_window,
+            tab,
+            initial_navigation,
+            profile_runtime,
+            profile_worker,
+            initial_profile_selection,
+            http_smoke_location,
+        } = startup;
         Self {
             browser,
             browser_window,
+            profile_runtime,
+            profile_worker: Some(profile_worker),
+            initial_profile_selection: Some(initial_profile_selection),
             tab,
             presentation: TabPresentationHandoff::new(tab),
             pending_target_permit: None,
@@ -386,6 +447,122 @@ impl NativeShell {
             needs_redraw: false,
             run_mode,
             fatal_error: None,
+        }
+    }
+
+    fn submit_initial_profile_selection(&mut self) -> Result<(), String> {
+        if self.initial_profile_selection.is_none() {
+            return Ok(());
+        }
+        let worker = self.profile_worker.as_ref().ok_or_else(|| {
+            "profile worker is unavailable before initial profile selection".to_string()
+        })?;
+        let intent = self
+            .initial_profile_selection
+            .take()
+            .expect("initial profile selection was checked");
+        let selection = intent.id();
+
+        match worker.prepare(intent) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let message = error.to_string();
+                let intent = error.into_work();
+                debug_assert_eq!(intent.id(), selection);
+                self.profile_runtime
+                    .cancel_selection(selection)
+                    .map_err(|cancel| {
+                        format!(
+                            "failed to submit initial profile preparation: {message}; failed to cancel selection: {cancel}"
+                        )
+                    })?;
+                Err(format!(
+                    "failed to submit initial profile preparation: {message}"
+                ))
+            }
+        }
+    }
+
+    fn handle_profile_worker_completion(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        completion: ProfileWorkerCompletion,
+    ) {
+        match completion {
+            ProfileWorkerCompletion::Prepared { selection, result } => {
+                let prepared = match result {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        let cancellation = self.profile_runtime.cancel_selection(selection);
+                        let message = match cancellation {
+                            Ok(_) => format!(
+                                "failed to prepare profile selection {}: {error}",
+                                selection.get()
+                            ),
+                            Err(cancel) => format!(
+                                "failed to prepare profile selection {}: {error}; failed to cancel selection: {cancel}",
+                                selection.get()
+                            ),
+                        };
+                        self.fail(event_loop, message);
+                        return;
+                    }
+                };
+
+                if prepared.selection() != selection {
+                    self.fail(
+                        event_loop,
+                        format!(
+                            "profile worker completion {} returned prepared selection {}",
+                            selection.get(),
+                            prepared.selection().get()
+                        ),
+                    );
+                    return;
+                }
+
+                if let Err(error) = self.profile_runtime.commit_selection(prepared) {
+                    self.fail(
+                        event_loop,
+                        format!(
+                            "failed to commit prepared profile selection {}: {error}",
+                            selection.get()
+                        ),
+                    );
+                    return;
+                }
+
+                if let Err(error) = self.initialize(event_loop) {
+                    self.fail(event_loop, error);
+                }
+            }
+            ProfileWorkerCompletion::HistorySaved(completion) => {
+                let save = completion.id();
+                let storage_error = completion.result().as_ref().err().map(ToString::to_string);
+                match self
+                    .profile_runtime
+                    .complete_browsing_history_save(completion)
+                {
+                    Ok(_) => {
+                        if let Some(error) = storage_error {
+                            self.fail(
+                                event_loop,
+                                format!(
+                                    "browsing-history save {} failed on profile worker: {error}",
+                                    save.get()
+                                ),
+                            );
+                        }
+                    }
+                    Err(error) => self.fail(
+                        event_loop,
+                        format!(
+                            "failed to reconcile browsing-history save {}: {error}",
+                            save.get()
+                        ),
+                    ),
+                }
+            }
         }
     }
 
@@ -1205,6 +1382,9 @@ impl NativeShell {
 
     fn handle_worker_event(&mut self, event_loop: &ActiveEventLoop, event: WorkerEvent) {
         match event {
+            WorkerEvent::Profile(completion) => {
+                self.handle_profile_worker_completion(event_loop, completion);
+            }
             WorkerEvent::GpuReady { target, result } => {
                 if !self.pending_init.is_current(target) || !self.target_alive(target) {
                     return;
@@ -1660,6 +1840,7 @@ impl NativeShell {
         self.pending_view_close = None;
         self.rapid_smoke_tabs.clear();
         self.worker_ready = false;
+        drop(self.profile_worker.take());
         if let Some(worker) = self.worker.take() {
             worker.shutdown();
         }
@@ -1684,6 +1865,13 @@ impl NativeShell {
 
 impl ApplicationHandler<WorkerEvent> for NativeShell {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.profile_runtime.active_profile().is_none() {
+            if let Err(error) = self.submit_initial_profile_selection() {
+                self.fail(event_loop, error);
+            }
+            return;
+        }
+
         if let Err(error) = self.initialize(event_loop) {
             self.fail(event_loop, error);
         }
@@ -1736,6 +1924,7 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        drop(self.profile_worker.take());
         if let Some(worker) = self.worker.take() {
             worker.shutdown();
         }
@@ -2478,5 +2667,33 @@ impl WebContentSurface {
                 error.message()
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_profile_root_is_stable_under_local_app_data() {
+        let local_app_data = OsString::from(r"C:\Users\Zorya\AppData\Local");
+        let root = profile_root_from_local_app_data(Some(local_app_data)).unwrap();
+
+        assert_eq!(
+            root,
+            PathBuf::from(r"C:\Users\Zorya\AppData\Local")
+                .join(PRODUCT_DATA_DIRECTORY)
+                .join(PROFILES_DIRECTORY)
+                .join(DEFAULT_PROFILE_DIRECTORY)
+        );
+    }
+
+    #[test]
+    fn missing_local_app_data_fails_closed() {
+        let missing = profile_root_from_local_app_data(None).unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+
+        let empty = profile_root_from_local_app_data(Some(OsString::new())).unwrap_err();
+        assert_eq!(empty.kind(), io::ErrorKind::NotFound);
     }
 }
