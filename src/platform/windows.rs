@@ -2103,11 +2103,18 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
             return;
         }
 
-        let control_flow = self
-            .history_scheduler
-            .next_save_due_millis()
-            .and_then(|deadline| self.history_clock.deadline(deadline))
-            .map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
+        let control_flow = if self
+            .profile_runtime
+            .pending_browsing_history_save()
+            .is_some()
+        {
+            ControlFlow::Wait
+        } else {
+            self.history_scheduler
+                .next_save_due_millis()
+                .and_then(|deadline| self.history_clock.deadline(deadline))
+                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
+        };
         event_loop.set_control_flow(control_flow);
     }
 
