@@ -10,8 +10,9 @@ use crate::engine::{
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     NavigationId, NavigationStart, PreparedProfile, PresentationFramePermit,
-    PresentationGeneration, PresentationHandoffError, ProfileCatalogDiscoverIntent,
-    ProfileCatalogEntry, ProfileHistorySavePolicy, ProfileHistorySaveScheduler,
+    PresentationGeneration, PresentationHandoffError, ProfileCatalogCreateIntent,
+    ProfileCatalogDiscoverIntent, ProfileCatalogEntry, ProfileHistorySavePolicy,
+    ProfileHistorySaveScheduler,
     ProfileHistorySaveUrgency, ProfileId, ProfileLock, ProfileLockOwner, ProfileRuntime,
     ProfileRuntimeError, ProfileSelectionIntent, ProfileSettingsSavePolicy,
     ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency, ProfileStorageId, ProfileWorker,
@@ -511,6 +512,12 @@ struct PendingProfileCatalogDiscovery {
     submitted: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingProfileSmokeCreate {
+    intent: ProfileCatalogCreateIntent,
+    submitted: bool,
+}
+
 struct NativeShellStartup {
     browser: BrowserApp,
     browser_window: BrowserWindowId,
@@ -534,6 +541,8 @@ struct NativeShell {
     initial_profile_selection: Option<ProfileSelectionIntent>,
     profiles_root: PathBuf,
     pending_profile_catalog_discovery: Option<PendingProfileCatalogDiscovery>,
+    pending_profile_smoke_create: Option<PendingProfileSmokeCreate>,
+    profile_cycle_smoke_start: Option<ProfileStorageId>,
     pending_profile_selection_submission: Option<ProfileSelectionIntent>,
     pending_profile_replacement: Option<PreparedProfile>,
     pending_profile_session_reset: PendingRequest,
@@ -600,6 +609,8 @@ impl NativeShell {
             initial_profile_selection: Some(initial_profile_selection),
             profiles_root,
             pending_profile_catalog_discovery: None,
+            pending_profile_smoke_create: None,
+            profile_cycle_smoke_start: None,
             pending_profile_selection_submission: None,
             pending_profile_replacement: None,
             pending_profile_session_reset: PendingRequest::default(),
@@ -663,6 +674,7 @@ impl NativeShell {
 
     fn profile_transition_in_progress(&self) -> bool {
         self.pending_profile_catalog_discovery.is_some()
+            || self.pending_profile_smoke_create.is_some()
             || self.profile_runtime.pending_selection().is_some()
             || self.pending_profile_selection_submission.is_some()
             || self.pending_profile_replacement.is_some()
