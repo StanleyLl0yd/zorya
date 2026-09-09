@@ -22,6 +22,9 @@ fn main() -> ExitCode {
         (Some(argument), None) if argument == "--native-http-navigation-smoke" => {
             finish(zorya::run_native_http_navigation_smoke())
         }
+        (Some(argument), None) if argument == "--native-profile-cycle-smoke" => {
+            finish(zorya::run_native_profile_cycle_smoke())
+        }
         (None, None) => finish(zorya::run()),
         _ => {
             eprintln!("zorya: unsupported command-line arguments");
