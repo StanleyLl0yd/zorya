@@ -58,8 +58,8 @@ impl std::error::Error for ProfileWorkerSpawnError {}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProfileWorkerSubmitError<T> {
-    Full(T),
-    Unavailable(T),
+    Full(Box<T>),
+    Unavailable(Box<T>),
 }
 
 impl<T> ProfileWorkerSubmitError<T> {
@@ -69,7 +69,7 @@ impl<T> ProfileWorkerSubmitError<T> {
 
     pub fn into_work(self) -> T {
         match self {
-            Self::Full(work) | Self::Unavailable(work) => work,
+            Self::Full(work) | Self::Unavailable(work) => *work,
         }
     }
 }
@@ -121,10 +121,10 @@ impl ProfileWorker {
         match self.sender.try_send(ProfileWorkerCommand::Prepare(intent)) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(ProfileWorkerCommand::Prepare(intent))) => {
-                Err(ProfileWorkerSubmitError::Full(intent))
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
             }
             Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(intent))) => {
-                Err(ProfileWorkerSubmitError::Unavailable(intent))
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
             }
             Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
             | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
@@ -147,10 +147,10 @@ impl ProfileWorker {
         {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(intent))) => {
-                Err(ProfileWorkerSubmitError::Full(intent))
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
             }
             Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(intent))) => {
-                Err(ProfileWorkerSubmitError::Unavailable(intent))
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
             }
             Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
             | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
@@ -173,10 +173,10 @@ impl ProfileWorker {
         {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(intent))) => {
-                Err(ProfileWorkerSubmitError::Full(intent))
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
             }
             Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(intent))) => {
-                Err(ProfileWorkerSubmitError::Unavailable(intent))
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
             }
             Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
             | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
@@ -199,10 +199,10 @@ impl ProfileWorker {
         {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(lock))) => {
-                Err(ProfileWorkerSubmitError::Full(lock))
+                Err(ProfileWorkerSubmitError::Full(Box::new(lock)))
             }
             Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(lock))) => {
-                Err(ProfileWorkerSubmitError::Unavailable(lock))
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(lock)))
             }
             Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
             | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))

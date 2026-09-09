@@ -475,6 +475,7 @@ struct NativeShell {
     run_mode: RunMode,
     shutdown_requested: bool,
     pending_profile_lock_release: Option<ProfileLockOwner>,
+    profile_lock_release_completed: bool,
     fatal_error: Option<String>,
 }
 
@@ -531,6 +532,7 @@ impl NativeShell {
             run_mode,
             shutdown_requested: false,
             pending_profile_lock_release: None,
+            profile_lock_release_completed: false,
             fatal_error: None,
         }
     }
@@ -697,6 +699,10 @@ impl NativeShell {
     }
 
     fn continue_shutdown_after_profile_flush(&mut self, event_loop: &ActiveEventLoop) {
+        if self.profile_lock_release_completed {
+            self.finish_shutdown(event_loop);
+            return;
+        }
         if self.pending_profile_lock_release.is_some() {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
@@ -847,6 +853,7 @@ impl NativeShell {
                     return;
                 }
                 self.pending_profile_lock_release = None;
+                self.profile_lock_release_completed = true;
                 if let Err(error) = result {
                     if self.fatal_error.is_none() {
                         self.fatal_error = Some(format!(

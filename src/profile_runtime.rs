@@ -337,6 +337,7 @@ impl ActiveProfile {
         &self.root
     }
 
+    #[cfg(target_os = "windows")]
     pub(crate) const fn profile_lock(&self) -> &ProfileLock {
         &self.lock
     }
