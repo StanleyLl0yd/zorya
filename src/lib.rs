@@ -14,6 +14,7 @@ mod presentation_handoff;
 mod profile;
 mod profile_history_scheduler;
 mod profile_runtime;
+mod profile_settings_scheduler;
 mod profile_worker;
 mod tab_activation;
 mod tab_close;
@@ -54,6 +55,10 @@ pub use profile_runtime::{
     ProfilePreparationError, ProfileRuntime, ProfileRuntimeError, ProfileSelectionCommit,
     ProfileSelectionId, ProfileSelectionIntent, ProfileSelectionStart, ProfileSettingsError,
     ProfileSettingsSaveCompletion, ProfileSettingsSaveId, ProfileSettingsSaveIntent,
+};
+pub use profile_settings_scheduler::{
+    ProfileSettingsSavePolicy, ProfileSettingsSavePolicyError, ProfileSettingsSaveScheduler,
+    ProfileSettingsSaveUrgency,
 };
 pub use profile_worker::{
     PROFILE_WORKER_COMMAND_QUEUE_CAPACITY, ProfileWorker, ProfileWorkerCompletion,
