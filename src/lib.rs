@@ -51,8 +51,7 @@ pub use profile_history_scheduler::{
     ProfileHistorySaveUrgency,
 };
 pub use profile_lock::{
-    MAX_PROFILE_LOCK_BYTES, PROFILE_LOCK_FILE_NAME, ProfileLock, ProfileLockError,
-    ProfileLockOwner,
+    MAX_PROFILE_LOCK_BYTES, PROFILE_LOCK_FILE_NAME, ProfileLock, ProfileLockError, ProfileLockOwner,
 };
 pub use profile_runtime::{
     ActiveProfile, ColorSchemePreference, PreparedProfile, ProductSettings,
