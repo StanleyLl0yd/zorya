@@ -1,6 +1,7 @@
 use crate::profile_catalog::{
     ProfileCatalogCreateError, ProfileCatalogCreateIntent, ProfileCatalogDiscoverIntent,
-    ProfileCatalogEntry, ProfileCatalogError, ProfileCatalogRenameError, ProfileCatalogRenameIntent,
+    ProfileCatalogEntry, ProfileCatalogError, ProfileCatalogRenameError,
+    ProfileCatalogRenameIntent,
 };
 use crate::profile_lock::{ProfileLock, ProfileLockError, ProfileLockOwner};
 use crate::profile_metadata::ProfileMetadata;
@@ -411,13 +412,9 @@ mod tests {
         assert_eq!(completed_discover, discover);
         assert_eq!(result.unwrap(), vec![created.clone()]);
 
-        let rename = ProfileCatalogRenameIntent::new(
-            created.root(),
-            storage_id,
-            generation,
-            "Work",
-        )
-        .unwrap();
+        let rename =
+            ProfileCatalogRenameIntent::new(created.root(), storage_id, generation, "Work")
+                .unwrap();
         worker.rename_profile(rename.clone()).unwrap();
         let (thread_name, completion) = receive(&receiver);
         assert_eq!(thread_name, "zorya-profile");
