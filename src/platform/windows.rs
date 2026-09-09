@@ -11,8 +11,8 @@ use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     NavigationId, NavigationStart, PresentationFramePermit, PresentationGeneration,
     PresentationHandoffError, ProfileHistorySavePolicy, ProfileHistorySaveScheduler,
-    ProfileHistorySaveUrgency, ProfileRuntime, ProfileSelectionIntent, ProfileSettingsSavePolicy,
-    ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency, ProfileWorker,
+    ProfileHistorySaveUrgency, ProfileLockOwner, ProfileRuntime, ProfileSelectionIntent,
+    ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency, ProfileWorker,
     ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection, TabId,
     TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
@@ -474,6 +474,7 @@ struct NativeShell {
     needs_redraw: bool,
     run_mode: RunMode,
     shutdown_requested: bool,
+    pending_profile_lock_release: Option<ProfileLockOwner>,
     fatal_error: Option<String>,
 }
 
@@ -529,6 +530,7 @@ impl NativeShell {
             needs_redraw: false,
             run_mode,
             shutdown_requested: false,
+            pending_profile_lock_release: None,
             fatal_error: None,
         }
     }
@@ -694,6 +696,56 @@ impl NativeShell {
         self.drive_history_save(history_urgency)
     }
 
+    fn continue_shutdown_after_profile_flush(&mut self, event_loop: &ActiveEventLoop) {
+        if self.pending_profile_lock_release.is_some() {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
+        let Some(lock) = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| profile.profile_lock().clone())
+        else {
+            self.finish_shutdown(event_loop);
+            return;
+        };
+        let owner = lock.owner();
+        let Some(worker) = self.profile_worker.as_ref() else {
+            if self.fatal_error.is_none() {
+                self.fatal_error =
+                    Some("profile worker is unavailable for profile-lock release".to_string());
+            }
+            self.finish_shutdown(event_loop);
+            return;
+        };
+
+        match worker.release_lock(lock) {
+            Ok(()) => {
+                self.pending_profile_lock_release = Some(owner);
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+            Err(error) if error.is_full() => {
+                let returned = error.into_work();
+                debug_assert_eq!(returned.owner(), owner);
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let returned = error.into_work();
+                debug_assert_eq!(returned.owner(), owner);
+                if self.fatal_error.is_none() {
+                    self.fatal_error = Some(format!(
+                        "failed to submit profile-lock release for owner {}:{}: {message}",
+                        owner.process_id(),
+                        owner.owner_id()
+                    ));
+                }
+                self.finish_shutdown(event_loop);
+            }
+        }
+    }
+
     fn submit_initial_profile_selection(&mut self) -> Result<(), String> {
         if self.initial_profile_selection.is_none() {
             return Ok(());
@@ -780,6 +832,32 @@ impl NativeShell {
                     self.fail(event_loop, error);
                 }
             }
+            ProfileWorkerCompletion::LockReleased { owner, result } => {
+                let expected = self.pending_profile_lock_release;
+                if expected != Some(owner) {
+                    if self.fatal_error.is_none() {
+                        self.fatal_error = Some(format!(
+                            "profile-lock release {}:{} is stale; expected {:?}",
+                            owner.process_id(),
+                            owner.owner_id(),
+                            expected
+                        ));
+                    }
+                    self.finish_shutdown(event_loop);
+                    return;
+                }
+                self.pending_profile_lock_release = None;
+                if let Err(error) = result {
+                    if self.fatal_error.is_none() {
+                        self.fatal_error = Some(format!(
+                            "profile-lock release {}:{} failed on profile worker: {error}",
+                            owner.process_id(),
+                            owner.owner_id()
+                        ));
+                    }
+                }
+                self.finish_shutdown(event_loop);
+            }
             ProfileWorkerCompletion::SettingsSaved(completion) => {
                 let save = completion.id();
                 let storage_error = completion.result().as_ref().err().map(ToString::to_string);
@@ -803,7 +881,7 @@ impl NativeShell {
                         }
                         if self.shutdown_requested {
                             match self.profile_flush_complete() {
-                                Ok(true) => self.finish_shutdown(event_loop),
+                                Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
                                 Ok(false) => {}
                                 Err(error) => self.fail(event_loop, error),
                             }
@@ -844,7 +922,7 @@ impl NativeShell {
                         }
                         if self.shutdown_requested {
                             match self.profile_flush_complete() {
-                                Ok(true) => self.finish_shutdown(event_loop),
+                                Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
                                 Ok(false) => {}
                                 Err(error) => self.fail(event_loop, error),
                             }
@@ -2174,7 +2252,7 @@ impl NativeShell {
             return;
         }
         match self.profile_flush_complete() {
-            Ok(true) => self.finish_shutdown(event_loop),
+            Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
             Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
             Err(error) => {
                 if self.fatal_error.is_none() {
@@ -2224,7 +2302,7 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
 
         if self.shutdown_requested {
             match self.profile_flush_complete() {
-                Ok(true) => self.finish_shutdown(event_loop),
+                Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
                 Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
                 Err(error) => self.fail(event_loop, error),
             }
