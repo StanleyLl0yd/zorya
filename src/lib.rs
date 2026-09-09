@@ -3,6 +3,7 @@ mod app;
 mod async_lifecycle;
 #[cfg(target_os = "windows")]
 mod branding;
+mod browsing_history;
 mod chrome;
 mod commands;
 pub mod engine;
@@ -18,6 +19,12 @@ mod tab_strip;
 
 pub use app::{
     BrowserApp, BrowserModelError, BrowserWindow, BrowserWindowId, Tab, TabCloseResult, TabId,
+};
+pub use browsing_history::{
+    BROWSING_HISTORY_SCHEMA_VERSION, BrowsingHistoryCleanupWarning, BrowsingHistoryError,
+    BrowsingHistoryLoad, BrowsingHistoryRecord, BrowsingHistoryRecovery, BrowsingHistorySave,
+    BrowsingHistorySnapshot, BrowsingHistoryStore, BrowsingHistoryVisit, BrowsingHistoryVisitId,
+    MAX_BROWSING_HISTORY_RECORD_BYTES, MAX_BROWSING_HISTORY_VISITS, MAX_HISTORY_LOCATION_BYTES,
 };
 pub use chrome::{AddressBarEdit, AddressBarState, AddressBarSubmission, WindowChromeSnapshot};
 pub use commands::{BrowserCommand, BrowserCommandEffect};
