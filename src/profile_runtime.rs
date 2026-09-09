@@ -235,8 +235,8 @@ impl PreparedProfile {
         let lock =
             ProfileLock::acquire(intent.root.clone()).map_err(ProfilePreparationError::Lock)?;
         let prepared = (|| {
-            let storage_id =
-                load_or_create_profile_storage_id(&lock).map_err(ProfilePreparationError::Identity)?;
+            let storage_id = load_or_create_profile_storage_id(&lock)
+                .map_err(ProfilePreparationError::Identity)?;
             let store = ProfileStore::open(intent.root.clone())
                 .map_err(ProfilePreparationError::Storage)?;
             let load = store
@@ -263,13 +263,8 @@ impl PreparedProfile {
             ))
         })();
 
-        let (
-            storage_id,
-            settings,
-            settings_recovery,
-            browsing_history,
-            browsing_history_recovery,
-        ) = match prepared {
+        let (storage_id, settings, settings_recovery, browsing_history, browsing_history_recovery) =
+            match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     return match lock.release() {
