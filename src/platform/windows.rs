@@ -2968,6 +2968,15 @@ mod tests {
     }
 
     #[test]
+    fn native_history_save_policy_matches_product_bounds() {
+        let policy = native_history_save_policy();
+
+        assert_eq!(policy.debounce_millis(), 5_000);
+        assert_eq!(policy.max_dirty_millis(), 30_000);
+        assert_eq!(policy.mutation_threshold(), 32);
+    }
+
+    #[test]
     fn committed_native_navigation_records_exact_active_profile_visit() {
         let (_root, mut runtime) = active_profile_runtime();
         let profile = runtime.active_profile().unwrap().id();
