@@ -1146,7 +1146,7 @@ mod tests {
     fn settings_directory_scan_is_bounded_even_for_unrelated_files() {
         let directory = TestDirectory::new();
         let store = ProfileStore::open(directory.path()).expect("open profile");
-        let lock = ProfileLock::acquire(directory.path()).unwrap();
+        let _lock = ProfileLock::acquire(directory.path()).unwrap();
 
         for index in 0..=MAX_SETTINGS_DIRECTORY_ENTRIES {
             fs::write(
