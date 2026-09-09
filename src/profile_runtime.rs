@@ -1176,7 +1176,10 @@ mod tests {
 
         let first = runtime.commit_selection(loaded).unwrap().active_profile();
         assert!(!runtime.browsing_history_is_dirty(first).unwrap());
-        assert_eq!(runtime.browsing_history_unsaved_mutations(first).unwrap(), 0);
+        assert_eq!(
+            runtime.browsing_history_unsaved_mutations(first).unwrap(),
+            0
+        );
         runtime
             .active_browsing_history_mut(first)
             .unwrap()
@@ -1184,7 +1187,10 @@ mod tests {
             .unwrap();
         assert_eq!(runtime.active_browsing_history(first).unwrap().len(), 2);
         assert!(runtime.browsing_history_is_dirty(first).unwrap());
-        assert_eq!(runtime.browsing_history_unsaved_mutations(first).unwrap(), 1);
+        assert_eq!(
+            runtime.browsing_history_unsaved_mutations(first).unwrap(),
+            1
+        );
 
         let replacement = runtime
             .begin_selection("replacement")
@@ -1262,7 +1268,10 @@ mod tests {
         ));
         assert!(runtime.active_browsing_history(profile).unwrap().is_empty());
         assert!(!runtime.browsing_history_is_dirty(profile).unwrap());
-        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 0);
+        assert_eq!(
+            runtime.browsing_history_unsaved_mutations(profile).unwrap(),
+            0
+        );
 
         let valid = committed_navigation("https://example.test/valid");
         let record = runtime
@@ -1278,11 +1287,16 @@ mod tests {
         let profile = load_profile(&mut runtime, root.path());
 
         assert!(!runtime.browsing_history_is_dirty(profile).unwrap());
-        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 0);
-        assert!(runtime
-            .begin_browsing_history_save_if_dirty(profile)
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            runtime.browsing_history_unsaved_mutations(profile).unwrap(),
+            0
+        );
+        assert!(
+            runtime
+                .begin_browsing_history_save_if_dirty(profile)
+                .unwrap()
+                .is_none()
+        );
 
         runtime
             .record_committed_navigation(
@@ -1293,7 +1307,10 @@ mod tests {
             .unwrap();
 
         assert!(runtime.browsing_history_is_dirty(profile).unwrap());
-        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 1);
+        assert_eq!(
+            runtime.browsing_history_unsaved_mutations(profile).unwrap(),
+            1
+        );
         let intent = runtime
             .begin_browsing_history_save_if_dirty(profile)
             .unwrap()
@@ -1327,13 +1344,19 @@ mod tests {
                 committed_navigation("https://example.test/second"),
             )
             .unwrap();
-        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 2);
+        assert_eq!(
+            runtime.browsing_history_unsaved_mutations(profile).unwrap(),
+            2
+        );
 
         let completion = intent.execute();
         assert_eq!(completion.mutation_revision(), 1);
         runtime.complete_browsing_history_save(completion).unwrap();
         assert!(runtime.browsing_history_is_dirty(profile).unwrap());
-        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 1);
+        assert_eq!(
+            runtime.browsing_history_unsaved_mutations(profile).unwrap(),
+            1
+        );
 
         let completion = runtime
             .begin_browsing_history_save_if_dirty(profile)
@@ -1342,11 +1365,16 @@ mod tests {
             .execute();
         runtime.complete_browsing_history_save(completion).unwrap();
         assert!(!runtime.browsing_history_is_dirty(profile).unwrap());
-        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 0);
-        assert!(runtime
-            .begin_browsing_history_save_if_dirty(profile)
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            runtime.browsing_history_unsaved_mutations(profile).unwrap(),
+            0
+        );
+        assert!(
+            runtime
+                .begin_browsing_history_save_if_dirty(profile)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1358,7 +1386,10 @@ mod tests {
         let _ = runtime.active_browsing_history_mut(profile).unwrap();
 
         assert!(runtime.browsing_history_is_dirty(profile).unwrap());
-        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 1);
+        assert_eq!(
+            runtime.browsing_history_unsaved_mutations(profile).unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1486,7 +1517,10 @@ mod tests {
         assert_eq!(active.len(), 1);
         assert!(runtime.pending_browsing_history_save().is_none());
         assert!(runtime.browsing_history_is_dirty(profile).unwrap());
-        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 1);
+        assert_eq!(
+            runtime.browsing_history_unsaved_mutations(profile).unwrap(),
+            1
+        );
     }
 
     #[test]
