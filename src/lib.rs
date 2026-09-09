@@ -14,6 +14,7 @@ mod presentation_handoff;
 mod profile;
 mod profile_history_scheduler;
 mod profile_runtime;
+mod profile_worker;
 mod tab_activation;
 mod tab_close;
 mod tab_strip;
@@ -52,6 +53,10 @@ pub use profile_runtime::{
     ProfileHistorySaveCompletion, ProfileHistorySaveId, ProfileHistorySaveIntent, ProfileId,
     ProfilePreparationError, ProfileRuntime, ProfileRuntimeError, ProfileSelectionCommit,
     ProfileSelectionId, ProfileSelectionIntent, ProfileSelectionStart, ProfileSettingsError,
+};
+pub use profile_worker::{
+    PROFILE_WORKER_COMMAND_QUEUE_CAPACITY, ProfileWorker, ProfileWorkerCompletion,
+    ProfileWorkerSpawnError, ProfileWorkerSubmitError,
 };
 pub use tab_activation::{
     TabActivationId, TabActivationIntent, TabActivationStart, TabCycleDirection,
