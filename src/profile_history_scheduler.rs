@@ -121,6 +121,21 @@ impl ProfileHistorySaveScheduler {
         self.profile
     }
 
+    pub fn next_save_due_millis(&self) -> Option<u64> {
+        let debounce_due = self
+            .last_mutation_millis
+            .map(|last| last.saturating_add(self.policy.debounce_millis));
+        let max_age_due = self
+            .first_dirty_millis
+            .map(|first| first.saturating_add(self.policy.max_dirty_millis));
+        match (debounce_due, max_age_due) {
+            (Some(debounce), Some(max_age)) => Some(debounce.min(max_age)),
+            (Some(debounce), None) => Some(debounce),
+            (None, Some(max_age)) => Some(max_age),
+            (None, None) => None,
+        }
+    }
+
     pub fn poll(
         &mut self,
         runtime: &mut ProfileRuntime,
@@ -385,6 +400,55 @@ mod tests {
             19,
             ProfileHistorySaveUrgency::Normal,
         ));
+    }
+
+    #[test]
+    fn next_save_deadline_tracks_debounce_and_max_dirty_age() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        let mut scheduler = ProfileHistorySaveScheduler::new(policy(10, 20, 100));
+
+        assert_eq!(scheduler.next_save_due_millis(), None);
+
+        record(&mut runtime, profile, 1);
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            0,
+            ProfileHistorySaveUrgency::Normal,
+        ));
+        assert_eq!(scheduler.next_save_due_millis(), Some(10));
+
+        record(&mut runtime, profile, 2);
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            9,
+            ProfileHistorySaveUrgency::Normal,
+        ));
+        assert_eq!(scheduler.next_save_due_millis(), Some(19));
+
+        record(&mut runtime, profile, 3);
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            15,
+            ProfileHistorySaveUrgency::Normal,
+        ));
+        assert_eq!(scheduler.next_save_due_millis(), Some(20));
+
+        assert!(scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            20,
+            ProfileHistorySaveUrgency::Normal,
+        ));
+        assert_eq!(scheduler.next_save_due_millis(), None);
     }
 
     #[test]

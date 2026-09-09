@@ -886,6 +886,21 @@ impl ProfileRuntime {
         })
     }
 
+    pub fn cancel_browsing_history_save(
+        &mut self,
+        save: ProfileHistorySaveId,
+    ) -> Result<(), ProfileRuntimeError> {
+        let expected = self.pending_history_save.map(|pending| pending.id);
+        if expected != Some(save) {
+            return Err(ProfileRuntimeError::StaleBrowsingHistorySave {
+                expected,
+                actual: save,
+            });
+        }
+        self.pending_history_save = None;
+        Ok(())
+    }
+
     pub fn complete_browsing_history_save(
         &mut self,
         completion: ProfileHistorySaveCompletion,
@@ -1581,6 +1596,68 @@ mod tests {
             0
         );
         assert!(runtime.active_browsing_history(second).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelling_exact_history_save_preserves_dirty_state_for_retry() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        runtime
+            .record_committed_navigation(
+                profile,
+                100,
+                committed_navigation("https://example.test/dirty"),
+            )
+            .unwrap();
+
+        let first = runtime
+            .begin_browsing_history_save_if_dirty(profile)
+            .unwrap()
+            .unwrap();
+        let first_id = first.id();
+        assert_eq!(runtime.pending_browsing_history_save(), Some(first_id));
+
+        runtime.cancel_browsing_history_save(first_id).unwrap();
+
+        assert!(runtime.pending_browsing_history_save().is_none());
+        assert!(runtime.browsing_history_is_dirty(profile).unwrap());
+        assert_eq!(
+            runtime.browsing_history_unsaved_mutations(profile).unwrap(),
+            1
+        );
+        let retry = runtime
+            .begin_browsing_history_save_if_dirty(profile)
+            .unwrap()
+            .expect("cancelled dirty save should be retryable");
+        assert_ne!(retry.id(), first_id);
+    }
+
+    #[test]
+    fn stale_history_save_cancellation_cannot_clear_current_pending_save() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        runtime
+            .record_committed_navigation(
+                profile,
+                100,
+                committed_navigation("https://example.test/dirty"),
+            )
+            .unwrap();
+
+        let first = runtime.begin_browsing_history_save(profile).unwrap().id();
+        runtime.cancel_browsing_history_save(first).unwrap();
+        let current = runtime.begin_browsing_history_save(profile).unwrap().id();
+
+        assert_eq!(
+            runtime.cancel_browsing_history_save(first),
+            Err(ProfileRuntimeError::StaleBrowsingHistorySave {
+                expected: Some(current),
+                actual: first,
+            })
+        );
+        assert_eq!(runtime.pending_browsing_history_save(), Some(current));
     }
 
     #[test]
