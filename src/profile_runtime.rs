@@ -268,6 +268,10 @@ impl PreparedProfile {
         &self.root
     }
 
+    pub(crate) const fn profile_lock(&self) -> &ProfileLock {
+        &self.lock
+    }
+
     pub const fn settings(&self) -> &ProductSettings {
         &self.settings
     }
