@@ -573,12 +573,7 @@ mod tests {
             ProfileHistorySaveUrgency::Normal,
         ));
         let save = scheduler
-            .poll(
-                &mut runtime,
-                first,
-                100,
-                ProfileHistorySaveUrgency::Flush,
-            )
+            .poll(&mut runtime, first, 100, ProfileHistorySaveUrgency::Flush)
             .unwrap()
             .expect("replacement must flush dirty history");
         runtime
