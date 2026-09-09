@@ -79,7 +79,11 @@ impl fmt::Display for ProfileIdentityError {
                 "profile identity directory contains {found} entries; limit is {limit}"
             ),
             Self::Corrupt { path } => {
-                write!(formatter, "profile identity is malformed: {}", path.display())
+                write!(
+                    formatter,
+                    "profile identity is malformed: {}",
+                    path.display()
+                )
             }
             Self::UnsupportedSchema { path, schema } => write!(
                 formatter,
@@ -91,9 +95,8 @@ impl fmt::Display for ProfileIdentityError {
                 "profile identity was created concurrently: {}",
                 path.display()
             ),
-            Self::SystemClockBeforeUnixEpoch => {
-                formatter.write_str("system clock precedes Unix epoch while allocating profile identity")
-            }
+            Self::SystemClockBeforeUnixEpoch => formatter
+                .write_str("system clock precedes Unix epoch while allocating profile identity"),
             Self::StorageIdTimeRangeExceeded => {
                 formatter.write_str("system time exceeds profile storage identity range")
             }
@@ -260,9 +263,9 @@ impl ProfileCatalog {
                 catalog_io_error("read profile catalog entry", &self.root, error)
             })?;
             let path = entry.path();
-            let file_type = entry.file_type().map_err(|error| {
-                catalog_io_error("inspect profile catalog entry", &path, error)
-            })?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| catalog_io_error("inspect profile catalog entry", &path, error))?;
             if file_type.is_symlink() {
                 return Err(ProfileCatalogError::UnsupportedEntry { path });
             }
@@ -278,12 +281,11 @@ impl ProfileCatalog {
                 });
             }
 
-            let storage_id = load_profile_storage_id(&path).map_err(|error| {
-                ProfileCatalogError::Identity {
+            let storage_id =
+                load_profile_storage_id(&path).map_err(|error| ProfileCatalogError::Identity {
                     root: path.clone(),
                     error,
-                }
-            })?;
+                })?;
             if storage_id.is_none()
                 && entry.file_name().as_os_str() != OsStr::new(LEGACY_DEFAULT_DIRECTORY_NAME)
             {
@@ -400,11 +402,7 @@ pub fn load_profile_storage_id(
             });
         }
         let entry = entry.map_err(|error| {
-            identity_io_error(
-                "read profile identity entry",
-                &identity_directory,
-                error,
-            )
+            identity_io_error("read profile identity entry", &identity_directory, error)
         })?;
         found.push(entry);
     }
@@ -509,11 +507,7 @@ fn identity_io_error(
     }
 }
 
-fn catalog_io_error(
-    operation: &'static str,
-    path: &Path,
-    error: io::Error,
-) -> ProfileCatalogError {
+fn catalog_io_error(operation: &'static str, path: &Path, error: io::Error) -> ProfileCatalogError {
     ProfileCatalogError::Io {
         operation,
         path: path.to_owned(),
@@ -626,11 +620,7 @@ mod tests {
         let root = TestRoot::new("identity-symlink");
         let target = root.path().join("identity-target");
         fs::create_dir_all(target.join(identity_record_name(ProfileStorageId(7)))).unwrap();
-        symlink(
-            &target,
-            root.path().join(PROFILE_IDENTITY_DIRECTORY_NAME),
-        )
-        .unwrap();
+        symlink(&target, root.path().join(PROFILE_IDENTITY_DIRECTORY_NAME)).unwrap();
 
         assert!(matches!(
             load_profile_storage_id(root.path()),
