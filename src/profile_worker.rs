@@ -1,4 +1,10 @@
+use crate::profile_catalog::{
+    ProfileCatalogCreateError, ProfileCatalogCreateIntent, ProfileCatalogDiscoverIntent,
+    ProfileCatalogEntry, ProfileCatalogError, ProfileCatalogRenameError,
+    ProfileCatalogRenameIntent,
+};
 use crate::profile_lock::{ProfileLock, ProfileLockError, ProfileLockOwner};
+use crate::profile_metadata::ProfileMetadata;
 use crate::profile_runtime::{
     PreparedProfile, ProfileHistorySaveCompletion, ProfileHistorySaveIntent,
     ProfilePreparationError, ProfileSelectionId, ProfileSelectionIntent,
@@ -15,6 +21,9 @@ enum ProfileWorkerCommand {
     Prepare(ProfileSelectionIntent),
     SaveSettings(ProfileSettingsSaveIntent),
     SaveHistory(ProfileHistorySaveIntent),
+    DiscoverCatalog(ProfileCatalogDiscoverIntent),
+    CreateProfile(ProfileCatalogCreateIntent),
+    RenameProfile(ProfileCatalogRenameIntent),
     ReleaseLock(ProfileLock),
 }
 
@@ -26,6 +35,18 @@ pub enum ProfileWorkerCompletion {
     },
     SettingsSaved(ProfileSettingsSaveCompletion),
     HistorySaved(ProfileHistorySaveCompletion),
+    CatalogDiscovered {
+        intent: ProfileCatalogDiscoverIntent,
+        result: Result<Vec<ProfileCatalogEntry>, ProfileCatalogError>,
+    },
+    ProfileCreated {
+        intent: ProfileCatalogCreateIntent,
+        result: Result<ProfileCatalogEntry, ProfileCatalogCreateError>,
+    },
+    ProfileRenamed {
+        intent: ProfileCatalogRenameIntent,
+        result: Result<ProfileMetadata, ProfileCatalogRenameError>,
+    },
     LockReleased {
         owner: ProfileLockOwner,
         result: Result<(), ProfileLockError>,
@@ -126,12 +147,7 @@ impl ProfileWorker {
             Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(intent))) => {
                 Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
             }
-            Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(_))) => {
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 unreachable!("prepare submission preserves its command variant")
             }
         }
@@ -152,12 +168,7 @@ impl ProfileWorker {
             Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(intent))) => {
                 Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
             }
-            Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(_))) => {
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 unreachable!("settings-save submission preserves its command variant")
             }
         }
@@ -178,13 +189,71 @@ impl ProfileWorker {
             Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(intent))) => {
                 Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
             }
-            Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(_))) => {
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 unreachable!("history-save submission preserves its command variant")
+            }
+        }
+    }
+
+    pub fn discover_profiles(
+        &self,
+        intent: ProfileCatalogDiscoverIntent,
+    ) -> Result<(), ProfileWorkerSubmitError<ProfileCatalogDiscoverIntent>> {
+        match self
+            .sender
+            .try_send(ProfileWorkerCommand::DiscoverCatalog(intent))
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(ProfileWorkerCommand::DiscoverCatalog(intent))) => {
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
+            }
+            Err(TrySendError::Disconnected(ProfileWorkerCommand::DiscoverCatalog(intent))) => {
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
+            }
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                unreachable!("catalog-discovery submission preserves its command variant")
+            }
+        }
+    }
+
+    pub fn create_profile(
+        &self,
+        intent: ProfileCatalogCreateIntent,
+    ) -> Result<(), ProfileWorkerSubmitError<ProfileCatalogCreateIntent>> {
+        match self
+            .sender
+            .try_send(ProfileWorkerCommand::CreateProfile(intent))
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(ProfileWorkerCommand::CreateProfile(intent))) => {
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
+            }
+            Err(TrySendError::Disconnected(ProfileWorkerCommand::CreateProfile(intent))) => {
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
+            }
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                unreachable!("profile-create submission preserves its command variant")
+            }
+        }
+    }
+
+    pub fn rename_profile(
+        &self,
+        intent: ProfileCatalogRenameIntent,
+    ) -> Result<(), ProfileWorkerSubmitError<ProfileCatalogRenameIntent>> {
+        match self
+            .sender
+            .try_send(ProfileWorkerCommand::RenameProfile(intent))
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(ProfileWorkerCommand::RenameProfile(intent))) => {
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
+            }
+            Err(TrySendError::Disconnected(ProfileWorkerCommand::RenameProfile(intent))) => {
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
+            }
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                unreachable!("profile-rename submission preserves its command variant")
             }
         }
     }
@@ -204,12 +273,7 @@ impl ProfileWorker {
             Err(TrySendError::Disconnected(ProfileWorkerCommand::ReleaseLock(lock))) => {
                 Err(ProfileWorkerSubmitError::Unavailable(Box::new(lock)))
             }
-            Err(TrySendError::Full(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::Prepare(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSettings(_)))
-            | Err(TrySendError::Full(ProfileWorkerCommand::SaveHistory(_)))
-            | Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveHistory(_))) => {
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 unreachable!("lock-release submission preserves its command variant")
             }
         }
@@ -236,6 +300,18 @@ fn profile_worker_main(
             }
             ProfileWorkerCommand::SaveHistory(intent) => {
                 ProfileWorkerCompletion::HistorySaved(intent.execute())
+            }
+            ProfileWorkerCommand::DiscoverCatalog(intent) => {
+                let result = intent.execute();
+                ProfileWorkerCompletion::CatalogDiscovered { intent, result }
+            }
+            ProfileWorkerCommand::CreateProfile(intent) => {
+                let result = intent.execute();
+                ProfileWorkerCompletion::ProfileCreated { intent, result }
+            }
+            ProfileWorkerCommand::RenameProfile(intent) => {
+                let result = intent.execute();
+                ProfileWorkerCompletion::ProfileRenamed { intent, result }
             }
             ProfileWorkerCommand::ReleaseLock(lock) => {
                 let owner = lock.owner();
@@ -299,6 +375,98 @@ mod tests {
         receiver: &mpsc::Receiver<(String, ProfileWorkerCompletion)>,
     ) -> (String, ProfileWorkerCompletion) {
         receiver.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+
+    #[test]
+    fn catalog_create_discover_and_rename_execute_on_named_worker() {
+        let root = TempRoot::new("catalog-lifecycle");
+        let (worker, receiver) = worker_channel();
+
+        let create = ProfileCatalogCreateIntent::new(root.path(), "Personal").unwrap();
+        worker.create_profile(create.clone()).unwrap();
+        let (thread_name, completion) = receive(&receiver);
+        assert_eq!(thread_name, "zorya-profile");
+        let ProfileWorkerCompletion::ProfileCreated {
+            intent: completed_create,
+            result,
+        } = completion
+        else {
+            panic!("expected profile-create completion");
+        };
+        assert_eq!(completed_create, create);
+        let created = result.unwrap();
+        let storage_id = created.storage_id().unwrap();
+        let generation = created.metadata().unwrap().generation();
+
+        let discover = ProfileCatalogDiscoverIntent::new(root.path());
+        worker.discover_profiles(discover.clone()).unwrap();
+        let (thread_name, completion) = receive(&receiver);
+        assert_eq!(thread_name, "zorya-profile");
+        let ProfileWorkerCompletion::CatalogDiscovered {
+            intent: completed_discover,
+            result,
+        } = completion
+        else {
+            panic!("expected catalog-discovery completion");
+        };
+        assert_eq!(completed_discover, discover);
+        assert_eq!(result.unwrap(), vec![created.clone()]);
+
+        let rename =
+            ProfileCatalogRenameIntent::new(created.root(), storage_id, generation, "Work")
+                .unwrap();
+        worker.rename_profile(rename.clone()).unwrap();
+        let (thread_name, completion) = receive(&receiver);
+        assert_eq!(thread_name, "zorya-profile");
+        let ProfileWorkerCompletion::ProfileRenamed {
+            intent: completed_rename,
+            result,
+        } = completion
+        else {
+            panic!("expected profile-rename completion");
+        };
+        assert_eq!(completed_rename, rename);
+        let renamed = result.unwrap();
+        assert_eq!(renamed.display_name().as_str(), "Work");
+        assert_eq!(renamed.generation(), generation + 1);
+    }
+
+    #[test]
+    fn catalog_queue_full_returns_exact_create_intent() {
+        let blocking_root = TempRoot::new("catalog-queue-blocking");
+        let queued_root = TempRoot::new("catalog-queue-queued");
+        let catalog_root = TempRoot::new("catalog-queue-create");
+        let mut runtime = ProfileRuntime::new();
+        let blocking = runtime
+            .begin_selection(blocking_root.path())
+            .unwrap()
+            .into_intent();
+        let queued = runtime
+            .begin_selection(queued_root.path())
+            .unwrap()
+            .into_intent();
+        let create = ProfileCatalogCreateIntent::new(catalog_root.path(), "Queued").unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let mut block_first_completion = true;
+        let worker = ProfileWorker::spawn(move |_| {
+            if block_first_completion {
+                block_first_completion = false;
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+        })
+        .unwrap();
+
+        worker.prepare(blocking).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.prepare(queued).unwrap();
+        let error = worker.create_profile(create.clone()).unwrap_err();
+        assert!(error.is_full());
+        assert_eq!(error.into_work(), create);
+
+        release_tx.send(()).unwrap();
     }
 
     #[test]

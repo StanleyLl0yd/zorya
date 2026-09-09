@@ -247,7 +247,7 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
     let profile_worker = ProfileWorker::spawn({
         let proxy = proxy.clone();
         move |completion| {
-            let _ = proxy.send_event(WorkerEvent::Profile(completion));
+            let _ = proxy.send_event(WorkerEvent::Profile(Box::new(completion)));
         }
     })?;
     let startup = NativeShellStartup {
@@ -271,7 +271,7 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
 }
 
 enum WorkerEvent {
-    Profile(ProfileWorkerCompletion),
+    Profile(Box<ProfileWorkerCompletion>),
     GpuReady {
         target: AsyncTarget,
         result: Result<Arc<WindowsGpuDevice>, String>,
@@ -1343,6 +1343,12 @@ impl NativeShell {
                     ),
                 }
             }
+            ProfileWorkerCompletion::CatalogDiscovered { .. }
+            | ProfileWorkerCompletion::ProfileCreated { .. }
+            | ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
+                event_loop,
+                "profile catalog completion arrived before native profile catalog UX is enabled",
+            ),
         }
     }
 
@@ -2205,7 +2211,7 @@ impl NativeShell {
     fn handle_worker_event(&mut self, event_loop: &ActiveEventLoop, event: WorkerEvent) {
         match event {
             WorkerEvent::Profile(completion) => {
-                self.handle_profile_worker_completion(event_loop, completion);
+                self.handle_profile_worker_completion(event_loop, *completion);
             }
             WorkerEvent::GpuReady { target, result } => {
                 if !self.pending_init.is_current(target) || !self.target_alive(target) {
