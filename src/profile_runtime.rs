@@ -347,7 +347,7 @@ impl ProfileHistorySaveId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ProfileHistorySaveIntent {
     id: ProfileHistorySaveId,
     profile: ProfileId,
@@ -386,7 +386,7 @@ impl ProfileHistorySaveIntent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ProfileHistorySaveCompletion {
     id: ProfileHistorySaveId,
     profile: ProfileId,
@@ -562,7 +562,7 @@ impl fmt::Display for ProfileRuntimeError {
 
 impl std::error::Error for ProfileRuntimeError {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ProfileRuntime {
     next_profile_id: u64,
     next_selection_id: u64,
