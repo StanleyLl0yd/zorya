@@ -801,17 +801,17 @@ mod tests {
 
         let mut runtime = ProfileRuntime::new();
         let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
-        let prepared = PreparedProfile::load(&intent).unwrap();
-        assert_eq!(prepared.browsing_history().generation(), 1);
-        assert_eq!(prepared.browsing_history().len(), 1);
+        let loaded = PreparedProfile::load(&intent).unwrap();
+        assert_eq!(loaded.browsing_history().generation(), 1);
+        assert_eq!(loaded.browsing_history().len(), 1);
         assert_eq!(
-            prepared.browsing_history().visits()[0].location(),
+            loaded.browsing_history().visits()[0].location(),
             "https://example.test/first"
         );
-        assert!(prepared.browsing_history_recovery().is_none());
+        assert!(loaded.browsing_history_recovery().is_none());
 
         let first = runtime
-            .commit_selection(prepared)
+            .commit_selection(loaded)
             .unwrap()
             .active_profile();
         runtime
