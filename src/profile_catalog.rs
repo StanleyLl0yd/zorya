@@ -281,6 +281,230 @@ impl ProfileCatalogEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileCatalogDiscoverIntent {
+    root: PathBuf,
+}
+
+impl ProfileCatalogDiscoverIntent {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) fn execute(&self) -> Result<Vec<ProfileCatalogEntry>, ProfileCatalogError> {
+        ProfileCatalog::open(self.root.clone())?.discover()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileCatalogCreateIntent {
+    catalog_root: PathBuf,
+    display_name: ProfileDisplayName,
+}
+
+impl ProfileCatalogCreateIntent {
+    pub fn new(
+        catalog_root: impl Into<PathBuf>,
+        display_name: impl Into<String>,
+    ) -> Result<Self, ProfileDisplayNameError> {
+        Ok(Self {
+            catalog_root: catalog_root.into(),
+            display_name: ProfileDisplayName::new(display_name)?,
+        })
+    }
+
+    pub fn catalog_root(&self) -> &Path {
+        &self.catalog_root
+    }
+
+    pub const fn display_name(&self) -> &ProfileDisplayName {
+        &self.display_name
+    }
+
+    pub(crate) fn execute(&self) -> Result<ProfileCatalogEntry, ProfileCatalogCreateError> {
+        create_profile(self)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProfileCatalogCreateError {
+    Catalog(ProfileCatalogError),
+    Identity(ProfileIdentityError),
+    Metadata(ProfileMetadataError),
+    Lock(ProfileLockError),
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        kind: io::ErrorKind,
+    },
+    RootCollision {
+        path: PathBuf,
+    },
+    LockRelease {
+        initialization: Option<Box<ProfileCatalogCreateError>>,
+        release: ProfileLockError,
+    },
+}
+
+impl fmt::Display for ProfileCatalogCreateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Catalog(error) => error.fmt(formatter),
+            Self::Identity(error) => error.fmt(formatter),
+            Self::Metadata(error) => error.fmt(formatter),
+            Self::Lock(error) => error.fmt(formatter),
+            Self::Io {
+                operation,
+                path,
+                kind,
+            } => write!(
+                formatter,
+                "{operation} failed for {}: {kind}",
+                path.display()
+            ),
+            Self::RootCollision { path } => write!(
+                formatter,
+                "generated profile root already exists: {}",
+                path.display()
+            ),
+            Self::LockRelease {
+                initialization,
+                release,
+            } => match initialization {
+                Some(initialization) => write!(
+                    formatter,
+                    "profile creation failed: {initialization}; acquired profile lock also failed to release: {release}"
+                ),
+                None => write!(
+                    formatter,
+                    "profile creation initialized its staging root but failed to release the profile lock: {release}"
+                ),
+            },
+        }
+    }
+}
+
+impl std::error::Error for ProfileCatalogCreateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Catalog(error) => Some(error),
+            Self::Identity(error) => Some(error),
+            Self::Metadata(error) => Some(error),
+            Self::Lock(error) => Some(error),
+            Self::LockRelease {
+                initialization: Some(initialization),
+                ..
+            } => Some(initialization.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileCatalogRenameIntent {
+    root: PathBuf,
+    storage_id: ProfileStorageId,
+    expected_generation: u64,
+    display_name: ProfileDisplayName,
+}
+
+impl ProfileCatalogRenameIntent {
+    pub fn new(
+        root: impl Into<PathBuf>,
+        storage_id: ProfileStorageId,
+        expected_generation: u64,
+        display_name: impl Into<String>,
+    ) -> Result<Self, ProfileDisplayNameError> {
+        Ok(Self {
+            root: root.into(),
+            storage_id,
+            expected_generation,
+            display_name: ProfileDisplayName::new(display_name)?,
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub const fn storage_id(&self) -> ProfileStorageId {
+        self.storage_id
+    }
+
+    pub const fn expected_generation(&self) -> u64 {
+        self.expected_generation
+    }
+
+    pub const fn display_name(&self) -> &ProfileDisplayName {
+        &self.display_name
+    }
+
+    pub(crate) fn execute(&self) -> Result<ProfileMetadata, ProfileCatalogRenameError> {
+        rename_profile(self)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProfileCatalogRenameError {
+    Lock(ProfileLockError),
+    Metadata(ProfileMetadataError),
+    LockRelease {
+        operation: Option<Box<ProfileMetadataError>>,
+        committed: Option<ProfileMetadata>,
+        release: ProfileLockError,
+    },
+}
+
+impl fmt::Display for ProfileCatalogRenameError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lock(error) => error.fmt(formatter),
+            Self::Metadata(error) => error.fmt(formatter),
+            Self::LockRelease {
+                operation,
+                committed,
+                release,
+            } => {
+                if let Some(operation) = operation {
+                    write!(
+                        formatter,
+                        "profile rename failed: {operation}; acquired profile lock also failed to release: {release}"
+                    )
+                } else if let Some(committed) = committed {
+                    write!(
+                        formatter,
+                        "profile rename committed metadata generation {} but failed to release the profile lock: {release}",
+                        committed.generation()
+                    )
+                } else {
+                    write!(
+                        formatter,
+                        "profile rename failed to release its acquired profile lock: {release}"
+                    )
+                }
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProfileCatalogRenameError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Lock(error) => Some(error),
+            Self::Metadata(error) => Some(error),
+            Self::LockRelease {
+                operation: Some(operation),
+                ..
+            } => Some(operation.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileCatalog {
     root: PathBuf,
 }
