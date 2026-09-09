@@ -419,6 +419,69 @@ mod tests {
     }
 
     #[test]
+    fn settings_queue_failure_preserves_exact_work_for_runtime_cancellation() {
+        let blocking_root = TempRoot::new("settings-queue-blocking");
+        let queued_root = TempRoot::new("settings-queue-queued");
+        let settings_root = TempRoot::new("settings-queue-save");
+        let mut queue_runtime = ProfileRuntime::new();
+        let blocking = queue_runtime
+            .begin_selection(blocking_root.path())
+            .unwrap()
+            .into_intent();
+        let queued = queue_runtime
+            .begin_selection(queued_root.path())
+            .unwrap()
+            .into_intent();
+
+        let mut settings_runtime = ProfileRuntime::new();
+        let selection = settings_runtime
+            .begin_selection(settings_root.path())
+            .unwrap()
+            .into_intent();
+        let prepared = PreparedProfile::load(&selection).unwrap();
+        let profile = settings_runtime
+            .commit_selection(prepared)
+            .unwrap()
+            .active_profile();
+        settings_runtime
+            .active_settings_mut(profile)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+        let intent = settings_runtime
+            .begin_settings_save_if_dirty(profile)
+            .unwrap()
+            .unwrap();
+        let save = intent.id();
+
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let mut block_first_completion = true;
+        let worker = ProfileWorker::spawn(move |_| {
+            if block_first_completion {
+                block_first_completion = false;
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+        })
+        .unwrap();
+
+        worker.prepare(blocking).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.prepare(queued).unwrap();
+        let error = worker.save_settings(intent).unwrap_err();
+        assert!(error.is_full());
+        let intent = error.into_work();
+        assert_eq!(intent.id(), save);
+
+        settings_runtime.cancel_settings_save(save).unwrap();
+        assert_eq!(settings_runtime.pending_settings_save(), None);
+        assert!(settings_runtime.settings_is_dirty(profile).unwrap());
+
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
     fn disconnected_worker_returns_unavailable_work() {
         let first_root = TempRoot::new("disconnect-first");
         let second_root = TempRoot::new("disconnect-second");
