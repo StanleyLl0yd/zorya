@@ -195,7 +195,6 @@ pub enum ProfileSettingsError {
 impl fmt::Display for ProfileSettingsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Lock(error) => error.fmt(formatter),
             Self::Storage(error) => error.fmt(formatter),
             Self::InvalidValue { key, value } => {
                 write!(
@@ -210,7 +209,6 @@ impl fmt::Display for ProfileSettingsError {
 impl std::error::Error for ProfileSettingsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Lock(error) => Some(error),
             Self::Storage(error) => Some(error),
             Self::InvalidValue { .. } => None,
         }
@@ -268,10 +266,6 @@ impl PreparedProfile {
         &self.root
     }
 
-    pub(crate) const fn profile_lock(&self) -> &ProfileLock {
-        &self.lock
-    }
-
     pub const fn settings(&self) -> &ProductSettings {
         &self.settings
     }
@@ -300,6 +294,7 @@ pub enum ProfilePreparationError {
 impl fmt::Display for ProfilePreparationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Lock(error) => error.fmt(formatter),
             Self::Storage(error) => error.fmt(formatter),
             Self::Settings(error) => error.fmt(formatter),
             Self::BrowsingHistory(error) => error.fmt(formatter),
@@ -310,6 +305,7 @@ impl fmt::Display for ProfilePreparationError {
 impl std::error::Error for ProfilePreparationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Lock(error) => Some(error),
             Self::Storage(error) => Some(error),
             Self::Settings(error) => Some(error),
             Self::BrowsingHistory(error) => Some(error),
@@ -339,6 +335,10 @@ impl ActiveProfile {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub(crate) const fn profile_lock(&self) -> &ProfileLock {
+        &self.lock
     }
 
     pub const fn settings(&self) -> &ProductSettings {
