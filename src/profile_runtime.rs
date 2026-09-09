@@ -1652,6 +1652,280 @@ mod tests {
     }
 
     #[test]
+    fn loaded_settings_start_clean_and_mutable_access_marks_dirty() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+
+        assert!(!runtime.settings_is_dirty(profile).unwrap());
+        assert_eq!(runtime.settings_unsaved_mutations(profile).unwrap(), 0);
+        assert!(
+            runtime
+                .begin_settings_save_if_dirty(profile)
+                .unwrap()
+                .is_none()
+        );
+
+        runtime
+            .active_settings_mut(profile)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+
+        assert!(runtime.settings_is_dirty(profile).unwrap());
+        assert_eq!(runtime.settings_unsaved_mutations(profile).unwrap(), 1);
+        let intent = runtime
+            .begin_settings_save_if_dirty(profile)
+            .unwrap()
+            .expect("dirty settings should schedule a save");
+        assert_eq!(intent.mutation_revision(), 1);
+    }
+
+    #[test]
+    fn successful_settings_save_cleans_only_captured_mutations() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+
+        runtime
+            .active_settings_mut(profile)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+        let first = runtime
+            .begin_settings_save_if_dirty(profile)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.mutation_revision(), 1);
+
+        runtime
+            .active_settings_mut(profile)
+            .unwrap()
+            .set_confirm_close_multiple_tabs(false)
+            .unwrap();
+        assert_eq!(runtime.settings_unsaved_mutations(profile).unwrap(), 2);
+
+        let first_completion = first.execute();
+        assert!(first_completion.result().is_ok());
+        runtime.complete_settings_save(first_completion).unwrap();
+
+        let active = runtime.active_profile().unwrap();
+        assert_eq!(active.settings().generation(), 1);
+        assert_eq!(active.settings().color_scheme(), ColorSchemePreference::Dark);
+        assert!(!active.settings().confirm_close_multiple_tabs());
+        assert!(runtime.settings_is_dirty(profile).unwrap());
+        assert_eq!(runtime.settings_unsaved_mutations(profile).unwrap(), 1);
+
+        let persisted = ProfileStore::open(root.path())
+            .unwrap()
+            .load_settings()
+            .unwrap()
+            .into_snapshot();
+        assert_eq!(persisted.generation(), 1);
+        assert_eq!(persisted.get(COLOR_SCHEME_KEY), Some("dark"));
+        assert_eq!(persisted.get(CONFIRM_CLOSE_MULTIPLE_TABS_KEY), None);
+
+        let second = runtime
+            .begin_settings_save_if_dirty(profile)
+            .unwrap()
+            .unwrap()
+            .execute();
+        assert!(second.result().is_ok());
+        runtime.complete_settings_save(second).unwrap();
+
+        assert!(!runtime.settings_is_dirty(profile).unwrap());
+        assert_eq!(runtime.settings_unsaved_mutations(profile).unwrap(), 0);
+        assert_eq!(runtime.active_profile().unwrap().settings().generation(), 2);
+        let persisted = ProfileStore::open(root.path())
+            .unwrap()
+            .load_settings()
+            .unwrap()
+            .into_snapshot();
+        assert_eq!(persisted.generation(), 2);
+        assert_eq!(persisted.get(CONFIRM_CLOSE_MULTIPLE_TABS_KEY), Some("false"));
+    }
+
+    #[test]
+    fn failed_settings_save_keeps_runtime_generation_and_dirty_state() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        runtime
+            .active_settings_mut(profile)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+        let intent = runtime.begin_settings_save(profile).unwrap();
+
+        let store = ProfileStore::open(root.path()).unwrap();
+        let external = store.load_settings().unwrap().into_snapshot();
+        store.save_settings(&external).unwrap();
+
+        let completion = intent.execute();
+        assert!(matches!(
+            completion.result(),
+            Err(ProfileStorageError::StaleSettingsGeneration {
+                current: 1,
+                provided: 0,
+            })
+        ));
+        runtime.complete_settings_save(completion).unwrap();
+
+        assert_eq!(runtime.active_profile().unwrap().settings().generation(), 0);
+        assert!(runtime.pending_settings_save().is_none());
+        assert!(runtime.settings_is_dirty(profile).unwrap());
+        assert_eq!(runtime.settings_unsaved_mutations(profile).unwrap(), 1);
+    }
+
+    #[test]
+    fn overlapping_settings_save_is_rejected_until_exact_completion() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        runtime
+            .active_settings_mut(profile)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+        let first = runtime.begin_settings_save(profile).unwrap();
+        let save = first.id();
+
+        assert_eq!(
+            runtime.begin_settings_save(profile),
+            Err(ProfileRuntimeError::SettingsSaveAlreadyPending { pending: save })
+        );
+
+        runtime.complete_settings_save(first.execute()).unwrap();
+        assert!(runtime.begin_settings_save(profile).is_ok());
+    }
+
+    #[test]
+    fn cancelling_exact_settings_save_preserves_dirty_state_for_retry() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        runtime
+            .active_settings_mut(profile)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+
+        let first = runtime
+            .begin_settings_save_if_dirty(profile)
+            .unwrap()
+            .unwrap();
+        let first_id = first.id();
+        assert_eq!(runtime.pending_settings_save(), Some(first_id));
+
+        runtime.cancel_settings_save(first_id).unwrap();
+
+        assert!(runtime.pending_settings_save().is_none());
+        assert!(runtime.settings_is_dirty(profile).unwrap());
+        assert_eq!(runtime.settings_unsaved_mutations(profile).unwrap(), 1);
+        let retry = runtime
+            .begin_settings_save_if_dirty(profile)
+            .unwrap()
+            .expect("cancelled dirty settings save should be retryable");
+        assert_ne!(retry.id(), first_id);
+    }
+
+    #[test]
+    fn stale_settings_save_cancellation_cannot_clear_current_pending_save() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        runtime
+            .active_settings_mut(profile)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+
+        let first = runtime.begin_settings_save(profile).unwrap().id();
+        runtime.cancel_settings_save(first).unwrap();
+        let current = runtime.begin_settings_save(profile).unwrap().id();
+
+        assert_eq!(
+            runtime.cancel_settings_save(first),
+            Err(ProfileRuntimeError::StaleSettingsSave {
+                expected: Some(current),
+                actual: first,
+            })
+        );
+        assert_eq!(runtime.pending_settings_save(), Some(current));
+    }
+
+    #[test]
+    fn profile_replacement_invalidates_pending_settings_save_and_rejects_completion() {
+        let first_root = TempRoot::new();
+        let second_root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let first = load_profile(&mut runtime, first_root.path());
+        runtime
+            .active_settings_mut(first)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+        let intent = runtime.begin_settings_save(first).unwrap();
+        let save = intent.id();
+
+        let selection = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
+        let prepared = PreparedProfile::load(&selection).unwrap();
+        let commit = runtime.commit_selection(prepared).unwrap();
+        let second = commit.active_profile();
+        assert_eq!(commit.invalidated_settings_save(), Some(save));
+        assert!(runtime.pending_settings_save().is_none());
+
+        let completion = intent.execute();
+        assert_eq!(
+            runtime.complete_settings_save(completion),
+            Err(ProfileRuntimeError::StaleSettingsSave {
+                expected: None,
+                actual: save,
+            })
+        );
+        assert_eq!(runtime.active_profile().unwrap().id(), second);
+        assert_eq!(runtime.active_profile().unwrap().settings().generation(), 0);
+    }
+
+    #[test]
+    fn settings_mutation_revision_exhaustion_precedes_mutable_access() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        runtime.active.as_mut().unwrap().settings_revision = u64::MAX;
+        let before = runtime.active_profile().unwrap().settings().clone();
+
+        assert_eq!(
+            runtime.active_settings_mut(profile).map(|_| ()),
+            Err(ProfileRuntimeError::ProfileSettingsMutationRevisionExhausted)
+        );
+        assert_eq!(runtime.active_profile().unwrap().settings(), &before);
+    }
+
+    #[test]
+    fn settings_save_id_exhaustion_does_not_create_pending_work() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        runtime
+            .active_settings_mut(profile)
+            .unwrap()
+            .set_color_scheme(ColorSchemePreference::Dark)
+            .unwrap();
+        runtime.next_settings_save_id = u64::MAX;
+
+        assert_eq!(
+            runtime.begin_settings_save(profile),
+            Err(ProfileRuntimeError::ProfileSettingsSaveIdExhausted)
+        );
+        assert!(runtime.pending_settings_save().is_none());
+        assert!(runtime.settings_is_dirty(profile).unwrap());
+    }
+
+    #[test]
     fn loaded_history_starts_clean_and_successful_record_marks_dirty() {
         let root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
