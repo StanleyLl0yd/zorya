@@ -293,7 +293,7 @@ fn read_owner_if_present(path: &Path) -> Result<Option<ProfileLockOwner>, Profil
         let mut file = File::open(entry.path())
             .map_err(|error| io_error("open profile lock owner record", &entry.path(), error))?;
         let mut bytes = Vec::new();
-        file.by_ref()
+        Read::by_ref(&mut file)
             .take((MAX_PROFILE_LOCK_BYTES + 1) as u64)
             .read_to_end(&mut bytes)
             .map_err(|error| io_error("read profile lock owner record", &entry.path(), error))?;
