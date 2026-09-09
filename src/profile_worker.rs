@@ -37,7 +37,11 @@ impl ProfileWorkerSpawnError {
 
 impl fmt::Display for ProfileWorkerSpawnError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "failed to start profile worker: {}", self.message)
+        write!(
+            formatter,
+            "failed to start profile worker: {}",
+            self.message
+        )
     }
 }
 
@@ -201,7 +205,10 @@ mod tests {
         }
     }
 
-    fn worker_channel() -> (ProfileWorker, mpsc::Receiver<(String, ProfileWorkerCompletion)>) {
+    fn worker_channel() -> (
+        ProfileWorker,
+        mpsc::Receiver<(String, ProfileWorkerCompletion)>,
+    ) {
         let (sender, receiver) = mpsc::channel();
         let worker = ProfileWorker::spawn(move |completion| {
             let name = thread::current().name().unwrap_or_default().to_owned();
@@ -295,7 +302,13 @@ mod tests {
         assert!(completion.result().is_ok());
         runtime.complete_browsing_history_save(completion).unwrap();
         assert!(!runtime.browsing_history_is_dirty(profile).unwrap());
-        assert_eq!(runtime.active_browsing_history(profile).unwrap().generation(), 1);
+        assert_eq!(
+            runtime
+                .active_browsing_history(profile)
+                .unwrap()
+                .generation(),
+            1
+        );
     }
 
     #[test]
