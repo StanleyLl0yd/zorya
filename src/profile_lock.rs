@@ -45,6 +45,10 @@ pub enum ProfileLockError {
         expected: ProfileLockOwner,
         actual: Option<ProfileLockOwner>,
     },
+    RootMismatch {
+        lock_root: PathBuf,
+        requested_root: PathBuf,
+    },
     RecoveryTargetChanged {
         expected: ProfileLockOwner,
         actual: Option<ProfileLockOwner>,
@@ -91,6 +95,15 @@ impl fmt::Display for ProfileLockError {
                     expected.owner_id()
                 ),
             },
+            Self::RootMismatch {
+                lock_root,
+                requested_root,
+            } => write!(
+                formatter,
+                "profile lock for {} cannot authorize storage root {}",
+                lock_root.display(),
+                requested_root.display()
+            ),
             Self::RecoveryTargetChanged { expected, actual } => match actual {
                 Some(actual) => write!(
                     formatter,
@@ -228,6 +241,16 @@ impl ProfileLock {
         }
     }
 
+    pub fn verify_for_root(&self, root: &Path) -> Result<(), ProfileLockError> {
+        if self.inner.root != root {
+            return Err(ProfileLockError::RootMismatch {
+                lock_root: self.inner.root.clone(),
+                requested_root: root.to_owned(),
+            });
+        }
+        self.verify()
+    }
+
     pub const fn owner(&self) -> ProfileLockOwner {
         self.inner.owner
     }
@@ -238,10 +261,11 @@ impl ProfileLock {
 }
 
 fn next_owner() -> Result<ProfileLockOwner, ProfileLockError> {
-    let owner_id = NEXT_PROFILE_LOCK_OWNER.fetch_add(1, Ordering::Relaxed);
-    if owner_id == 0 || owner_id == u64::MAX {
-        return Err(ProfileLockError::OwnerIdExhausted);
-    }
+    let owner_id = NEXT_PROFILE_LOCK_OWNER
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| ProfileLockError::OwnerIdExhausted)?;
     Ok(ProfileLockOwner {
         process_id: std::process::id(),
         owner_id,
