@@ -158,7 +158,7 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
             let _ = proxy.send_event(WorkerEvent::Profile(completion));
         }
     })?;
-    let mut shell = NativeShell::new(
+    let startup = NativeShellStartup {
         browser,
         browser_window,
         tab,
@@ -166,10 +166,9 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         profile_runtime,
         profile_worker,
         initial_profile_selection,
-        proxy,
-        mode,
         http_smoke_location,
-    );
+    };
+    let mut shell = NativeShell::new(startup, proxy, mode);
     event_loop.run_app(&mut shell)?;
 
     if let Some(error) = shell.fatal_error.take() {
@@ -353,6 +352,17 @@ struct PendingNativeTabCreate {
     activate_after_create: bool,
 }
 
+struct NativeShellStartup {
+    browser: BrowserApp,
+    browser_window: BrowserWindowId,
+    tab: TabId,
+    initial_navigation: NavigationId,
+    profile_runtime: ProfileRuntime,
+    profile_worker: ProfileWorker,
+    initial_profile_selection: ProfileSelectionIntent,
+    http_smoke_location: Option<String>,
+}
+
 struct NativeShell {
     browser: BrowserApp,
     browser_window: BrowserWindowId,
@@ -390,17 +400,20 @@ struct NativeShell {
 
 impl NativeShell {
     fn new(
-        browser: BrowserApp,
-        browser_window: BrowserWindowId,
-        tab: TabId,
-        initial_navigation: NavigationId,
-        profile_runtime: ProfileRuntime,
-        profile_worker: ProfileWorker,
-        initial_profile_selection: ProfileSelectionIntent,
+        startup: NativeShellStartup,
         proxy: EventLoopProxy<WorkerEvent>,
         run_mode: RunMode,
-        http_smoke_location: Option<String>,
     ) -> Self {
+        let NativeShellStartup {
+            browser,
+            browser_window,
+            tab,
+            initial_navigation,
+            profile_runtime,
+            profile_worker,
+            initial_profile_selection,
+            http_smoke_location,
+        } = startup;
         Self {
             browser,
             browser_window,
