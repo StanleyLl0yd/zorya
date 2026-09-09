@@ -336,10 +336,7 @@ mod tests {
         assert!(completion.result().is_ok());
         runtime.complete_settings_save(completion).unwrap();
         assert!(!runtime.settings_is_dirty(profile).unwrap());
-        assert_eq!(
-            runtime.active_profile().unwrap().settings().generation(),
-            1
-        );
+        assert_eq!(runtime.active_profile().unwrap().settings().generation(), 1);
     }
 
     #[test]
