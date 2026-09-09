@@ -193,7 +193,10 @@ impl ProfileWorker {
         &self,
         lock: ProfileLock,
     ) -> Result<(), ProfileWorkerSubmitError<ProfileLock>> {
-        match self.sender.try_send(ProfileWorkerCommand::ReleaseLock(lock)) {
+        match self
+            .sender
+            .try_send(ProfileWorkerCommand::ReleaseLock(lock))
+        {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(ProfileWorkerCommand::ReleaseLock(lock))) => {
                 Err(ProfileWorkerSubmitError::Full(lock))
