@@ -3,7 +3,9 @@ use crate::browsing_history::{
     BrowsingHistoryError, BrowsingHistoryRecord, BrowsingHistoryRecovery, BrowsingHistorySave,
     BrowsingHistorySnapshot, BrowsingHistoryStore,
 };
-use crate::profile::{ProfileStorageError, ProfileStore, SettingsRecovery, SettingsSnapshot};
+use crate::profile::{
+    ProfileStorageError, ProfileStore, SettingsRecovery, SettingsSave, SettingsSnapshot,
+};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -311,6 +313,8 @@ pub struct ActiveProfile {
     settings_recovery: Option<SettingsRecovery>,
     browsing_history: BrowsingHistorySnapshot,
     browsing_history_recovery: Option<BrowsingHistoryRecovery>,
+    settings_revision: u64,
+    durable_settings_revision: u64,
     browsing_history_revision: u64,
     durable_browsing_history_revision: u64,
 }
@@ -339,6 +343,104 @@ impl ActiveProfile {
     pub const fn browsing_history_recovery(&self) -> Option<&BrowsingHistoryRecovery> {
         self.browsing_history_recovery.as_ref()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProfileSettingsSaveId(u64);
+
+impl ProfileSettingsSaveId {
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProfileSettingsSaveIntent {
+    id: ProfileSettingsSaveId,
+    profile: ProfileId,
+    root: PathBuf,
+    snapshot: SettingsSnapshot,
+    mutation_revision: u64,
+}
+
+impl ProfileSettingsSaveIntent {
+    pub const fn id(&self) -> ProfileSettingsSaveId {
+        self.id
+    }
+
+    pub const fn profile(&self) -> ProfileId {
+        self.profile
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub const fn snapshot(&self) -> &SettingsSnapshot {
+        &self.snapshot
+    }
+
+    pub const fn mutation_revision(&self) -> u64 {
+        self.mutation_revision
+    }
+
+    pub fn execute(self) -> ProfileSettingsSaveCompletion {
+        let base_generation = self.snapshot.generation();
+        let result = ProfileStore::open(self.root.clone())
+            .and_then(|store| store.save_settings(&self.snapshot));
+        ProfileSettingsSaveCompletion {
+            id: self.id,
+            profile: self.profile,
+            root: self.root,
+            base_generation,
+            mutation_revision: self.mutation_revision,
+            result,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProfileSettingsSaveCompletion {
+    id: ProfileSettingsSaveId,
+    profile: ProfileId,
+    root: PathBuf,
+    base_generation: u64,
+    mutation_revision: u64,
+    result: Result<SettingsSave, ProfileStorageError>,
+}
+
+impl ProfileSettingsSaveCompletion {
+    pub const fn id(&self) -> ProfileSettingsSaveId {
+        self.id
+    }
+
+    pub const fn profile(&self) -> ProfileId {
+        self.profile
+    }
+
+    pub const fn base_generation(&self) -> u64 {
+        self.base_generation
+    }
+
+    pub const fn mutation_revision(&self) -> u64 {
+        self.mutation_revision
+    }
+
+    pub const fn result(&self) -> &Result<SettingsSave, ProfileStorageError> {
+        &self.result
+    }
+
+    pub fn into_result(self) -> Result<SettingsSave, ProfileStorageError> {
+        self.result
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingProfileSettingsSave {
+    id: ProfileSettingsSaveId,
+    profile: ProfileId,
+    base_generation: u64,
+    mutation_revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -443,6 +545,7 @@ struct PendingProfileHistorySave {
 pub struct ProfileSelectionCommit {
     active_profile: ProfileId,
     replaced_profile: Option<ActiveProfile>,
+    invalidated_settings_save: Option<ProfileSettingsSaveId>,
     invalidated_browsing_history_save: Option<ProfileHistorySaveId>,
 }
 
@@ -453,6 +556,10 @@ impl ProfileSelectionCommit {
 
     pub const fn replaced_profile(&self) -> Option<&ActiveProfile> {
         self.replaced_profile.as_ref()
+    }
+
+    pub const fn invalidated_settings_save(&self) -> Option<ProfileSettingsSaveId> {
+        self.invalidated_settings_save
     }
 
     pub const fn invalidated_browsing_history_save(&self) -> Option<ProfileHistorySaveId> {
@@ -468,6 +575,23 @@ impl ProfileSelectionCommit {
 pub enum ProfileRuntimeError {
     ProfileIdExhausted,
     ProfileSelectionIdExhausted,
+    ProfileSettingsSaveIdExhausted,
+    ProfileSettingsMutationRevisionExhausted,
+    SettingsSaveAlreadyPending {
+        pending: ProfileSettingsSaveId,
+    },
+    StaleSettingsSave {
+        expected: Option<ProfileSettingsSaveId>,
+        actual: ProfileSettingsSaveId,
+    },
+    SettingsSaveTargetMismatch {
+        save: ProfileSettingsSaveId,
+    },
+    SettingsSaveGenerationMismatch {
+        expected_generation: u64,
+        current_generation: u64,
+        saved_generation: u64,
+    },
     ProfileHistorySaveIdExhausted,
     ProfileHistoryMutationRevisionExhausted,
     BrowsingHistorySaveAlreadyPending {
@@ -508,6 +632,43 @@ impl fmt::Display for ProfileRuntimeError {
             Self::ProfileSelectionIdExhausted => {
                 formatter.write_str("profile selection identifier space is exhausted")
             }
+            Self::ProfileSettingsSaveIdExhausted => {
+                formatter.write_str("profile settings save identifier space is exhausted")
+            }
+            Self::ProfileSettingsMutationRevisionExhausted => {
+                formatter.write_str("profile settings mutation revision space is exhausted")
+            }
+            Self::SettingsSaveAlreadyPending { pending } => write!(
+                formatter,
+                "profile settings save {} is already pending",
+                pending.get()
+            ),
+            Self::StaleSettingsSave { expected, actual } => match expected {
+                Some(expected) => write!(
+                    formatter,
+                    "profile settings save {} is stale; current save is {}",
+                    actual.get(),
+                    expected.get()
+                ),
+                None => write!(
+                    formatter,
+                    "profile settings save {} is stale; no save is pending",
+                    actual.get()
+                ),
+            },
+            Self::SettingsSaveTargetMismatch { save } => write!(
+                formatter,
+                "profile settings save {} does not match its active profile target",
+                save.get()
+            ),
+            Self::SettingsSaveGenerationMismatch {
+                expected_generation,
+                current_generation,
+                saved_generation,
+            } => write!(
+                formatter,
+                "profile settings save expected in-memory generation {expected_generation}, found {current_generation}, saved {saved_generation}"
+            ),
             Self::ProfileHistorySaveIdExhausted => {
                 formatter.write_str("profile browsing-history save identifier space is exhausted")
             }
@@ -589,9 +750,11 @@ impl std::error::Error for ProfileRuntimeError {}
 pub struct ProfileRuntime {
     next_profile_id: u64,
     next_selection_id: u64,
+    next_settings_save_id: u64,
     next_history_save_id: u64,
     active: Option<ActiveProfile>,
     pending: Option<ProfileSelectionIntent>,
+    pending_settings_save: Option<PendingProfileSettingsSave>,
     pending_history_save: Option<PendingProfileHistorySave>,
 }
 
@@ -606,9 +769,11 @@ impl ProfileRuntime {
         Self {
             next_profile_id: 1,
             next_selection_id: 1,
+            next_settings_save_id: 1,
             next_history_save_id: 1,
             active: None,
             pending: None,
+            pending_settings_save: None,
             pending_history_save: None,
         }
     }
@@ -619,6 +784,13 @@ impl ProfileRuntime {
 
     pub const fn pending_selection(&self) -> Option<&ProfileSelectionIntent> {
         self.pending.as_ref()
+    }
+
+    pub const fn pending_settings_save(&self) -> Option<ProfileSettingsSaveId> {
+        match self.pending_settings_save {
+            Some(pending) => Some(pending.id),
+            None => None,
+        }
     }
 
     pub const fn pending_browsing_history_save(&self) -> Option<ProfileHistorySaveId> {
@@ -696,15 +868,20 @@ impl ProfileRuntime {
             settings_recovery: prepared.settings_recovery,
             browsing_history: prepared.browsing_history,
             browsing_history_recovery: prepared.browsing_history_recovery,
+            settings_revision: 0,
+            durable_settings_revision: 0,
             browsing_history_revision: 0,
             durable_browsing_history_revision: 0,
         };
+        let invalidated_settings_save =
+            self.pending_settings_save.take().map(|pending| pending.id);
         let invalidated_browsing_history_save =
             self.pending_history_save.take().map(|pending| pending.id);
         let replaced_profile = self.active.replace(active);
         Ok(ProfileSelectionCommit {
             active_profile: id,
             replaced_profile,
+            invalidated_settings_save,
             invalidated_browsing_history_save,
         })
     }
@@ -720,11 +897,172 @@ impl ProfileRuntime {
                 actual: profile,
             });
         }
-        Ok(&mut self
+        let active = self.active.as_mut().expect("active profile was validated");
+        active.settings_revision = active
+            .settings_revision
+            .checked_add(1)
+            .ok_or(ProfileRuntimeError::ProfileSettingsMutationRevisionExhausted)?;
+        Ok(&mut active.settings)
+    }
+
+    pub fn settings_unsaved_mutations(
+        &self,
+        profile: ProfileId,
+    ) -> Result<u64, ProfileRuntimeError> {
+        let expected = self.active.as_ref().map(ActiveProfile::id);
+        if expected != Some(profile) {
+            return Err(ProfileRuntimeError::StaleProfile {
+                expected,
+                actual: profile,
+            });
+        }
+        let active = self.active.as_ref().expect("active profile was validated");
+        Ok(active
+            .settings_revision
+            .checked_sub(active.durable_settings_revision)
+            .expect("durable settings revision cannot exceed current revision"))
+    }
+
+    pub fn settings_is_dirty(&self, profile: ProfileId) -> Result<bool, ProfileRuntimeError> {
+        Ok(self.settings_unsaved_mutations(profile)? != 0)
+    }
+
+    pub fn settings_mutation_revision(
+        &self,
+        profile: ProfileId,
+    ) -> Result<u64, ProfileRuntimeError> {
+        let expected = self.active.as_ref().map(ActiveProfile::id);
+        if expected != Some(profile) {
+            return Err(ProfileRuntimeError::StaleProfile {
+                expected,
+                actual: profile,
+            });
+        }
+        Ok(self
             .active
-            .as_mut()
+            .as_ref()
             .expect("active profile was validated")
-            .settings)
+            .settings_revision)
+    }
+
+    pub fn begin_settings_save_if_dirty(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<Option<ProfileSettingsSaveIntent>, ProfileRuntimeError> {
+        if !self.settings_is_dirty(profile)? {
+            return Ok(None);
+        }
+        self.begin_settings_save(profile).map(Some)
+    }
+
+    pub fn begin_settings_save(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<ProfileSettingsSaveIntent, ProfileRuntimeError> {
+        let expected = self.active.as_ref().map(ActiveProfile::id);
+        if expected != Some(profile) {
+            return Err(ProfileRuntimeError::StaleProfile {
+                expected,
+                actual: profile,
+            });
+        }
+        if let Some(pending) = self.pending_settings_save {
+            return Err(ProfileRuntimeError::SettingsSaveAlreadyPending {
+                pending: pending.id,
+            });
+        }
+
+        let active = self.active.as_ref().expect("active profile was validated");
+        let root = active.root.clone();
+        let snapshot = active.settings.snapshot().clone();
+        let base_generation = snapshot.generation();
+        let mutation_revision = active.settings_revision;
+        let id = ProfileSettingsSaveId(self.next_settings_save_id);
+        self.next_settings_save_id = self
+            .next_settings_save_id
+            .checked_add(1)
+            .ok_or(ProfileRuntimeError::ProfileSettingsSaveIdExhausted)?;
+        self.pending_settings_save = Some(PendingProfileSettingsSave {
+            id,
+            profile,
+            base_generation,
+            mutation_revision,
+        });
+        Ok(ProfileSettingsSaveIntent {
+            id,
+            profile,
+            root,
+            snapshot,
+            mutation_revision,
+        })
+    }
+
+    pub fn cancel_settings_save(
+        &mut self,
+        save: ProfileSettingsSaveId,
+    ) -> Result<(), ProfileRuntimeError> {
+        let expected = self.pending_settings_save.map(|pending| pending.id);
+        if expected != Some(save) {
+            return Err(ProfileRuntimeError::StaleSettingsSave {
+                expected,
+                actual: save,
+            });
+        }
+        self.pending_settings_save = None;
+        Ok(())
+    }
+
+    pub fn complete_settings_save(
+        &mut self,
+        completion: ProfileSettingsSaveCompletion,
+    ) -> Result<ProfileSettingsSaveCompletion, ProfileRuntimeError> {
+        let expected = self.pending_settings_save.map(|pending| pending.id);
+        if expected != Some(completion.id) {
+            return Err(ProfileRuntimeError::StaleSettingsSave {
+                expected,
+                actual: completion.id,
+            });
+        }
+
+        let pending = self
+            .pending_settings_save
+            .expect("pending settings save was validated");
+        let active = self
+            .active
+            .as_ref()
+            .ok_or(ProfileRuntimeError::SettingsSaveTargetMismatch {
+                save: completion.id,
+            })?;
+        if pending.profile != completion.profile
+            || pending.base_generation != completion.base_generation
+            || pending.mutation_revision != completion.mutation_revision
+            || active.id != completion.profile
+            || active.root != completion.root
+        {
+            return Err(ProfileRuntimeError::SettingsSaveTargetMismatch {
+                save: completion.id,
+            });
+        }
+
+        self.pending_settings_save = None;
+        if let Ok(saved) = &completion.result {
+            let active = self.active.as_mut().expect("settings save target was validated");
+            let current_generation = active.settings.generation();
+            let saved_generation = saved.snapshot().generation();
+            if !active
+                .settings
+                .snapshot
+                .advance_generation_after_save(pending.base_generation, saved_generation)
+            {
+                return Err(ProfileRuntimeError::SettingsSaveGenerationMismatch {
+                    expected_generation: pending.base_generation,
+                    current_generation,
+                    saved_generation,
+                });
+            }
+            active.durable_settings_revision = pending.mutation_revision;
+        }
+        Ok(completion)
     }
 
     pub fn record_committed_navigation(
