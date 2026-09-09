@@ -873,8 +873,7 @@ impl ProfileRuntime {
             browsing_history_revision: 0,
             durable_browsing_history_revision: 0,
         };
-        let invalidated_settings_save =
-            self.pending_settings_save.take().map(|pending| pending.id);
+        let invalidated_settings_save = self.pending_settings_save.take().map(|pending| pending.id);
         let invalidated_browsing_history_save =
             self.pending_history_save.take().map(|pending| pending.id);
         let replaced_profile = self.active.replace(active);
@@ -1027,12 +1026,12 @@ impl ProfileRuntime {
         let pending = self
             .pending_settings_save
             .expect("pending settings save was validated");
-        let active = self
-            .active
-            .as_ref()
-            .ok_or(ProfileRuntimeError::SettingsSaveTargetMismatch {
-                save: completion.id,
-            })?;
+        let active =
+            self.active
+                .as_ref()
+                .ok_or(ProfileRuntimeError::SettingsSaveTargetMismatch {
+                    save: completion.id,
+                })?;
         if pending.profile != completion.profile
             || pending.base_generation != completion.base_generation
             || pending.mutation_revision != completion.mutation_revision
@@ -1046,7 +1045,10 @@ impl ProfileRuntime {
 
         self.pending_settings_save = None;
         if let Ok(saved) = &completion.result {
-            let active = self.active.as_mut().expect("settings save target was validated");
+            let active = self
+                .active
+                .as_mut()
+                .expect("settings save target was validated");
             let current_generation = active.settings.generation();
             let saved_generation = saved.snapshot().generation();
             if !active
@@ -1711,7 +1713,10 @@ mod tests {
 
         let active = runtime.active_profile().unwrap();
         assert_eq!(active.settings().generation(), 1);
-        assert_eq!(active.settings().color_scheme(), ColorSchemePreference::Dark);
+        assert_eq!(
+            active.settings().color_scheme(),
+            ColorSchemePreference::Dark
+        );
         assert!(!active.settings().confirm_close_multiple_tabs());
         assert!(runtime.settings_is_dirty(profile).unwrap());
         assert_eq!(runtime.settings_unsaved_mutations(profile).unwrap(), 1);
@@ -1742,7 +1747,10 @@ mod tests {
             .unwrap()
             .into_snapshot();
         assert_eq!(persisted.generation(), 2);
-        assert_eq!(persisted.get(CONFIRM_CLOSE_MULTIPLE_TABS_KEY), Some("false"));
+        assert_eq!(
+            persisted.get(CONFIRM_CLOSE_MULTIPLE_TABS_KEY),
+            Some("false")
+        );
     }
 
     #[test]
