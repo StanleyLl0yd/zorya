@@ -602,11 +602,12 @@ impl ProfileCatalog {
             }
 
             let metadata = match storage_id {
-                Some(storage_id) => load_profile_metadata(&path, storage_id)
-                    .map_err(|error| ProfileCatalogError::Metadata {
+                Some(storage_id) => load_profile_metadata(&path, storage_id).map_err(|error| {
+                    ProfileCatalogError::Metadata {
                         root: path.clone(),
                         error,
-                    })?,
+                    }
+                })?,
                 None => None,
             };
             if metadata.is_none() && !legacy_default {
@@ -834,8 +835,13 @@ pub(crate) fn publish_profile_storage_id(
     match fs::create_dir(&identity_directory) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let metadata = fs::symlink_metadata(&identity_directory)
-                .map_err(|error| identity_io_error("inspect profile identity directory", &identity_directory, error))?;
+            let metadata = fs::symlink_metadata(&identity_directory).map_err(|error| {
+                identity_io_error(
+                    "inspect profile identity directory",
+                    &identity_directory,
+                    error,
+                )
+            })?;
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err(ProfileIdentityError::Corrupt {
                     path: identity_directory,
@@ -1064,12 +1070,8 @@ mod tests {
     fn fixture_profile(root: &Path, id: ProfileStorageId, display_name: &str) {
         let lock = ProfileLock::acquire(root).unwrap();
         publish_profile_storage_id(&lock, id).unwrap();
-        load_or_create_profile_metadata(
-            &lock,
-            id,
-            ProfileDisplayName::new(display_name).unwrap(),
-        )
-        .unwrap();
+        load_or_create_profile_metadata(&lock, id, ProfileDisplayName::new(display_name).unwrap())
+            .unwrap();
         lock.release().unwrap();
     }
 
@@ -1202,7 +1204,10 @@ mod tests {
         );
         assert!(created.root().join(PROFILE_READY_DIRECTORY_NAME).is_dir());
 
-        let entries = ProfileCatalog::open(root.path()).unwrap().discover().unwrap();
+        let entries = ProfileCatalog::open(root.path())
+            .unwrap()
+            .discover()
+            .unwrap();
         assert_eq!(entries, vec![created]);
     }
 
@@ -1217,28 +1222,19 @@ mod tests {
         let generation = created.metadata().unwrap().generation();
         let profile_root = created.root().to_owned();
 
-        let renamed = ProfileCatalogRenameIntent::new(
-            &profile_root,
-            storage_id,
-            generation,
-            "Work",
-        )
-        .unwrap()
-        .execute()
-        .unwrap();
+        let renamed =
+            ProfileCatalogRenameIntent::new(&profile_root, storage_id, generation, "Work")
+                .unwrap()
+                .execute()
+                .unwrap();
         assert_eq!(renamed.generation(), generation + 1);
         assert_eq!(renamed.display_name().as_str(), "Work");
         assert!(profile_root.is_dir());
 
-        let stale = ProfileCatalogRenameIntent::new(
-            &profile_root,
-            storage_id,
-            generation,
-            "Stale",
-        )
-        .unwrap()
-        .execute()
-        .unwrap_err();
+        let stale = ProfileCatalogRenameIntent::new(&profile_root, storage_id, generation, "Stale")
+            .unwrap()
+            .execute()
+            .unwrap_err();
         assert!(matches!(
             stale,
             ProfileCatalogRenameError::Metadata(ProfileMetadataError::StaleGeneration {
@@ -1247,7 +1243,10 @@ mod tests {
             }) if expected == generation && actual == generation + 1
         ));
 
-        let entries = ProfileCatalog::open(root.path()).unwrap().discover().unwrap();
+        let entries = ProfileCatalog::open(root.path())
+            .unwrap()
+            .discover()
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].root(), profile_root);
         assert_eq!(entries[0].display_name(), Some("Work"));
