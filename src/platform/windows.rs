@@ -839,7 +839,6 @@ impl NativeShell {
             .map_err(|error| error.to_string())?;
         self.worker_ready = false;
         self.needs_redraw = true;
-        self.update_window_title();
 
         let result = self
             .worker
@@ -1114,6 +1113,10 @@ impl NativeShell {
                 if let Some(replaced) = commit.into_replaced_profile() {
                     debug_assert!(self.pending_profile_replacement.is_none());
                     self.replaced_profile_lock = Some(replaced.into_profile_lock());
+                    if let Err(error) = self.enter_native_neutral() {
+                        self.fail(event_loop, error);
+                        return;
+                    }
                     if let Err(error) = self.reset_native_session_for_profile_switch() {
                         self.fail(event_loop, error);
                         return;
@@ -2682,6 +2685,7 @@ impl NativeShell {
                         }
                         self.worker_ready = true;
                         self.needs_redraw = true;
+                        self.update_window_title();
                         if !self.profile_transition_in_progress() {
                             self.request_redraw();
                         }
