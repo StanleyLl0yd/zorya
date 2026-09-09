@@ -10,11 +10,24 @@ use crate::profile_catalog::{
     ProfileIdentityError, ProfileStorageId, load_or_create_profile_storage_id,
 };
 use crate::profile_lock::{ProfileLock, ProfileLockError};
+use crate::profile_metadata::{
+    ProfileDisplayName, ProfileMetadata, ProfileMetadataError, load_or_create_profile_metadata,
+};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 const COLOR_SCHEME_KEY: &str = "ui.color_scheme";
 const CONFIRM_CLOSE_MULTIPLE_TABS_KEY: &str = "tabs.confirm_close_multiple";
+
+fn bootstrap_profile_display_name(root: &Path) -> ProfileDisplayName {
+    let candidate = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Profile");
+    ProfileDisplayName::new(candidate.to_owned()).unwrap_or_else(|_| {
+        ProfileDisplayName::new("Profile").expect("fallback profile display name is valid")
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProfileId(u64);
@@ -223,6 +236,7 @@ pub struct PreparedProfile {
     selection: ProfileSelectionId,
     root: PathBuf,
     storage_id: ProfileStorageId,
+    metadata: ProfileMetadata,
     lock: ProfileLock,
     settings: ProductSettings,
     settings_recovery: Option<SettingsRecovery>,
@@ -237,6 +251,12 @@ impl PreparedProfile {
         let prepared = (|| {
             let storage_id = load_or_create_profile_storage_id(&lock)
                 .map_err(ProfilePreparationError::Identity)?;
+            let metadata = load_or_create_profile_metadata(
+                &lock,
+                storage_id,
+                bootstrap_profile_display_name(&intent.root),
+            )
+            .map_err(ProfilePreparationError::Metadata)?;
             let store = ProfileStore::open(intent.root.clone())
                 .map_err(ProfilePreparationError::Storage)?;
             let load = store
@@ -256,6 +276,7 @@ impl PreparedProfile {
 
             Ok((
                 storage_id,
+                metadata,
                 settings,
                 settings_recovery,
                 browsing_history,
@@ -263,8 +284,14 @@ impl PreparedProfile {
             ))
         })();
 
-        let (storage_id, settings, settings_recovery, browsing_history, browsing_history_recovery) =
-            match prepared {
+        let (
+            storage_id,
+            metadata,
+            settings,
+            settings_recovery,
+            browsing_history,
+            browsing_history_recovery,
+        ) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     return match lock.release() {
@@ -281,6 +308,7 @@ impl PreparedProfile {
             selection: intent.id,
             root: intent.root.clone(),
             storage_id,
+            metadata,
             lock,
             settings,
             settings_recovery,
@@ -299,6 +327,10 @@ impl PreparedProfile {
 
     pub const fn storage_id(&self) -> ProfileStorageId {
         self.storage_id
+    }
+
+    pub const fn metadata(&self) -> &ProfileMetadata {
+        &self.metadata
     }
 
     pub const fn settings(&self) -> &ProductSettings {
@@ -327,6 +359,7 @@ impl PreparedProfile {
 pub enum ProfilePreparationError {
     Lock(ProfileLockError),
     Identity(ProfileIdentityError),
+    Metadata(ProfileMetadataError),
     Storage(ProfileStorageError),
     Settings(ProfileSettingsError),
     BrowsingHistory(crate::browsing_history::BrowsingHistoryError),
@@ -341,6 +374,7 @@ impl fmt::Display for ProfilePreparationError {
         match self {
             Self::Lock(error) => error.fmt(formatter),
             Self::Identity(error) => error.fmt(formatter),
+            Self::Metadata(error) => error.fmt(formatter),
             Self::Storage(error) => error.fmt(formatter),
             Self::Settings(error) => error.fmt(formatter),
             Self::BrowsingHistory(error) => error.fmt(formatter),
@@ -360,6 +394,7 @@ impl std::error::Error for ProfilePreparationError {
         match self {
             Self::Lock(error) => Some(error),
             Self::Identity(error) => Some(error),
+            Self::Metadata(error) => Some(error),
             Self::Storage(error) => Some(error),
             Self::Settings(error) => Some(error),
             Self::BrowsingHistory(error) => Some(error),
@@ -373,6 +408,7 @@ pub struct ActiveProfile {
     id: ProfileId,
     root: PathBuf,
     storage_id: ProfileStorageId,
+    metadata: ProfileMetadata,
     lock: ProfileLock,
     settings: ProductSettings,
     settings_recovery: Option<SettingsRecovery>,
@@ -395,6 +431,10 @@ impl ActiveProfile {
 
     pub const fn storage_id(&self) -> ProfileStorageId {
         self.storage_id
+    }
+
+    pub const fn metadata(&self) -> &ProfileMetadata {
+        &self.metadata
     }
 
     #[cfg(target_os = "windows")]
@@ -1020,6 +1060,7 @@ impl ProfileRuntime {
             id,
             root: prepared.root,
             storage_id: prepared.storage_id,
+            metadata: prepared.metadata,
             lock: prepared.lock,
             settings: prepared.settings,
             settings_recovery: prepared.settings_recovery,
