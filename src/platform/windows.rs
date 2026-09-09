@@ -3044,7 +3044,9 @@ impl NativeShell {
                                     .is_some_and(|window| {
                                         window.tabs().len() == 1
                                             && window.active_tab_id() == Some(self.tab)
-                                            && window.tabs()[0].navigation().history().is_empty()
+                                            && window.tabs()[0].navigation().history().len() == 1
+                                            && window.tabs()[0].navigation().display_location()
+                                                == Some(START_LOCATION)
                                             && window.tabs()[0].navigation().pending().is_none()
                                     });
                                 let visible = self
