@@ -9,14 +9,13 @@ use crate::engine::{
 };
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
-    NavigationId, NavigationStart, PresentationFramePermit, PresentationGeneration,
-    PresentationHandoffError, PreparedProfile, ProfileHistorySavePolicy,
+    NavigationId, NavigationStart, PreparedProfile, PresentationFramePermit,
+    PresentationGeneration, PresentationHandoffError, ProfileHistorySavePolicy,
     ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileLock, ProfileLockOwner,
     ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent, ProfileSettingsSavePolicy,
-    ProfileSettingsSaveScheduler,
-    ProfileSettingsSaveUrgency, ProfileWorker, ProfileWorkerCompletion, TabActivationStart,
-    TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit,
-    WebContentPresentation,
+    ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency, ProfileWorker,
+    ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection, TabId,
+    TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -775,9 +774,9 @@ impl NativeShell {
         prepared: PreparedProfile,
     ) {
         if self.replaced_profile_lock.is_some()
-            || self
-                .pending_profile_lock_release
-                .is_some_and(|pending| pending.purpose == ProfileLockReleasePurpose::ReplacedProfile)
+            || self.pending_profile_lock_release.is_some_and(|pending| {
+                pending.purpose == ProfileLockReleasePurpose::ReplacedProfile
+            })
         {
             self.fail_with_rejected_profile(
                 event_loop,
@@ -848,9 +847,9 @@ impl NativeShell {
         }
 
         if self.replaced_profile_lock.is_some()
-            || self
-                .pending_profile_lock_release
-                .is_some_and(|pending| pending.purpose == ProfileLockReleasePurpose::ReplacedProfile)
+            || self.pending_profile_lock_release.is_some_and(|pending| {
+                pending.purpose == ProfileLockReleasePurpose::ReplacedProfile
+            })
         {
             match self.drive_replaced_profile_lock_release() {
                 Ok(true) => {}
@@ -1185,8 +1184,7 @@ impl NativeShell {
                             return;
                         }
 
-                        let flush =
-                            self.shutdown_requested || self.replacement_flush_requested();
+                        let flush = self.shutdown_requested || self.replacement_flush_requested();
                         if let Err(error) = self.drive_profile_saves(flush) {
                             self.fail(event_loop, error);
                             return;
@@ -1234,8 +1232,7 @@ impl NativeShell {
                             return;
                         }
 
-                        let flush =
-                            self.shutdown_requested || self.replacement_flush_requested();
+                        let flush = self.shutdown_requested || self.replacement_flush_requested();
                         if let Err(error) = self.drive_profile_saves(flush) {
                             self.fail(event_loop, error);
                             return;
@@ -2661,9 +2658,9 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
         }
 
         if self.replaced_profile_lock.is_some()
-            || self
-                .pending_profile_lock_release
-                .is_some_and(|pending| pending.purpose == ProfileLockReleasePurpose::ReplacedProfile)
+            || self.pending_profile_lock_release.is_some_and(|pending| {
+                pending.purpose == ProfileLockReleasePurpose::ReplacedProfile
+            })
         {
             self.continue_profile_replacement(event_loop);
             return;
