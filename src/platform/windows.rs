@@ -188,6 +188,15 @@ fn current_unix_millis() -> Result<u64, String> {
         .map_err(|_| "system time exceeds browsing-history timestamp range".to_string())
 }
 
+fn browser_navigation_quiescent(browser: &BrowserApp, window: BrowserWindowId) -> bool {
+    browser.window(window).is_some_and(|window| {
+        window
+            .tabs()
+            .iter()
+            .all(|tab| tab.navigation().pending().is_none())
+    })
+}
+
 fn record_profile_navigation_at(
     runtime: &mut ProfileRuntime,
     profile: ProfileId,
@@ -611,14 +620,7 @@ impl NativeShell {
             return false;
         }
 
-        self.browser
-            .window(self.browser_window)
-            .is_some_and(|window| {
-                window
-                    .tabs()
-                    .iter()
-                    .all(|tab| tab.navigation().pending().is_none())
-            })
+        browser_navigation_quiescent(&self.browser, self.browser_window)
     }
 
     fn drive_settings_save(&mut self, urgency: ProfileSettingsSaveUrgency) -> Result<(), String> {
@@ -3698,6 +3700,27 @@ mod tests {
         assert_eq!(policy.debounce_millis(), 5_000);
         assert_eq!(policy.max_dirty_millis(), 30_000);
         assert_eq!(policy.mutation_threshold(), 32);
+    }
+
+    #[test]
+    fn browser_navigation_quiescence_tracks_exact_pending_work() {
+        let mut browser = BrowserApp::bootstrap().unwrap();
+        let window = browser.windows().next().unwrap().id();
+        let tab = browser.window(window).unwrap().active_tab_id().unwrap();
+
+        assert!(browser_navigation_quiescent(&browser, window));
+
+        let navigation = browser
+            .begin_navigation(window, tab, "https://example.test/pending")
+            .unwrap()
+            .intent()
+            .id();
+        assert!(!browser_navigation_quiescent(&browser, window));
+
+        browser
+            .fail_navigation(window, tab, navigation, "fixture resolves pending navigation")
+            .unwrap();
+        assert!(browser_navigation_quiescent(&browser, window));
     }
 
     #[test]
