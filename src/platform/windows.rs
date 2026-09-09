@@ -11,10 +11,11 @@ use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     NavigationId, NavigationStart, PresentationFramePermit, PresentationGeneration,
     PresentationHandoffError, ProfileHistorySavePolicy, ProfileHistorySaveScheduler,
-    ProfileHistorySaveUrgency, ProfileLock, ProfileLockOwner, ProfileRuntime, ProfileSelectionIntent,
-    ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency,
-    ProfileWorker, ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection,
-    TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
+    ProfileHistorySaveUrgency, ProfileLock, ProfileLockOwner, ProfileRuntime,
+    ProfileSelectionIntent, ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler,
+    ProfileSettingsSaveUrgency, ProfileWorker, ProfileWorkerCompletion, TabActivationStart,
+    TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit,
+    WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{

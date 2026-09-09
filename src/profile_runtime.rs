@@ -231,8 +231,8 @@ impl PreparedProfile {
         let lock =
             ProfileLock::acquire(intent.root.clone()).map_err(ProfilePreparationError::Lock)?;
         let prepared = (|| {
-            let store =
-                ProfileStore::open(intent.root.clone()).map_err(ProfilePreparationError::Storage)?;
+            let store = ProfileStore::open(intent.root.clone())
+                .map_err(ProfilePreparationError::Storage)?;
             let load = store
                 .load_settings()
                 .map_err(ProfilePreparationError::Storage)?;
@@ -305,6 +305,7 @@ impl PreparedProfile {
         self.browsing_history_recovery.as_ref()
     }
 
+    #[cfg(any(test, target_os = "windows"))]
     pub(crate) fn into_profile_lock(self) -> ProfileLock {
         self.lock
     }
@@ -630,7 +631,7 @@ impl ProfileSelectionCommit {
 #[must_use = "a rejected prepared profile still owns its exact profile lock"]
 pub struct ProfileSelectionCommitError {
     error: ProfileRuntimeError,
-    prepared: PreparedProfile,
+    prepared: Box<PreparedProfile>,
 }
 
 impl ProfileSelectionCommitError {
@@ -639,11 +640,11 @@ impl ProfileSelectionCommitError {
     }
 
     pub const fn prepared(&self) -> &PreparedProfile {
-        &self.prepared
+        self.prepared.as_ref()
     }
 
     pub fn into_parts(self) -> (ProfileRuntimeError, PreparedProfile) {
-        (self.error, self.prepared)
+        (self.error, *self.prepared)
     }
 }
 
@@ -933,7 +934,7 @@ impl ProfileRuntime {
                     expected,
                     actual: prepared.selection,
                 },
-                prepared,
+                prepared: Box::new(prepared),
             });
         }
         if self
@@ -944,7 +945,7 @@ impl ProfileRuntime {
             let selection = prepared.selection;
             return Err(ProfileSelectionCommitError {
                 error: ProfileRuntimeError::SelectionTargetMismatch { selection },
-                prepared,
+                prepared: Box::new(prepared),
             });
         }
 
@@ -952,7 +953,7 @@ impl ProfileRuntime {
         let Some(next_profile_id) = self.next_profile_id.checked_add(1) else {
             return Err(ProfileSelectionCommitError {
                 error: ProfileRuntimeError::ProfileIdExhausted,
-                prepared,
+                prepared: Box::new(prepared),
             });
         };
         self.next_profile_id = next_profile_id;
