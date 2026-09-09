@@ -158,10 +158,7 @@ impl ProfileHistorySaveScheduler {
                     self.first_dirty_millis.get_or_insert(now_millis);
                     self.last_mutation_millis = Some(now_millis);
                 }
-            } else if unsaved_mutations != 0
-                && !save_pending
-                && self.first_dirty_millis.is_none()
-            {
+            } else if unsaved_mutations != 0 && !save_pending && self.first_dirty_millis.is_none() {
                 self.first_dirty_millis = Some(now_millis);
                 self.last_mutation_millis = Some(now_millis);
             }
@@ -244,12 +241,8 @@ mod tests {
         max_dirty_millis: u64,
         mutation_threshold: u64,
     ) -> ProfileHistorySavePolicy {
-        ProfileHistorySavePolicy::new(
-            debounce_millis,
-            max_dirty_millis,
-            mutation_threshold,
-        )
-        .unwrap()
+        ProfileHistorySavePolicy::new(debounce_millis, max_dirty_millis, mutation_threshold)
+            .unwrap()
     }
 
     fn load_profile(runtime: &mut ProfileRuntime, root: &Path) -> ProfileId {
@@ -284,6 +277,23 @@ mod tests {
             .unwrap();
     }
 
+    fn scheduled(
+        scheduler: &mut ProfileHistorySaveScheduler,
+        runtime: &mut ProfileRuntime,
+        profile: ProfileId,
+        now_millis: u64,
+        urgency: ProfileHistorySaveUrgency,
+    ) -> bool {
+        scheduler
+            .poll(runtime, profile, now_millis, urgency)
+            .unwrap()
+            .is_some()
+    }
+
+    fn unsaved(runtime: &ProfileRuntime, profile: ProfileId) -> u64 {
+        runtime.browsing_history_unsaved_mutations(profile).unwrap()
+    }
+
     #[test]
     fn policy_rejects_zero_and_inverted_bounds() {
         assert_eq!(
@@ -314,14 +324,20 @@ mod tests {
         let profile = load_profile(&mut runtime, root.path());
         let mut scheduler = ProfileHistorySaveScheduler::new(policy(10, 100, 10));
 
-        assert!(scheduler
-            .poll(&mut runtime, profile, 0, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_none());
-        assert!(scheduler
-            .poll(&mut runtime, profile, 1, ProfileHistorySaveUrgency::Flush)
-            .unwrap()
-            .is_none());
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            0,
+            ProfileHistorySaveUrgency::Normal,
+        ));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            1,
+            ProfileHistorySaveUrgency::Flush,
+        ));
     }
 
     #[test]
@@ -332,28 +348,43 @@ mod tests {
         let mut scheduler = ProfileHistorySaveScheduler::new(policy(10, 100, 10));
 
         record(&mut runtime, profile, 1);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 0, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_none());
-        assert!(scheduler
-            .poll(&mut runtime, profile, 9, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_none());
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            0,
+            ProfileHistorySaveUrgency::Normal,
+        ));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            9,
+            ProfileHistorySaveUrgency::Normal,
+        ));
 
         record(&mut runtime, profile, 2);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 9, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_none());
-        assert!(scheduler
-            .poll(&mut runtime, profile, 18, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_none());
-        assert!(scheduler
-            .poll(&mut runtime, profile, 19, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_some());
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            9,
+            ProfileHistorySaveUrgency::Normal,
+        ));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            18,
+            ProfileHistorySaveUrgency::Normal,
+        ));
+        assert!(scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            19,
+            ProfileHistorySaveUrgency::Normal,
+        ));
     }
 
     #[test]
@@ -364,15 +395,21 @@ mod tests {
         let mut scheduler = ProfileHistorySaveScheduler::new(policy(100, 1_000, 2));
 
         record(&mut runtime, profile, 1);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 0, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_none());
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            0,
+            ProfileHistorySaveUrgency::Normal,
+        ));
         record(&mut runtime, profile, 2);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 1, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_some());
+        assert!(scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            1,
+            ProfileHistorySaveUrgency::Normal,
+        ));
     }
 
     #[test]
@@ -384,22 +421,23 @@ mod tests {
 
         for now in [0, 5, 10, 15] {
             record(&mut runtime, profile, now + 1);
-            assert!(scheduler
-                .poll(
-                    &mut runtime,
-                    profile,
-                    now,
-                    ProfileHistorySaveUrgency::Normal,
-                )
-                .unwrap()
-                .is_none());
+            assert!(!scheduled(
+                &mut scheduler,
+                &mut runtime,
+                profile,
+                now,
+                ProfileHistorySaveUrgency::Normal,
+            ));
         }
 
         record(&mut runtime, profile, 21);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 20, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_some());
+        assert!(scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            20,
+            ProfileHistorySaveUrgency::Normal,
+        ));
     }
 
     #[test]
@@ -410,10 +448,13 @@ mod tests {
         let mut scheduler = ProfileHistorySaveScheduler::new(policy(100, 1_000, 100));
 
         record(&mut runtime, profile, 1);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 0, ProfileHistorySaveUrgency::Flush)
-            .unwrap()
-            .is_some());
+        assert!(scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            0,
+            ProfileHistorySaveUrgency::Flush,
+        ));
     }
 
     #[test]
@@ -430,19 +471,25 @@ mod tests {
             .expect("threshold should start first save");
 
         record(&mut runtime, profile, 2);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 1, ProfileHistorySaveUrgency::Flush)
-            .unwrap()
-            .is_none());
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            1,
+            ProfileHistorySaveUrgency::Flush,
+        ));
 
         runtime
             .complete_browsing_history_save(first.execute())
             .unwrap();
-        assert_eq!(runtime.browsing_history_unsaved_mutations(profile).unwrap(), 1);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 1, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_some());
+        assert_eq!(unsaved(&runtime, profile), 1);
+        assert!(scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            1,
+            ProfileHistorySaveUrgency::Normal,
+        ));
     }
 
     #[test]
@@ -454,10 +501,13 @@ mod tests {
         let mut scheduler = ProfileHistorySaveScheduler::new(policy(10, 100, 10));
 
         record(&mut runtime, first, 1);
-        assert!(scheduler
-            .poll(&mut runtime, first, 100, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_none());
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            first,
+            100,
+            ProfileHistorySaveUrgency::Normal,
+        ));
 
         let second = load_profile(&mut runtime, second_root.path());
         assert!(matches!(
@@ -474,10 +524,13 @@ mod tests {
         ));
 
         record(&mut runtime, second, 2);
-        assert!(scheduler
-            .poll(&mut runtime, second, 1, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_none());
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            second,
+            1,
+            ProfileHistorySaveUrgency::Normal,
+        ));
         assert_eq!(scheduler.tracked_profile(), Some(second));
     }
 
@@ -489,18 +542,19 @@ mod tests {
         let mut scheduler = ProfileHistorySaveScheduler::new(policy(100, 1_000, 100));
 
         record(&mut runtime, profile, 1);
-        assert!(scheduler
-            .poll(
-                &mut runtime,
-                profile,
-                100,
-                ProfileHistorySaveUrgency::Normal,
-            )
-            .unwrap()
-            .is_none());
-        assert!(scheduler
-            .poll(&mut runtime, profile, 99, ProfileHistorySaveUrgency::Normal)
-            .unwrap()
-            .is_some());
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            100,
+            ProfileHistorySaveUrgency::Normal,
+        ));
+        assert!(scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            99,
+            ProfileHistorySaveUrgency::Normal,
+        ));
     }
 }
