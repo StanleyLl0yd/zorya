@@ -382,6 +382,11 @@ impl ActiveProfile {
         &self.lock
     }
 
+    #[cfg(any(test, target_os = "windows"))]
+    pub(crate) fn into_profile_lock(self) -> ProfileLock {
+        self.lock
+    }
+
     pub const fn settings(&self) -> &ProductSettings {
         &self.settings
     }
@@ -601,8 +606,6 @@ struct PendingProfileHistorySave {
 pub struct ProfileSelectionCommit {
     active_profile: ProfileId,
     replaced_profile: Option<ActiveProfile>,
-    invalidated_settings_save: Option<ProfileSettingsSaveId>,
-    invalidated_browsing_history_save: Option<ProfileHistorySaveId>,
 }
 
 impl ProfileSelectionCommit {
@@ -612,14 +615,6 @@ impl ProfileSelectionCommit {
 
     pub const fn replaced_profile(&self) -> Option<&ActiveProfile> {
         self.replaced_profile.as_ref()
-    }
-
-    pub const fn invalidated_settings_save(&self) -> Option<ProfileSettingsSaveId> {
-        self.invalidated_settings_save
-    }
-
-    pub const fn invalidated_browsing_history_save(&self) -> Option<ProfileHistorySaveId> {
-        self.invalidated_browsing_history_save
     }
 
     pub fn into_replaced_profile(self) -> Option<ActiveProfile> {
@@ -705,6 +700,9 @@ pub enum ProfileRuntimeError {
     },
     SelectionTargetMismatch {
         selection: ProfileSelectionId,
+    },
+    ActiveProfileNotDurable {
+        profile: ProfileId,
     },
     StaleProfile {
         expected: Option<ProfileId>,
@@ -815,6 +813,11 @@ impl fmt::Display for ProfileRuntimeError {
                 formatter,
                 "prepared profile target does not match profile selection {}",
                 selection.get()
+            ),
+            Self::ActiveProfileNotDurable { profile } => write!(
+                formatter,
+                "active profile {} still has pending or unsaved persistence work",
+                profile.get()
             ),
             Self::StaleProfile { expected, actual } => match expected {
                 Some(expected) => write!(
@@ -949,6 +952,19 @@ impl ProfileRuntime {
             });
         }
 
+        if let Some(active) = self.active.as_ref() {
+            let persistence_pending =
+                self.pending_settings_save.is_some() || self.pending_history_save.is_some();
+            let persistence_dirty = active.settings_revision != active.durable_settings_revision
+                || active.browsing_history_revision != active.durable_browsing_history_revision;
+            if persistence_pending || persistence_dirty {
+                return Err(ProfileSelectionCommitError {
+                    error: ProfileRuntimeError::ActiveProfileNotDurable { profile: active.id },
+                    prepared: Box::new(prepared),
+                });
+            }
+        }
+
         let id = ProfileId(self.next_profile_id);
         let Some(next_profile_id) = self.next_profile_id.checked_add(1) else {
             return Err(ProfileSelectionCommitError {
@@ -971,15 +987,10 @@ impl ProfileRuntime {
             browsing_history_revision: 0,
             durable_browsing_history_revision: 0,
         };
-        let invalidated_settings_save = self.pending_settings_save.take().map(|pending| pending.id);
-        let invalidated_browsing_history_save =
-            self.pending_history_save.take().map(|pending| pending.id);
         let replaced_profile = self.active.replace(active);
         Ok(ProfileSelectionCommit {
             active_profile: id,
             replaced_profile,
-            invalidated_settings_save,
-            invalidated_browsing_history_save,
         })
     }
 
@@ -1553,6 +1564,12 @@ mod tests {
                 actual: first_id,
             })
         );
+
+        let replaced = commit.into_replaced_profile().unwrap();
+        let lock = replaced.into_profile_lock();
+        lock.release().unwrap();
+        let reacquired = ProfileLock::acquire(first_root.path()).unwrap();
+        reacquired.release().unwrap();
     }
 
     #[test]
@@ -1722,15 +1739,25 @@ mod tests {
             1
         );
 
+        let save = runtime.begin_browsing_history_save(first).unwrap();
+        runtime
+            .complete_browsing_history_save(save.execute())
+            .unwrap();
+        assert!(!runtime.browsing_history_is_dirty(first).unwrap());
+
         let replacement_root = TempRoot::new();
         let replacement = runtime
             .begin_selection(replacement_root.path())
             .unwrap()
             .into_intent();
-        let second = runtime
-            .commit_selection(prepared(&replacement))
+        let commit = runtime.commit_selection(prepared(&replacement)).unwrap();
+        let second = commit.active_profile();
+        commit
+            .into_replaced_profile()
             .unwrap()
-            .active_profile();
+            .into_profile_lock()
+            .release()
+            .unwrap();
         assert_ne!(first, second);
         assert!(matches!(
             runtime.active_browsing_history(first),
@@ -1770,7 +1797,18 @@ mod tests {
         let second_root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
         let first = load_profile(&mut runtime, first_root.path());
-        let second = load_profile(&mut runtime, second_root.path());
+        let selection = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
+        let replacement = runtime.commit_selection(prepared(&selection)).unwrap();
+        let second = replacement.active_profile();
+        replacement
+            .into_replaced_profile()
+            .unwrap()
+            .into_profile_lock()
+            .release()
+            .unwrap();
         let commit = committed_navigation("https://example.test/stale");
 
         assert_eq!(
@@ -2022,7 +2060,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_replacement_invalidates_pending_settings_save_and_rejects_completion() {
+    fn profile_replacement_waits_for_pending_settings_save() {
         let first_root = TempRoot::new();
         let second_root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
@@ -2040,21 +2078,24 @@ mod tests {
             .unwrap()
             .into_intent();
         let prepared = PreparedProfile::load(&selection).unwrap();
+        let rejection = runtime.commit_selection(prepared).unwrap_err();
+        assert_eq!(
+            rejection.error(),
+            &ProfileRuntimeError::ActiveProfileNotDurable { profile: first }
+        );
+        assert_eq!(runtime.pending_settings_save(), Some(save));
+        assert_eq!(runtime.active_profile().unwrap().id(), first);
+        let prepared = rejection.into_parts().1;
+
+        runtime.complete_settings_save(intent.execute()).unwrap();
+        assert!(!runtime.settings_is_dirty(first).unwrap());
         let commit = runtime.commit_selection(prepared).unwrap();
         let second = commit.active_profile();
-        assert_eq!(commit.invalidated_settings_save(), Some(save));
-        assert!(runtime.pending_settings_save().is_none());
-
-        let completion = intent.execute();
-        assert_eq!(
-            runtime.complete_settings_save(completion),
-            Err(ProfileRuntimeError::StaleSettingsSave {
-                expected: None,
-                actual: save,
-            })
-        );
-        assert_eq!(runtime.active_profile().unwrap().id(), second);
-        assert_eq!(runtime.active_profile().unwrap().settings().generation(), 0);
+        assert_ne!(first, second);
+        let replaced = commit.into_replaced_profile().unwrap();
+        replaced.into_profile_lock().release().unwrap();
+        let reacquired = ProfileLock::acquire(first_root.path()).unwrap();
+        reacquired.release().unwrap();
     }
 
     #[test]
@@ -2337,7 +2378,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_replacement_invalidates_pending_history_save_and_rejects_completion() {
+    fn profile_replacement_waits_for_pending_history_save() {
         let first_root = TempRoot::new();
         let second_root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
@@ -2355,27 +2396,26 @@ mod tests {
             .unwrap()
             .into_intent();
         let prepared = PreparedProfile::load(&selection).unwrap();
+        let rejection = runtime.commit_selection(prepared).unwrap_err();
+        assert_eq!(
+            rejection.error(),
+            &ProfileRuntimeError::ActiveProfileNotDurable { profile: first }
+        );
+        assert_eq!(runtime.pending_browsing_history_save(), Some(save));
+        assert_eq!(runtime.active_profile().unwrap().id(), first);
+        let prepared = rejection.into_parts().1;
+
+        runtime
+            .complete_browsing_history_save(intent.execute())
+            .unwrap();
+        assert!(!runtime.browsing_history_is_dirty(first).unwrap());
         let commit = runtime.commit_selection(prepared).unwrap();
         let second = commit.active_profile();
-        assert_eq!(commit.invalidated_browsing_history_save(), Some(save));
-        assert!(runtime.pending_browsing_history_save().is_none());
-
-        let completion = intent.execute();
-        assert_eq!(
-            runtime.complete_browsing_history_save(completion),
-            Err(ProfileRuntimeError::StaleBrowsingHistorySave {
-                expected: None,
-                actual: save,
-            })
-        );
-        assert_eq!(
-            runtime
-                .active_browsing_history(second)
-                .unwrap()
-                .generation(),
-            0
-        );
-        assert!(runtime.active_browsing_history(second).unwrap().is_empty());
+        assert_ne!(first, second);
+        let replaced = commit.into_replaced_profile().unwrap();
+        replaced.into_profile_lock().release().unwrap();
+        let reacquired = ProfileLock::acquire(first_root.path()).unwrap();
+        reacquired.release().unwrap();
     }
 
     #[test]
