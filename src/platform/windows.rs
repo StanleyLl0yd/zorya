@@ -10,13 +10,13 @@ use crate::engine::{
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     NavigationId, NavigationStart, PreparedProfile, PresentationFramePermit,
-    PresentationGeneration, PresentationHandoffError, ProfileHistorySavePolicy,
-    ProfileCatalogDiscoverIntent, ProfileCatalogEntry, ProfileHistorySaveScheduler,
+    PresentationGeneration, PresentationHandoffError, ProfileCatalogDiscoverIntent,
+    ProfileCatalogEntry, ProfileHistorySavePolicy, ProfileHistorySaveScheduler,
     ProfileHistorySaveUrgency, ProfileId, ProfileLock, ProfileLockOwner, ProfileRuntime,
     ProfileRuntimeError, ProfileSelectionIntent, ProfileSettingsSavePolicy,
     ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency, ProfileStorageId, ProfileWorker,
-    ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection,
-    TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
+    ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection, TabId,
+    TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -267,8 +267,7 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         .intent()
         .id();
     let proxy = event_loop.create_proxy();
-    let initial_profile_root =
-        profile_root_from_local_app_data(std::env::var_os("LOCALAPPDATA"))?;
+    let initial_profile_root = profile_root_from_local_app_data(std::env::var_os("LOCALAPPDATA"))?;
     let profiles_root = initial_profile_root
         .parent()
         .expect("default profile root has a Profiles parent")
@@ -736,15 +735,14 @@ impl NativeShell {
                     .expect("catalog discovery remains pending")
                     .intent;
                 debug_assert_eq!(returned, expected);
-                Err(format!("failed to submit profile catalog discovery: {message}"))
+                Err(format!(
+                    "failed to submit profile catalog discovery: {message}"
+                ))
             }
         }
     }
 
-    fn complete_profile_cycle(
-        &mut self,
-        entries: Vec<ProfileCatalogEntry>,
-    ) -> Result<(), String> {
+    fn complete_profile_cycle(&mut self, entries: Vec<ProfileCatalogEntry>) -> Result<(), String> {
         let active = self
             .profile_runtime
             .active_profile()
@@ -811,7 +809,9 @@ impl NativeShell {
         let fresh_tab = self
             .browser
             .reset_window_for_profile_switch(self.browser_window)
-            .map_err(|error| format!("failed to reset browser session for profile switch: {error}"))?;
+            .map_err(|error| {
+                format!("failed to reset browser session for profile switch: {error}")
+            })?;
         self.tab = fresh_tab;
         self.presentation = TabPresentationHandoff::new(fresh_tab);
         self.pending_target_permit = None;
@@ -848,7 +848,8 @@ impl NativeShell {
             .ok_or_else(|| "render worker is unavailable for profile session reset".to_string())?
             .reset_profile_session(target, self.presentation.generation());
         if let Err(error) = result {
-            self.pending_profile_session_reset.complete_if_current(target);
+            self.pending_profile_session_reset
+                .complete_if_current(target);
             return Err(error);
         }
         Ok(())
@@ -1601,7 +1602,10 @@ impl NativeShell {
             }
             ProfileWorkerCompletion::CatalogDiscovered { intent, result } => {
                 let Some(pending) = self.pending_profile_catalog_discovery.take() else {
-                    self.fail(event_loop, "stale profile catalog completion has no pending request");
+                    self.fail(
+                        event_loop,
+                        "stale profile catalog completion has no pending request",
+                    );
                     return;
                 };
                 if !pending.submitted || pending.intent != intent {
@@ -2674,7 +2678,9 @@ impl NativeShell {
                 }
             }
             WorkerEvent::ProfileSessionReset { target, result } => {
-                if !self.pending_profile_session_reset.complete_if_current(target)
+                if !self
+                    .pending_profile_session_reset
+                    .complete_if_current(target)
                     || !self.target_alive(target)
                 {
                     return;
@@ -4106,7 +4112,9 @@ mod tests {
             let active = entries[index].storage_id().unwrap();
             let expected = entries[(index + 1) % entries.len()].root();
             assert_eq!(
-                next_profile_cycle_root(&entries, active).unwrap().as_deref(),
+                next_profile_cycle_root(&entries, active)
+                    .unwrap()
+                    .as_deref(),
                 Some(expected)
             );
         }
@@ -4128,9 +4136,13 @@ mod tests {
             next_profile_cycle_root(&entries, only.storage_id().unwrap()).unwrap(),
             None
         );
-        let missing = ProfileStorageId::from_raw(only.storage_id().unwrap().get().wrapping_add(1))
-            .unwrap();
-        assert!(next_profile_cycle_root(&entries, missing).unwrap_err().contains("missing"));
+        let missing =
+            ProfileStorageId::from_raw(only.storage_id().unwrap().get().wrapping_add(1)).unwrap();
+        assert!(
+            next_profile_cycle_root(&entries, missing)
+                .unwrap_err()
+                .contains("missing")
+        );
     }
 
     #[test]
