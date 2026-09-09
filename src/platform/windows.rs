@@ -3018,6 +3018,56 @@ impl NativeShell {
                             } else if self.needs_redraw {
                                 self.request_redraw();
                             }
+                        } else if self.run_mode == RunMode::ExitAfterProfileCycle {
+                            if let Some(start) = self.profile_cycle_smoke_start {
+                                let Some(active) = self
+                                    .profile_runtime
+                                    .active_profile()
+                                    .map(|profile| profile.storage_id())
+                                else {
+                                    self.fail(
+                                        event_loop,
+                                        "profile-cycle smoke lost its active profile",
+                                    );
+                                    return;
+                                };
+                                if active == start {
+                                    self.fail(
+                                        event_loop,
+                                        "profile-cycle smoke presented without changing persisted profile identity",
+                                    );
+                                    return;
+                                }
+                                let clean = self
+                                    .browser
+                                    .window(self.browser_window)
+                                    .is_some_and(|window| {
+                                        window.tabs().len() == 1
+                                            && window.active_tab_id() == Some(self.tab)
+                                            && window.tabs()[0].navigation().history().is_empty()
+                                            && window.tabs()[0].navigation().pending().is_none()
+                                    });
+                                let visible = self
+                                    .window
+                                    .as_ref()
+                                    .and_then(|window| window.is_visible())
+                                    == Some(true);
+                                if !clean
+                                    || self.initial_navigation.is_some()
+                                    || self.presentation.content()
+                                        != WebContentPresentation::Tab(self.tab)
+                                    || !visible
+                                {
+                                    self.fail(
+                                        event_loop,
+                                        "profile-cycle smoke did not finish on a clean visible fresh session",
+                                    );
+                                    return;
+                                }
+                                self.shutdown(event_loop);
+                            } else if let Err(error) = self.begin_profile_cycle_smoke_create() {
+                                self.fail(event_loop, error);
+                            }
                         } else if self.run_mode == RunMode::ExitAfterFirstPresentation {
                             self.shutdown(event_loop);
                         } else if self.run_mode == RunMode::ExitAfterTabActivation {
