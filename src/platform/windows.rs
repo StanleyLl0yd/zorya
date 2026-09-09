@@ -9,11 +9,10 @@ use crate::engine::{
 };
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
-    NavigationId,
-    NavigationStart, PresentationFramePermit, PresentationGeneration, PresentationHandoffError,
-    ProfileRuntime, ProfileSelectionIntent, ProfileWorker, ProfileWorkerCompletion,
-    TabActivationStart, TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff,
-    TargetFramePermit, WebContentPresentation,
+    NavigationId, NavigationStart, PresentationFramePermit, PresentationGeneration,
+    PresentationHandoffError, ProfileRuntime, ProfileSelectionIntent, ProfileWorker,
+    ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection, TabId,
+    TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -149,7 +148,9 @@ fn record_profile_navigation_at(
     runtime
         .record_committed_navigation(profile, visited_unix_millis, commit)
         .map(|_| ())
-        .map_err(|error| format!("failed to record committed navigation in active profile: {error}"))
+        .map_err(|error| {
+            format!("failed to record committed navigation in active profile: {error}")
+        })
 }
 
 pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
