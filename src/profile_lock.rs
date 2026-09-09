@@ -138,8 +138,7 @@ pub struct ProfileLock {
 impl ProfileLock {
     pub fn acquire(root: impl Into<PathBuf>) -> Result<Self, ProfileLockError> {
         let root = root.into();
-        fs::create_dir_all(&root)
-            .map_err(|error| io_error("create profile root", &root, error))?;
+        fs::create_dir_all(&root).map_err(|error| io_error("create profile root", &root, error))?;
         let path = root.join(PROFILE_LOCK_FILE_NAME);
         let owner = next_owner()?;
 
@@ -163,7 +162,11 @@ impl ProfileLock {
             Ok(file) => file,
             Err(error) => {
                 let _ = fs::remove_dir(&path);
-                return Err(io_error("create profile lock owner record", &owner_path, error));
+                return Err(io_error(
+                    "create profile lock owner record",
+                    &owner_path,
+                    error,
+                ));
             }
         };
         let record = encode_owner(owner);
@@ -182,8 +185,7 @@ impl ProfileLock {
         expected: ProfileLockOwner,
     ) -> Result<Self, ProfileLockError> {
         let root = root.into();
-        fs::create_dir_all(&root)
-            .map_err(|error| io_error("create profile root", &root, error))?;
+        fs::create_dir_all(&root).map_err(|error| io_error("create profile root", &root, error))?;
         let path = root.join(PROFILE_LOCK_FILE_NAME);
 
         remove_exact_owner(&path, expected, true)?;
@@ -236,11 +238,7 @@ fn next_owner() -> Result<ProfileLockOwner, ProfileLockError> {
 }
 
 fn owner_file_name(owner: ProfileLockOwner) -> String {
-    format!(
-        "owner-{:010}-{:020}",
-        owner.process_id(),
-        owner.owner_id()
-    )
+    format!("owner-{:010}-{:020}", owner.process_id(), owner.owner_id())
 }
 
 fn owner_path(lock_path: &Path, owner: ProfileLockOwner) -> PathBuf {
@@ -256,11 +254,7 @@ fn encode_owner(owner: ProfileLockOwner) -> Vec<u8> {
     .into_bytes()
 }
 
-fn write_lock_record(
-    file: &mut File,
-    record: &[u8],
-    path: &Path,
-) -> Result<(), ProfileLockError> {
+fn write_lock_record(file: &mut File, record: &[u8], path: &Path) -> Result<(), ProfileLockError> {
     file.write_all(record)
         .map_err(|error| io_error("write profile lock", path, error))?;
     file.sync_all()
@@ -320,10 +314,11 @@ fn read_owner_if_present(path: &Path) -> Result<Option<ProfileLockOwner>, Profil
         owner = Some(parsed);
     }
 
-    owner.ok_or_else(|| ProfileLockError::Corrupt {
-        path: path.to_owned(),
-    })
-    .map(Some)
+    owner
+        .ok_or_else(|| ProfileLockError::Corrupt {
+            path: path.to_owned(),
+        })
+        .map(Some)
 }
 
 fn parse_owner(bytes: &[u8]) -> Option<ProfileLockOwner> {
