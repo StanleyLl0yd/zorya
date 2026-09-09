@@ -441,10 +441,9 @@ impl NativeShell {
         if self.initial_profile_selection.is_none() {
             return Ok(());
         }
-        let worker = self
-            .profile_worker
-            .as_ref()
-            .ok_or_else(|| "profile worker is unavailable before initial profile selection".to_string())?;
+        let worker = self.profile_worker.as_ref().ok_or_else(|| {
+            "profile worker is unavailable before initial profile selection".to_string()
+        })?;
         let intent = self
             .initial_profile_selection
             .take()
@@ -2657,7 +2656,6 @@ impl WebContentSurface {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
