@@ -525,7 +525,11 @@ impl NativeShell {
     }
 
     fn drive_history_save(&mut self, urgency: ProfileHistorySaveUrgency) -> Result<(), String> {
-        let Some(profile) = self.profile_runtime.active_profile().map(|profile| profile.id()) else {
+        let Some(profile) = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| profile.id())
+        else {
             return Ok(());
         };
         let now_millis = self.history_clock.now_millis();
@@ -570,10 +574,18 @@ impl NativeShell {
     }
 
     fn history_flush_complete(&self) -> Result<bool, String> {
-        let Some(profile) = self.profile_runtime.active_profile().map(|profile| profile.id()) else {
+        let Some(profile) = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| profile.id())
+        else {
             return Ok(true);
         };
-        if self.profile_runtime.pending_browsing_history_save().is_some() {
+        if self
+            .profile_runtime
+            .pending_browsing_history_save()
+            .is_some()
+        {
             return Ok(false);
         }
         self.profile_runtime
