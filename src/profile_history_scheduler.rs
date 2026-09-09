@@ -380,7 +380,7 @@ mod tests {
         let root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
         let profile = load_profile(&mut runtime, root.path());
-        let mut scheduler = ProfileHistorySaveScheduler::new(policy(100, 20, 100));
+        let mut scheduler = ProfileHistorySaveScheduler::new(policy(10, 20, 100));
 
         for now in [0, 5, 10, 15] {
             record(&mut runtime, profile, now + 1);
