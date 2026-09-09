@@ -1239,6 +1239,8 @@ impl NativeShell {
                                 Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
                                 Err(error) => self.fail(event_loop, error),
                             }
+                        } else if self.needs_redraw {
+                            self.request_redraw();
                         }
                     }
                     ProfileLockReleasePurpose::ActiveShutdown => {
@@ -1538,6 +1540,10 @@ impl NativeShell {
         }
         if self.pending_target_permit.is_some() {
             return self.dispatch_pending_target_frame();
+        }
+        if self.profile_transition_in_progress() {
+            self.needs_redraw = true;
+            return Ok(());
         }
 
         let permit = match self.presentation.authorize_current_frame(self.tab) {
@@ -2394,6 +2400,10 @@ impl NativeShell {
                             ),
                         }
                     }
+                    Ok(false) if self.navigation_target_is_current(target) => self.fail(
+                        event_loop,
+                        "render worker lost the exact current navigation during cancellation",
+                    ),
                     Ok(false) => {}
                     Err(error) => self.fail(
                         event_loop,
