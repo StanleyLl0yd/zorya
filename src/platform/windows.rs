@@ -4012,7 +4012,7 @@ impl WebContentSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PreparedProfile;
+    use crate::{PreparedProfile, ProfileCatalog, ProfileCatalogCreateIntent};
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -4063,6 +4063,72 @@ mod tests {
         browser
             .commit_navigation(window, tab, navigation, location)
             .unwrap()
+    }
+
+    #[test]
+    fn profiles_root_is_stable_under_local_app_data() {
+        let local_app_data = OsString::from(r"C:\Users\Zorya\AppData\Local");
+        let root = profiles_root_from_local_app_data(Some(local_app_data)).unwrap();
+
+        assert_eq!(
+            root,
+            PathBuf::from(r"C:\Users\Zorya\AppData\Local")
+                .join(PRODUCT_DATA_DIRECTORY)
+                .join(PROFILES_DIRECTORY)
+        );
+    }
+
+    #[test]
+    fn profile_cycle_uses_catalog_order_and_wraps_by_persisted_identity() {
+        let catalog_root = TestProfileRoot::new();
+        ProfileCatalogCreateIntent::new(catalog_root.path(), "First")
+            .unwrap()
+            .execute()
+            .unwrap();
+        ProfileCatalogCreateIntent::new(catalog_root.path(), "Second")
+            .unwrap()
+            .execute()
+            .unwrap();
+        ProfileCatalogCreateIntent::new(catalog_root.path(), "Third")
+            .unwrap()
+            .execute()
+            .unwrap();
+
+        let entries = ProfileCatalog::open(catalog_root.path())
+            .unwrap()
+            .discover()
+            .unwrap();
+        assert_eq!(entries.len(), 3);
+
+        for index in 0..entries.len() {
+            let active = entries[index].storage_id().unwrap();
+            let expected = entries[(index + 1) % entries.len()].root();
+            assert_eq!(
+                next_profile_cycle_root(&entries, active).unwrap().as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn profile_cycle_is_noop_with_one_profile_and_rejects_missing_active_identity() {
+        let catalog_root = TestProfileRoot::new();
+        let only = ProfileCatalogCreateIntent::new(catalog_root.path(), "Only")
+            .unwrap()
+            .execute()
+            .unwrap();
+        let entries = ProfileCatalog::open(catalog_root.path())
+            .unwrap()
+            .discover()
+            .unwrap();
+
+        assert_eq!(
+            next_profile_cycle_root(&entries, only.storage_id().unwrap()).unwrap(),
+            None
+        );
+        let missing = ProfileStorageId::from_raw(only.storage_id().unwrap().get().wrapping_add(1))
+            .unwrap();
+        assert!(next_profile_cycle_root(&entries, missing).unwrap_err().contains("missing"));
     }
 
     #[test]
