@@ -292,17 +292,17 @@ impl PreparedProfile {
             browsing_history,
             browsing_history_recovery,
         ) = match prepared {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    return match lock.release() {
-                        Ok(()) => Err(error),
-                        Err(release) => Err(ProfilePreparationError::LockRelease {
-                            preparation: Box::new(error),
-                            release,
-                        }),
-                    };
-                }
-            };
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return match lock.release() {
+                    Ok(()) => Err(error),
+                    Err(release) => Err(ProfilePreparationError::LockRelease {
+                        preparation: Box::new(error),
+                        release,
+                    }),
+                };
+            }
+        };
 
         Ok(Self {
             selection: intent.id,
