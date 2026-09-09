@@ -1238,6 +1238,61 @@ mod tests {
     }
 
     #[test]
+    fn rename_rejects_wrong_persisted_storage_identity() {
+        let root = TestRoot::new("rename-identity");
+        let created = ProfileCatalogCreateIntent::new(root.path(), "Personal")
+            .unwrap()
+            .execute()
+            .unwrap();
+        let storage_id = created.storage_id().unwrap();
+        let wrong = ProfileStorageId::from_raw(storage_id.get().wrapping_add(1)).unwrap();
+        let error = ProfileCatalogRenameIntent::new(
+            created.root(),
+            wrong,
+            created.metadata().unwrap().generation(),
+            "Wrong",
+        )
+        .unwrap()
+        .execute()
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ProfileCatalogRenameError::Metadata(
+                ProfileMetadataError::StorageIdentityMismatch {
+                    expected,
+                    actual,
+                }
+            ) if expected == wrong && actual == storage_id
+        ));
+        assert_eq!(
+            ProfileCatalog::open(root.path())
+                .unwrap()
+                .discover()
+                .unwrap()[0]
+                .display_name(),
+            Some("Personal")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_open_rejects_redirected_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestRoot::new("catalog-symlink");
+        let target = root.path().join("target");
+        let redirected = root.path().join("redirected");
+        fs::create_dir_all(&target).unwrap();
+        symlink(&target, &redirected).unwrap();
+
+        assert!(matches!(
+            ProfileCatalog::open(&redirected),
+            Err(ProfileCatalogError::UnsupportedEntry { path }) if path == redirected
+        ));
+    }
+
+    #[test]
     fn catalog_profile_count_is_bounded() {
         let root = TestRoot::new("bound");
         let catalog = ProfileCatalog::open(root.path()).unwrap();
