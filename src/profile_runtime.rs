@@ -711,7 +711,7 @@ impl ProfileRuntime {
         &mut self,
         profile: ProfileId,
         visited_unix_millis: u64,
-        commit: &BrowserNavigationCommit,
+        commit: BrowserNavigationCommit,
     ) -> Result<BrowsingHistoryRecord, ProfileRuntimeError> {
         self.active_browsing_history_mut(profile)?
             .record_visit(visited_unix_millis, commit.location())
@@ -1131,7 +1131,7 @@ mod tests {
         let commit = committed_navigation("https://example.test/committed");
 
         let record = runtime
-            .record_committed_navigation(profile, 1_234, &commit)
+            .record_committed_navigation(profile, 1_234, commit)
             .unwrap();
 
         assert_eq!(record.id().get(), 1);
@@ -1139,7 +1139,10 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history.visits()[0].id(), record.id());
         assert_eq!(history.visits()[0].visited_unix_millis(), 1_234);
-        assert_eq!(history.visits()[0].location(), "https://example.test/committed");
+        assert_eq!(
+            history.visits()[0].location(),
+            "https://example.test/committed"
+        );
         assert_eq!(history.generation(), 0);
     }
 
@@ -1153,7 +1156,7 @@ mod tests {
         let commit = committed_navigation("https://example.test/stale");
 
         assert_eq!(
-            runtime.record_committed_navigation(first, 1, &commit),
+            runtime.record_committed_navigation(first, 1, commit),
             Err(ProfileRuntimeError::StaleProfile {
                 expected: Some(second),
                 actual: first,
@@ -1171,7 +1174,7 @@ mod tests {
         let invalid = committed_navigation(&oversized);
 
         assert!(matches!(
-            runtime.record_committed_navigation(profile, 1, &invalid),
+            runtime.record_committed_navigation(profile, 1, invalid),
             Err(ProfileRuntimeError::BrowsingHistory(
                 BrowsingHistoryError::LocationTooLarge { .. }
             ))
@@ -1180,7 +1183,7 @@ mod tests {
 
         let valid = committed_navigation("https://example.test/valid");
         let record = runtime
-            .record_committed_navigation(profile, 2, &valid)
+            .record_committed_navigation(profile, 2, valid)
             .unwrap();
         assert_eq!(record.id().get(), 1);
     }

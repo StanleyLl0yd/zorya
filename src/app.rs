@@ -27,7 +27,7 @@ impl TabId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct BrowserNavigationCommit {
     window: BrowserWindowId,
     tab: TabId,
@@ -38,12 +38,29 @@ pub struct BrowserNavigationCommit {
 }
 
 impl BrowserNavigationCommit {
-    pub const fn window(&self) -> BrowserWindowId { self.window }
-    pub const fn tab(&self) -> TabId { self.tab }
-    pub const fn navigation(&self) -> NavigationId { self.navigation }
-    pub const fn history_entry(&self) -> HistoryEntryId { self.history_entry }
-    pub const fn kind(&self) -> NavigationIntentKind { self.kind }
-    pub fn location(&self) -> &str { &self.location }
+    pub const fn window(&self) -> BrowserWindowId {
+        self.window
+    }
+
+    pub const fn tab(&self) -> TabId {
+        self.tab
+    }
+
+    pub const fn navigation(&self) -> NavigationId {
+        self.navigation
+    }
+
+    pub const fn history_entry(&self) -> HistoryEntryId {
+        self.history_entry
+    }
+
+    pub const fn kind(&self) -> NavigationIntentKind {
+        self.kind
+    }
+
+    pub fn location(&self) -> &str {
+        &self.location
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
