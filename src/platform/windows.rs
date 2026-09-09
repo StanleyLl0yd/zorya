@@ -3718,7 +3718,12 @@ mod tests {
         assert!(!browser_navigation_quiescent(&browser, window));
 
         browser
-            .fail_navigation(window, tab, navigation, "fixture resolves pending navigation")
+            .fail_navigation(
+                window,
+                tab,
+                navigation,
+                "fixture resolves pending navigation",
+            )
             .unwrap();
         assert!(browser_navigation_quiescent(&browser, window));
     }
