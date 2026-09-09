@@ -572,8 +572,32 @@ mod tests {
             100,
             ProfileHistorySaveUrgency::Normal,
         ));
+        let save = scheduler
+            .poll(
+                &mut runtime,
+                first,
+                100,
+                ProfileHistorySaveUrgency::Flush,
+            )
+            .unwrap()
+            .expect("replacement must flush dirty history");
+        runtime
+            .complete_browsing_history_save(save.execute())
+            .unwrap();
 
-        let second = load_profile(&mut runtime, second_root.path());
+        let selection = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
+        let prepared = PreparedProfile::load(&selection).unwrap();
+        let commit = runtime.commit_selection(prepared).unwrap();
+        let second = commit.active_profile();
+        commit
+            .into_replaced_profile()
+            .unwrap()
+            .into_profile_lock()
+            .release()
+            .unwrap();
         assert!(matches!(
             scheduler.poll(
                 &mut runtime,
