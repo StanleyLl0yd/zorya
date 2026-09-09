@@ -10,9 +10,10 @@ use crate::engine::{
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     NavigationId, NavigationStart, PresentationFramePermit, PresentationGeneration,
-    PresentationHandoffError, ProfileHistorySavePolicy, ProfileHistorySaveScheduler,
-    ProfileHistorySaveUrgency, ProfileLock, ProfileLockOwner, ProfileRuntime,
-    ProfileSelectionIntent, ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler,
+    PresentationHandoffError, PreparedProfile, ProfileHistorySavePolicy,
+    ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileLock, ProfileLockOwner,
+    ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent, ProfileSettingsSavePolicy,
+    ProfileSettingsSaveScheduler,
     ProfileSettingsSaveUrgency, ProfileWorker, ProfileWorkerCompletion, TabActivationStart,
     TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit,
     WebContentPresentation,
@@ -424,6 +425,7 @@ impl WorkerHandle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProfileLockReleasePurpose {
     RejectedSelection,
+    ReplacedProfile,
     ActiveShutdown,
 }
 
@@ -460,6 +462,7 @@ struct NativeShell {
     history_scheduler: ProfileHistorySaveScheduler,
     profile_clock: NativeProfileClock,
     initial_profile_selection: Option<ProfileSelectionIntent>,
+    pending_profile_replacement: Option<PreparedProfile>,
     tab: TabId,
     presentation: TabPresentationHandoff,
     pending_target_permit: Option<TargetFramePermit>,
@@ -488,6 +491,7 @@ struct NativeShell {
     run_mode: RunMode,
     shutdown_requested: bool,
     rejected_profile_lock: Option<ProfileLock>,
+    replaced_profile_lock: Option<ProfileLock>,
     pending_profile_lock_release: Option<PendingProfileLockRelease>,
     profile_lock_release_completed: bool,
     fatal_error: Option<String>,
@@ -518,6 +522,7 @@ impl NativeShell {
             history_scheduler: ProfileHistorySaveScheduler::new(native_history_save_policy()),
             profile_clock: NativeProfileClock::new(),
             initial_profile_selection: Some(initial_profile_selection),
+            pending_profile_replacement: None,
             tab,
             presentation: TabPresentationHandoff::new(tab),
             pending_target_permit: None,
@@ -546,6 +551,7 @@ impl NativeShell {
             run_mode,
             shutdown_requested: false,
             rejected_profile_lock: None,
+            replaced_profile_lock: None,
             pending_profile_lock_release: None,
             profile_lock_release_completed: false,
             fatal_error: None,
@@ -711,6 +717,149 @@ impl NativeShell {
         };
         self.drive_settings_save(settings_urgency)?;
         self.drive_history_save(history_urgency)
+    }
+
+    fn replacement_flush_requested(&self) -> bool {
+        self.pending_profile_replacement.is_some()
+    }
+
+    fn drive_replaced_profile_lock_release(&mut self) -> Result<bool, String> {
+        if let Some(pending) = self.pending_profile_lock_release {
+            if pending.purpose == ProfileLockReleasePurpose::ReplacedProfile {
+                return Ok(false);
+            }
+            return Err(format!(
+                "cannot release replaced profile lock while {:?} lock release is pending",
+                pending.purpose
+            ));
+        }
+
+        let Some(lock) = self.replaced_profile_lock.as_ref().cloned() else {
+            return Ok(true);
+        };
+        let owner = lock.owner();
+        let worker = self.profile_worker.as_ref().ok_or_else(|| {
+            "profile worker is unavailable for replaced profile-lock release".to_string()
+        })?;
+
+        match worker.release_lock(lock) {
+            Ok(()) => {
+                self.pending_profile_lock_release = Some(PendingProfileLockRelease {
+                    owner,
+                    purpose: ProfileLockReleasePurpose::ReplacedProfile,
+                });
+                Ok(false)
+            }
+            Err(error) if error.is_full() => {
+                let returned = error.into_work();
+                debug_assert_eq!(returned.owner(), owner);
+                Ok(false)
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let returned = error.into_work();
+                debug_assert_eq!(returned.owner(), owner);
+                Err(format!(
+                    "failed to submit replaced profile-lock release for owner {}:{}: {message}",
+                    owner.process_id(),
+                    owner.owner_id()
+                ))
+            }
+        }
+    }
+
+    fn commit_prepared_profile(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        selection: crate::ProfileSelectionId,
+        prepared: PreparedProfile,
+    ) {
+        match self.profile_runtime.commit_selection(prepared) {
+            Ok(commit) => {
+                if let Some(replaced) = commit.into_replaced_profile() {
+                    debug_assert!(self.pending_profile_replacement.is_none());
+                    debug_assert!(self.replaced_profile_lock.is_none());
+                    if self.replaced_profile_lock.is_some() {
+                        self.fail(
+                            event_loop,
+                            "profile replacement committed before the prior replaced lock was released",
+                        );
+                        return;
+                    }
+                    self.replaced_profile_lock = Some(replaced.into_profile_lock());
+                    match self.drive_replaced_profile_lock_release() {
+                        Ok(true) => {}
+                        Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                        Err(error) => self.fail(event_loop, error),
+                    }
+                } else if let Err(error) = self.initialize(event_loop) {
+                    self.fail(event_loop, error);
+                }
+            }
+            Err(rejection)
+                if matches!(
+                    rejection.error(),
+                    ProfileRuntimeError::ActiveProfileNotDurable { .. }
+                ) =>
+            {
+                let (_, prepared) = rejection.into_parts();
+                debug_assert!(self.pending_profile_replacement.is_none());
+                if self.pending_profile_replacement.is_some() {
+                    self.fail_with_rejected_profile(
+                        event_loop,
+                        prepared,
+                        "profile replacement preparation overlapped an existing replacement",
+                    );
+                    return;
+                }
+                self.pending_profile_replacement = Some(prepared);
+                if let Err(error) = self.drive_profile_saves(true) {
+                    self.fail(event_loop, error);
+                    return;
+                }
+                match self.profile_flush_complete() {
+                    Ok(true) => self.continue_profile_replacement(event_loop),
+                    Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                    Err(error) => self.fail(event_loop, error),
+                }
+            }
+            Err(rejection) => {
+                let (error, prepared) = rejection.into_parts();
+                self.fail_with_rejected_profile(
+                    event_loop,
+                    prepared,
+                    format!(
+                        "failed to commit prepared profile selection {}: {error}",
+                        selection.get()
+                    ),
+                );
+            }
+        }
+    }
+
+    fn continue_profile_replacement(&mut self, event_loop: &ActiveEventLoop) {
+        if self.shutdown_requested {
+            return;
+        }
+
+        if self.replaced_profile_lock.is_some()
+            || self
+                .pending_profile_lock_release
+                .is_some_and(|pending| pending.purpose == ProfileLockReleasePurpose::ReplacedProfile)
+        {
+            match self.drive_replaced_profile_lock_release() {
+                Ok(true) => {}
+                Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                Err(error) => self.fail(event_loop, error),
+            }
+            return;
+        }
+
+        let Some(prepared) = self.pending_profile_replacement.take() else {
+            return;
+        };
+        let selection = prepared.selection();
+        self.commit_prepared_profile(event_loop, selection, prepared);
     }
 
     fn continue_shutdown_after_profile_flush(&mut self, event_loop: &ActiveEventLoop) {
