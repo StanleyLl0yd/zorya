@@ -639,7 +639,7 @@ impl ProfileSelectionCommitError {
         &self.error
     }
 
-    pub const fn prepared(&self) -> &PreparedProfile {
+    pub fn prepared(&self) -> &PreparedProfile {
         self.prepared.as_ref()
     }
 
