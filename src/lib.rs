@@ -120,3 +120,8 @@ pub fn run_native_tab_supersession_smoke() -> Result<(), Box<dyn std::error::Err
 pub fn run_native_http_navigation_smoke() -> Result<(), Box<dyn std::error::Error>> {
     platform::run(platform::RunMode::ExitAfterRealHttpNavigation)
 }
+
+#[doc(hidden)]
+pub fn run_native_profile_cycle_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    platform::run(platform::RunMode::ExitAfterProfileCycle)
+}
