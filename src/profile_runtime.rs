@@ -1750,10 +1750,14 @@ mod tests {
             .begin_selection(replacement_root.path())
             .unwrap()
             .into_intent();
-        let second = runtime
-            .commit_selection(prepared(&replacement))
+        let commit = runtime.commit_selection(prepared(&replacement)).unwrap();
+        let second = commit.active_profile();
+        commit
+            .into_replaced_profile()
             .unwrap()
-            .active_profile();
+            .into_profile_lock()
+            .release()
+            .unwrap();
         assert_ne!(first, second);
         assert!(matches!(
             runtime.active_browsing_history(first),
@@ -1793,7 +1797,18 @@ mod tests {
         let second_root = TempRoot::new();
         let mut runtime = ProfileRuntime::new();
         let first = load_profile(&mut runtime, first_root.path());
-        let second = load_profile(&mut runtime, second_root.path());
+        let selection = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
+        let replacement = runtime.commit_selection(prepared(&selection)).unwrap();
+        let second = replacement.active_profile();
+        replacement
+            .into_replaced_profile()
+            .unwrap()
+            .into_profile_lock()
+            .release()
+            .unwrap();
         let commit = committed_navigation("https://example.test/stale");
 
         assert_eq!(
