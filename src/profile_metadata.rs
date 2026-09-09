@@ -660,6 +660,35 @@ mod tests {
     }
 
     #[test]
+    fn repeated_rename_keeps_metadata_directory_bounded() {
+        let (root, lock, storage_id) = locked_identity("retention");
+        let mut metadata = load_or_create_profile_metadata(
+            &lock,
+            storage_id,
+            ProfileDisplayName::new("Profile 0").unwrap(),
+        )
+        .unwrap();
+
+        for index in 1..=12 {
+            metadata = save_profile_metadata(
+                &lock,
+                storage_id,
+                metadata.generation(),
+                ProfileDisplayName::new(format!("Profile {index}")).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let entry_count = fs::read_dir(root.path().join(PROFILE_METADATA_DIRECTORY_NAME))
+            .unwrap()
+            .count();
+        assert!(entry_count <= 2);
+        assert_eq!(metadata.generation(), 13);
+        assert_eq!(metadata.display_name().as_str(), "Profile 12");
+        lock.release().unwrap();
+    }
+
+    #[test]
     fn metadata_loader_rejects_wrong_storage_identity() {
         let (root, lock, storage_id) = locked_identity("identity");
         load_or_create_profile_metadata(
