@@ -1331,13 +1331,30 @@ impl NativeShell {
         prepared: crate::PreparedProfile,
         error: impl std::fmt::Display,
     ) {
+        let selection = prepared.selection();
+        let cancellation_failure = if self
+            .profile_runtime
+            .pending_selection()
+            .is_some_and(|pending| pending.id() == selection)
+        {
+            self.profile_runtime
+                .cancel_selection(selection)
+                .err()
+                .map(|cancel| format!("failed to cancel rejected profile selection: {cancel}"))
+        } else {
+            None
+        };
         let message = error.to_string();
         let navigation_failure = self.fail_initial_navigation(&message).err();
         if self.fatal_error.is_none() {
-            self.fatal_error = Some(match navigation_failure {
-                Some(failure) => format!("{message}; {failure}"),
-                None => message,
-            });
+            let mut failures = vec![message];
+            if let Some(failure) = cancellation_failure {
+                failures.push(failure);
+            }
+            if let Some(failure) = navigation_failure {
+                failures.push(failure);
+            }
+            self.fatal_error = Some(failures.join("; "));
         }
         debug_assert!(self.rejected_profile_lock.is_none());
         if self.rejected_profile_lock.is_none() {
