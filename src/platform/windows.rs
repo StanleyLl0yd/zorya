@@ -1114,6 +1114,10 @@ impl NativeShell {
                 if let Some(replaced) = commit.into_replaced_profile() {
                     debug_assert!(self.pending_profile_replacement.is_none());
                     self.replaced_profile_lock = Some(replaced.into_profile_lock());
+                    if let Err(error) = self.reset_native_session_for_profile_switch() {
+                        self.fail(event_loop, error);
+                        return;
+                    }
                     match self.drive_replaced_profile_lock_release() {
                         Ok(true) => {}
                         Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
@@ -1590,11 +1594,44 @@ impl NativeShell {
                     ),
                 }
             }
-            ProfileWorkerCompletion::CatalogDiscovered { .. }
-            | ProfileWorkerCompletion::ProfileCreated { .. }
+            ProfileWorkerCompletion::CatalogDiscovered { intent, result } => {
+                let Some(pending) = self.pending_profile_catalog_discovery.take() else {
+                    self.fail(event_loop, "stale profile catalog completion has no pending request");
+                    return;
+                };
+                if !pending.submitted || pending.intent != intent {
+                    self.fail(
+                        event_loop,
+                        "profile catalog completion does not match the exact pending request",
+                    );
+                    return;
+                }
+                if self.shutdown_requested {
+                    match self.profile_flush_complete() {
+                        Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
+                        Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                        Err(error) => self.fail(event_loop, error),
+                    }
+                    return;
+                }
+                match result {
+                    Ok(entries) => {
+                        if let Err(error) = self.complete_profile_cycle(entries) {
+                            self.fail(event_loop, error);
+                        } else {
+                            event_loop.set_control_flow(ControlFlow::Wait);
+                        }
+                    }
+                    Err(error) => self.fail(
+                        event_loop,
+                        format!("profile catalog discovery failed: {error}"),
+                    ),
+                }
+            }
+            ProfileWorkerCompletion::ProfileCreated { .. }
             | ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
                 event_loop,
-                "profile catalog completion arrived before native profile catalog UX is enabled",
+                "unexpected profile mutation completion arrived without native mutation UX",
             ),
         }
     }
@@ -1642,6 +1679,7 @@ impl NativeShell {
 
         self.window = Some(window);
         self.worker = Some(worker);
+        self.update_window_title();
         Ok(())
     }
 
@@ -2623,6 +2661,30 @@ impl NativeShell {
                             "current Rarog navigation became stale before browser completion",
                         );
                     }
+                }
+            }
+            WorkerEvent::ProfileSessionReset { target, result } => {
+                if !self.pending_profile_session_reset.complete_if_current(target)
+                    || !self.target_alive(target)
+                {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        if let Err(error) = self.commit_initial_navigation() {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+                        self.worker_ready = true;
+                        self.needs_redraw = true;
+                        if !self.profile_transition_in_progress() {
+                            self.request_redraw();
+                        }
+                    }
+                    Err(error) => self.fail(
+                        event_loop,
+                        format!("failed to reset native profile session: {error}"),
+                    ),
                 }
             }
             WorkerEvent::NavigationCancelFinished { target, result } => {
