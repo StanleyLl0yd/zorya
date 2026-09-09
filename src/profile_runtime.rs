@@ -6,6 +6,7 @@ use crate::browsing_history::{
 use crate::profile::{
     ProfileStorageError, ProfileStore, SettingsRecovery, SettingsSave, SettingsSnapshot,
 };
+use crate::profile_lock::{ProfileLock, ProfileLockError};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -194,6 +195,7 @@ pub enum ProfileSettingsError {
 impl fmt::Display for ProfileSettingsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Lock(error) => error.fmt(formatter),
             Self::Storage(error) => error.fmt(formatter),
             Self::InvalidValue { key, value } => {
                 write!(
@@ -208,6 +210,7 @@ impl fmt::Display for ProfileSettingsError {
 impl std::error::Error for ProfileSettingsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Lock(error) => Some(error),
             Self::Storage(error) => Some(error),
             Self::InvalidValue { .. } => None,
         }
@@ -218,6 +221,7 @@ impl std::error::Error for ProfileSettingsError {
 pub struct PreparedProfile {
     selection: ProfileSelectionId,
     root: PathBuf,
+    lock: ProfileLock,
     settings: ProductSettings,
     settings_recovery: Option<SettingsRecovery>,
     browsing_history: BrowsingHistorySnapshot,
@@ -226,6 +230,8 @@ pub struct PreparedProfile {
 
 impl PreparedProfile {
     pub fn load(intent: &ProfileSelectionIntent) -> Result<Self, ProfilePreparationError> {
+        let lock =
+            ProfileLock::acquire(intent.root.clone()).map_err(ProfilePreparationError::Lock)?;
         let store =
             ProfileStore::open(intent.root.clone()).map_err(ProfilePreparationError::Storage)?;
         let load = store
@@ -246,6 +252,7 @@ impl PreparedProfile {
         Ok(Self {
             selection: intent.id,
             root: intent.root.clone(),
+            lock,
             settings,
             settings_recovery,
             browsing_history,
@@ -280,6 +287,7 @@ impl PreparedProfile {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfilePreparationError {
+    Lock(ProfileLockError),
     Storage(ProfileStorageError),
     Settings(ProfileSettingsError),
     BrowsingHistory(crate::browsing_history::BrowsingHistoryError),
@@ -309,6 +317,7 @@ impl std::error::Error for ProfilePreparationError {
 pub struct ActiveProfile {
     id: ProfileId,
     root: PathBuf,
+    lock: ProfileLock,
     settings: ProductSettings,
     settings_recovery: Option<SettingsRecovery>,
     browsing_history: BrowsingHistorySnapshot,
@@ -359,6 +368,7 @@ pub struct ProfileSettingsSaveIntent {
     id: ProfileSettingsSaveId,
     profile: ProfileId,
     root: PathBuf,
+    lock: ProfileLock,
     snapshot: SettingsSnapshot,
     mutation_revision: u64,
 }
@@ -387,7 +397,7 @@ impl ProfileSettingsSaveIntent {
     pub fn execute(self) -> ProfileSettingsSaveCompletion {
         let base_generation = self.snapshot.generation();
         let result = ProfileStore::open(self.root.clone())
-            .and_then(|store| store.save_settings(&self.snapshot));
+            .and_then(|store| store.save_settings(&self.lock, &self.snapshot));
         ProfileSettingsSaveCompletion {
             id: self.id,
             profile: self.profile,
@@ -457,6 +467,7 @@ pub struct ProfileHistorySaveIntent {
     id: ProfileHistorySaveId,
     profile: ProfileId,
     root: PathBuf,
+    lock: ProfileLock,
     snapshot: BrowsingHistorySnapshot,
     mutation_revision: u64,
 }
@@ -485,7 +496,7 @@ impl ProfileHistorySaveIntent {
     pub fn execute(self) -> ProfileHistorySaveCompletion {
         let base_generation = self.snapshot.generation();
         let result = BrowsingHistoryStore::open(self.root.clone())
-            .and_then(|store| store.save(&self.snapshot));
+            .and_then(|store| store.save(&self.lock, &self.snapshot));
         ProfileHistorySaveCompletion {
             id: self.id,
             profile: self.profile,
@@ -864,6 +875,7 @@ impl ProfileRuntime {
         let active = ActiveProfile {
             id,
             root: prepared.root,
+            lock: prepared.lock,
             settings: prepared.settings,
             settings_recovery: prepared.settings_recovery,
             browsing_history: prepared.browsing_history,
@@ -973,6 +985,7 @@ impl ProfileRuntime {
 
         let active = self.active.as_ref().expect("active profile was validated");
         let root = active.root.clone();
+        let lock = active.lock.clone();
         let snapshot = active.settings.snapshot().clone();
         let base_generation = snapshot.generation();
         let mutation_revision = active.settings_revision;
@@ -991,6 +1004,7 @@ impl ProfileRuntime {
             id,
             profile,
             root,
+            lock,
             snapshot,
             mutation_revision,
         })
@@ -1203,6 +1217,7 @@ impl ProfileRuntime {
 
         let active = self.active.as_ref().expect("active profile was validated");
         let root = active.root.clone();
+        let lock = active.lock.clone();
         let snapshot = active.browsing_history.clone();
         let base_generation = snapshot.generation();
         let mutation_revision = active.browsing_history_revision;
@@ -1221,6 +1236,7 @@ impl ProfileRuntime {
             id,
             profile,
             root,
+            lock,
             snapshot,
             mutation_revision,
         })
