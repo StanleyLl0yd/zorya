@@ -1183,7 +1183,7 @@ mod tests {
     fn directory_scan_limit_is_enforced() {
         let directory = TestDirectory::new();
         let store = BrowsingHistoryStore::open(directory.path()).unwrap();
-        let lock = ProfileLock::acquire(directory.path()).unwrap();
+        let _lock = ProfileLock::acquire(directory.path()).unwrap();
         for index in 0..=MAX_HISTORY_DIRECTORY_ENTRIES {
             fs::write(
                 store.history_directory.join(format!("noise-{index:03}")),
