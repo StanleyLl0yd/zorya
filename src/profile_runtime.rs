@@ -1542,7 +1542,7 @@ mod tests {
         let lock = ProfileLock::acquire(root.path()).unwrap();
         let saved = store.save_settings(&lock, &raw).unwrap().into_snapshot();
         assert_eq!(saved.generation(), 1);
-        drop(lock);
+        lock.release().unwrap();
 
         let mut runtime = ProfileRuntime::new();
         let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
@@ -1571,7 +1571,7 @@ mod tests {
         let lock = ProfileLock::acquire(root.path()).unwrap();
         let saved = store.save(&lock, &snapshot).unwrap().into_snapshot();
         assert_eq!(saved.generation(), 1);
-        drop(lock);
+        lock.release().unwrap();
 
         let mut runtime = ProfileRuntime::new();
         let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
