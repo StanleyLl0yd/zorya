@@ -14,49 +14,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  repair-http-literal:
-    name: Temporary HTTP literal repair
-    if: github.event_name == 'pull_request' && github.head_ref == 'z3/native-color-scheme-setting'
-    runs-on: windows-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout PR head
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.head_ref }}
-          persist-credentials: true
-      - name: Repair HTTP response literal
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          @'
-          from pathlib import Path
-
-          path = Path("src/platform/windows.rs")
-          text = path.read_text(encoding="utf-8")
-          marker = "fn spawn_http_smoke_server()"
-          start = text.index(marker)
-          end = text.index("fn profiles_root_from_local_app_data", start)
-          block = text[start:end]
-          old = "\\\\r\\\\n"
-          new = "\\r\\n"
-          count = block.count(old)
-          if count != 5:
-              raise SystemExit(f"expected 5 doubled CRLF escapes in HTTP smoke block, found {count}")
-          block = block.replace(old, new)
-          text = text[:start] + block + text[end:]
-          path.write_text(text, encoding="utf-8", newline="\n")
-          '@ | python -
-          if ($LASTEXITCODE -ne 0) { throw "HTTP literal repair failed" }
-          git diff --check
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/platform/windows.rs
-          git commit -m "fix: restore HTTP smoke CRLF escapes"
-          git push origin HEAD:${{ github.head_ref }}
-
   windows:
     name: Windows primary
     runs-on: windows-latest
