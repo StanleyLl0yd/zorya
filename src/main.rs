@@ -31,6 +31,9 @@ fn main() -> ExitCode {
         (Some(argument), None) if argument == "--native-bookmarks-persistence-smoke" => {
             finish(zorya::run_native_bookmarks_persistence_smoke())
         }
+        (Some(argument), None) if argument == "--native-session-restore-persistence-smoke" => {
+            finish(zorya::run_native_session_restore_persistence_smoke())
+        }
         (Some(argument), None) if argument == "--native-bookmark-toggle-add-smoke" => {
             finish(zorya::run_native_bookmark_toggle_add_smoke())
         }
