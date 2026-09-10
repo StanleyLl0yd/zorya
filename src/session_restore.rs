@@ -236,6 +236,58 @@ impl SessionRestoreSnapshot {
         Ok(true)
     }
 
+    pub fn move_tab_before(
+        &mut self,
+        window: SessionWindowId,
+        tab: SessionTabId,
+        before: Option<SessionTabId>,
+    ) -> Result<bool, SessionRestoreError> {
+        let target = self
+            .windows
+            .iter_mut()
+            .find(|candidate| candidate.id == window)
+            .ok_or(SessionRestoreError::WindowNotFound { window })?;
+        let from = target
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == tab)
+            .ok_or(SessionRestoreError::TabNotFound { window, tab })?;
+        if before == Some(tab) {
+            return Ok(false);
+        }
+        let anchor = before
+            .map(|anchor| {
+                target
+                    .tabs
+                    .iter()
+                    .position(|candidate| candidate.id == anchor)
+                    .ok_or(SessionRestoreError::TabNotFound {
+                        window,
+                        tab: anchor,
+                    })
+            })
+            .transpose()?;
+        let already_positioned = match anchor {
+            Some(anchor) => from.checked_add(1) == Some(anchor),
+            None => from.checked_add(1) == Some(target.tabs.len()),
+        };
+        if already_positioned {
+            return Ok(false);
+        }
+
+        let moved = target.tabs.remove(from);
+        let destination = match before {
+            Some(anchor) => target
+                .tabs
+                .iter()
+                .position(|candidate| candidate.id == anchor)
+                .expect("tab-order anchor was validated before mutation"),
+            None => target.tabs.len(),
+        };
+        target.tabs.insert(destination, moved);
+        Ok(true)
+    }
+
     pub fn remove_tab(
         &mut self,
         window: SessionWindowId,

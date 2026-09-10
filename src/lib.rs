@@ -23,6 +23,7 @@ mod profile_session_restore_scheduler;
 mod profile_settings_scheduler;
 mod profile_worker;
 mod session_restore;
+mod session_restore_sync;
 mod tab_activation;
 mod tab_close;
 mod tab_strip;
@@ -111,6 +112,9 @@ pub use session_restore::{
     SessionRestoreCleanupWarning, SessionRestoreError, SessionRestoreLoad, SessionRestoreRecovery,
     SessionRestoreSave, SessionRestoreSnapshot, SessionRestoreStore, SessionTab, SessionTabId,
     SessionWindow, SessionWindowId,
+};
+pub use session_restore_sync::{
+    ProfileSessionRestoreSync, ProfileSessionRestoreSyncError, ProfileSessionRestoreSyncOutcome,
 };
 pub use tab_activation::{
     TabActivationId, TabActivationIntent, TabActivationStart, TabCycleDirection,
