@@ -21,6 +21,7 @@ mod profile_metadata;
 mod profile_runtime;
 mod profile_settings_scheduler;
 mod profile_worker;
+mod session_restore;
 mod tab_activation;
 mod tab_close;
 mod tab_strip;
@@ -96,6 +97,13 @@ pub use profile_settings_scheduler::{
 pub use profile_worker::{
     PROFILE_WORKER_COMMAND_QUEUE_CAPACITY, ProfileWorker, ProfileWorkerCompletion,
     ProfileWorkerSpawnError, ProfileWorkerSubmitError,
+};
+pub use session_restore::{
+    MAX_SESSION_LOCATION_BYTES, MAX_SESSION_RESTORE_RECORD_BYTES, MAX_SESSION_TABS,
+    MAX_SESSION_TABS_PER_WINDOW, MAX_SESSION_WINDOWS, SESSION_RESTORE_SCHEMA_VERSION,
+    SessionRestoreCleanupWarning, SessionRestoreError, SessionRestoreLoad, SessionRestoreRecovery,
+    SessionRestoreSave, SessionRestoreSnapshot, SessionRestoreStore, SessionTab, SessionTabId,
+    SessionWindow, SessionWindowId,
 };
 pub use tab_activation::{
     TabActivationId, TabActivationIntent, TabActivationStart, TabCycleDirection,
