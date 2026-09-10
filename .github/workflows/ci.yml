@@ -118,6 +118,29 @@ jobs:
           if ($process.ExitCode -ne 0) {
             throw "native color-scheme smoke test failed with exit code $($process.ExitCode)"
           }
+      - name: Smoke test native bookmark persistence and reload
+        shell: pwsh
+        run: |
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "zorya-bookmark-persistence-debug"
+          if (Test-Path -LiteralPath $smokeRoot) {
+            Remove-Item -LiteralPath $smokeRoot -Recurse -Force
+          }
+          $previousLocalAppData = $env:LOCALAPPDATA
+          $env:LOCALAPPDATA = $smokeRoot
+          try {
+            foreach ($attempt in 1..2) {
+              $process = Start-Process -FilePath ".\\target\\debug\\zorya.exe" -ArgumentList "--native-bookmarks-persistence-smoke" -PassThru -NoNewWindow
+              if (-not $process.WaitForExit(60000)) {
+                $process.Kill()
+                throw "native bookmark persistence smoke attempt $attempt timed out"
+              }
+              if ($process.ExitCode -ne 0) {
+                throw "native bookmark persistence smoke attempt $attempt failed with exit code $($process.ExitCode)"
+              }
+            }
+          } finally {
+            $env:LOCALAPPDATA = $previousLocalAppData
+          }
       - name: Upload developer executable
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
