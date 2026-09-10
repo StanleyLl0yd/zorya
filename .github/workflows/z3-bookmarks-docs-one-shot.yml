@@ -1,0 +1,87 @@
+name: Z3 bookmarks persistence docs one-shot
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  update-docs:
+    if: github.event.pull_request.head.ref == 'z3/bookmarks-native-persistence'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          persist-credentials: true
+      - name: Update bookmarks persistence architecture
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one anchor, found {count}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          arch = 'docs/ARCHITECTURE.md'
+          replace_once(
+              arch,
+              'Normal native shutdown first flushes settings/history, then submits exact lock release through the same bounded `ProfileWorker` and waits for its typed completion before exiting.',
+              'Normal native shutdown first flushes settings/history/bookmarks, then submits exact lock release through the same bounded `ProfileWorker` and waits for its typed completion before exiting.',
+          )
+          replace_once(
+              arch,
+              'requesting `Flush` urgency until both active stores are clean,',
+              'requesting `Flush` urgency until all active profile stores are clean,',
+          )
+          replace_once(
+              arch,
+              'Save execution remains synchronous inside `ProfileBookmarksSaveIntent::execute` and is handed only to `ProfileWorker`; scheduler and native bookmarks UX remain later Z3 work.',
+              'Save execution remains synchronous inside `ProfileBookmarksSaveIntent::execute` and is handed only to `ProfileWorker`. `ProfileBookmarksSaveScheduler` adds the same clock-injected debounce / maximum-dirty-age / mutation-threshold / explicit-flush contract used by the other profile stores without owning timers, threads or storage. Windows owns a 1,000 ms / 10,000 ms / 8-mutation bookmark policy, submits exact bookmark save intents non-blockingly through `ProfileWorker`, cancels only exact in-flight ownership on queue failure, reconciles typed completions, and includes bookmark durability in profile replacement and graceful shutdown before lock release. Native bookmark mutation UX remains later Z3 work.',
+          )
+          replace_once(
+              arch,
+              'Windows owns concrete bounded persistence policies for both profile settings and browsing history. Settings use a 1,000 ms debounce, 10,000 ms maximum dirty age and 8-mutation threshold; history uses 5,000 ms / 30,000 ms / 32 mutations. Both schedulers share one process-local `Instant` origin, and `ApplicationHandler::about_to_wait` waits until the earliest observed deadline with `ControlFlow::WaitUntil`; any in-flight profile save uses `ControlFlow::Wait`, and `ControlFlow::Poll` is never used for persistence. Settings and history intents are submitted non-blockingly through the same bounded `ProfileWorker`; queue failure cancels only the exact runtime ownership so dirty mutations remain retryable. Graceful shutdown requests explicit flush urgency for both stores and exits only after both exact lifecycles are clean or a persistence failure is reported. Navigation and future settings callbacks mutate only in-memory product state and never execute profile filesystem work.',
+              'Windows owns concrete bounded persistence policies for profile settings, browsing history and bookmarks. Settings and bookmarks use a 1,000 ms debounce, 10,000 ms maximum dirty age and 8-mutation threshold; history uses 5,000 ms / 30,000 ms / 32 mutations. All three schedulers share one process-local `Instant` origin, and `ApplicationHandler::about_to_wait` waits until the earliest observed deadline with `ControlFlow::WaitUntil`; any in-flight profile save uses `ControlFlow::Wait`, and `ControlFlow::Poll` is never used for persistence. Settings, history and bookmark intents are submitted non-blockingly through the same bounded `ProfileWorker`; queue failure cancels only the exact runtime ownership so dirty mutations remain retryable. Graceful shutdown requests explicit flush urgency for all three stores and exits only after all three exact lifecycles are clean or a persistence failure is reported. Navigation and future settings/bookmark callbacks mutate only in-memory product state and never execute profile filesystem work.',
+          )
+          replace_once(
+              arch,
+              'requests scheduler `Flush` urgency and keeps the event loop waiting for exact typed settings/history completions.',
+              'requests scheduler `Flush` urgency and keeps the event loop waiting for exact typed settings/history/bookmark completions.',
+          )
+          replace_once(
+              arch,
+              'Once both active stores are clean and all earlier replacement ownership is resolved,',
+              'Once all active profile stores are clean and all earlier replacement ownership is resolved,',
+          )
+          replace_once(
+              arch,
+              'Native profile creation/rename UX, profile deletion, private-browsing history policy, bookmark scheduler/native UX, session stores, broader settings wiring and migrations beyond schema v1 remain separate Z3 slices.',
+              'Native profile creation/rename UX, profile deletion, private-browsing history policy, native bookmark mutation UX, session stores, broader settings wiring and migrations beyond schema v1 remain separate Z3 slices.',
+          )
+
+          roadmap = 'docs/ROADMAP.md'
+          replace_once(
+              roadmap,
+              'an exact-profile one-in-flight persistence lifecycle now tracks monotonic mutation/durable revisions, captured save generations, newer-mutation preservation and failure-safe dirty state, blocks profile replacement until bookmark state is durable, and executes saves only through the bounded `ProfileWorker` with exact queue-failure ownership; scheduler/native bookmarks UX remain;',
+              'an exact-profile one-in-flight persistence lifecycle now tracks monotonic mutation/durable revisions, captured save generations, newer-mutation preservation and failure-safe dirty state, blocks profile replacement until bookmark state is durable, and executes saves only through the bounded `ProfileWorker` with exact queue-failure ownership; a clock-injected scheduler now coalesces bookmark saves by debounce/max-age/mutation threshold plus explicit flush, Windows drives its earliest deadline with settings/history through `WaitUntil`, submits and reconciles exact worker saves, and includes bookmark durability in replacement and graceful shutdown; native bookmark mutation UX remains;',
+          )
+          PY
+          git diff --check
+      - name: Commit documentation update
+        shell: bash
+        run: |
+          git config user.name "Stanley Lloyd"
+          git config user.email "131160519+StanleyLl0yd@users.noreply.github.com"
+          git add docs/ARCHITECTURE.md docs/ROADMAP.md
+          git commit -m "docs: record native bookmark persistence lifecycle"
+          git push origin HEAD:z3/bookmarks-native-persistence
