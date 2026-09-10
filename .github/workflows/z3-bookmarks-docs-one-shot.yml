@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: z3/bookmarks-native-persistence
-          persist-credentials: true
+          persist-credentials: false
       - name: Update bookmarks persistence architecture
         shell: bash
         run: |
@@ -78,9 +78,11 @@ jobs:
           git diff --check
       - name: Commit documentation update
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "Stanley Lloyd"
           git config user.email "131160519+StanleyLl0yd@users.noreply.github.com"
           git add docs/ARCHITECTURE.md docs/ROADMAP.md
           git commit -m "docs: record native bookmark persistence lifecycle"
-          git push origin HEAD:z3/bookmarks-native-persistence
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:z3/bookmarks-native-persistence
