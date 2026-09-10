@@ -51,8 +51,10 @@ block = r'''    #[test]
 
     #[test]
     fn identity_exhaustion_is_failure_atomic() {
-        let mut windows = SessionRestoreSnapshot::default();
-        windows.next_window_id = u64::MAX;
+        let mut windows = SessionRestoreSnapshot {
+            next_window_id: u64::MAX,
+            ..Default::default()
+        };
         assert_eq!(
             windows.add_window(),
             Err(SessionRestoreError::WindowIdExhausted)
@@ -60,9 +62,11 @@ block = r'''    #[test]
         assert!(windows.is_empty());
         assert_eq!(windows.next_window_id, u64::MAX);
 
-        let mut tabs = SessionRestoreSnapshot::default();
+        let mut tabs = SessionRestoreSnapshot {
+            next_tab_id: u64::MAX,
+            ..Default::default()
+        };
         let window = tabs.add_window().unwrap();
-        tabs.next_tab_id = u64::MAX;
         assert_eq!(
             tabs.add_tab(window, "https://exhausted.test"),
             Err(SessionRestoreError::TabIdExhausted)
