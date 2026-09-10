@@ -275,6 +275,13 @@ impl BrowserWindow {
         self.tab(self.active_tab?)
     }
 
+    pub fn active_committed_location(&self) -> Option<&str> {
+        self.active_tab()?
+            .navigation()
+            .current_entry()
+            .map(HistoryEntry::location)
+    }
+
     pub const fn address_bar(&self) -> &AddressBarState {
         &self.address_bar
     }
@@ -2170,6 +2177,65 @@ mod tests {
                 expected: None,
                 actual: stopped,
             })
+        );
+    }
+
+    #[test]
+    fn active_committed_location_ignores_pending_navigation_and_address_edit_text() {
+        let mut app = BrowserApp::new();
+        let window = app.create_window().expect("window");
+        let tab = app.create_tab(window).expect("tab");
+        let first = app
+            .begin_navigation(window, tab, "https://example.test/committed")
+            .expect("begin first")
+            .intent()
+            .id();
+        app.commit_navigation(window, tab, first, "https://example.test/committed")
+            .expect("commit first");
+
+        assert_eq!(
+            app.window(window)
+                .and_then(BrowserWindow::active_committed_location),
+            Some("https://example.test/committed")
+        );
+
+        app.begin_address_bar_edit(window)
+            .expect("begin edit")
+            .expect("active tab");
+        app.set_address_bar_text(window, "https://typed.invalid/not-a-target")
+            .expect("set edit");
+        let pending = app
+            .begin_navigation(window, tab, "https://example.test/pending")
+            .expect("begin pending")
+            .intent()
+            .id();
+
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(
+            browser_window.active_committed_location(),
+            Some("https://example.test/committed")
+        );
+        assert_eq!(
+            browser_window.address_bar_text(),
+            "https://typed.invalid/not-a-target"
+        );
+        assert_eq!(
+            browser_window
+                .active_tab()
+                .and_then(|tab| tab.navigation().display_location()),
+            Some("https://example.test/pending")
+        );
+
+        app.commit_navigation(window, tab, pending, "https://example.test/pending-final")
+            .expect("commit pending");
+        let browser_window = app.window(window).expect("window");
+        assert_eq!(
+            browser_window.active_committed_location(),
+            Some("https://example.test/pending-final")
+        );
+        assert_eq!(
+            browser_window.address_bar_text(),
+            "https://typed.invalid/not-a-target"
         );
     }
 }

@@ -189,6 +189,13 @@ jobs:
             throw "release HTTP navigation smoke test failed with exit code $($process.ExitCode)"
           }
 
+      - name: Smoke test release committed-page bookmark toggle persistence and reload
+        shell: pwsh
+        run: |
+          & ".github/scripts/smoke-bookmark-toggle.ps1" `
+            -Executable (Join-Path "target/release" "zorya.exe") `
+            -ScratchRoot (Join-Path $env:RUNNER_TEMP "zorya-bookmark-toggle-publish")
+
       - name: Package Technical Preview
         shell: pwsh
         env:
@@ -249,6 +256,10 @@ jobs:
           if ($process.ExitCode -ne 0) {
             throw "packaged HTTP navigation smoke test failed with exit code $($process.ExitCode)"
           }
+
+          & ".github/scripts/smoke-bookmark-toggle.ps1" `
+            -Executable $packagedExecutable `
+            -ScratchRoot (Join-Path $env:RUNNER_TEMP "zorya-bookmark-toggle-publish-package")
 
           $buildInfoPath = Join-Path $packageRoot "BUILD-INFO.txt"
           if (-not (Test-Path -LiteralPath $buildInfoPath -PathType Leaf)) {

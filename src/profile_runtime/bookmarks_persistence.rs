@@ -16,6 +16,12 @@ impl ProfileBookmarksSaveId {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProfileBookmarkToggleOutcome {
+    Added { bookmark: BookmarkId },
+    Removed { count: usize },
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct ProfileBookmarksSaveIntent {
     id: ProfileBookmarksSaveId,
@@ -312,6 +318,40 @@ impl ProfileRuntime {
             None => None,
         }
     }
+    pub fn toggle_bookmark(
+        &mut self,
+        profile: ProfileId,
+        title: impl Into<String>,
+        location: impl Into<String>,
+    ) -> Result<ProfileBookmarkToggleOutcome, ProfileBookmarksRuntimeError> {
+        let location = location.into();
+        let state = self.active_bookmarks_state_mut(profile)?;
+        let matching = state
+            .snapshot
+            .bookmarks()
+            .iter()
+            .filter(|bookmark| bookmark.location() == location.as_str())
+            .count();
+        let next_revision = state
+            .mutation_revision
+            .checked_add(1)
+            .ok_or(ProfileBookmarksRuntimeError::MutationRevisionExhausted)?;
+
+        let outcome = if matching == 0 {
+            let bookmark = state
+                .snapshot
+                .add_bookmark(title, location)
+                .map_err(ProfileBookmarksRuntimeError::Bookmarks)?;
+            ProfileBookmarkToggleOutcome::Added { bookmark }
+        } else {
+            let count = state.snapshot.remove_bookmarks_at_exact_location(&location);
+            debug_assert_eq!(count, matching);
+            ProfileBookmarkToggleOutcome::Removed { count }
+        };
+        state.mutation_revision = next_revision;
+        Ok(outcome)
+    }
+
     pub fn add_bookmark(
         &mut self,
         profile: ProfileId,
@@ -807,5 +847,145 @@ mod tests {
         );
         assert!(runtime.pending_bookmarks_save().is_none());
         assert!(runtime.bookmarks_is_dirty(profile).unwrap());
+    }
+
+    #[test]
+    fn exact_location_toggle_adds_and_removes_duplicates_in_one_revision() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        let location = "https://example.test/toggle";
+
+        let first = runtime.toggle_bookmark(profile, "", location).unwrap();
+        let first_id = match first {
+            ProfileBookmarkToggleOutcome::Added { bookmark } => bookmark,
+            other => panic!("unexpected first toggle outcome: {other:?}"),
+        };
+        assert_eq!(first_id.get(), 1);
+        assert_eq!(runtime.bookmarks_mutation_revision(profile).unwrap(), 1);
+
+        let survivor = runtime
+            .add_bookmark(profile, "Keep", "https://example.test/keep")
+            .unwrap();
+        let duplicate = runtime
+            .add_bookmark(profile, "Duplicate", location)
+            .unwrap();
+        assert_eq!(survivor.get(), 2);
+        assert_eq!(duplicate.get(), 3);
+        assert_eq!(runtime.bookmarks_mutation_revision(profile).unwrap(), 3);
+
+        assert_eq!(
+            runtime.toggle_bookmark(profile, "ignored on removal", location),
+            Ok(ProfileBookmarkToggleOutcome::Removed { count: 2 })
+        );
+        assert_eq!(runtime.bookmarks_mutation_revision(profile).unwrap(), 4);
+        let remaining = runtime.active_bookmarks(profile).unwrap().bookmarks();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id(), survivor);
+        assert_eq!(remaining[0].location(), "https://example.test/keep");
+
+        let added = runtime.toggle_bookmark(profile, "", location).unwrap();
+        let added_id = match added {
+            ProfileBookmarkToggleOutcome::Added { bookmark } => bookmark,
+            other => panic!("unexpected re-add outcome: {other:?}"),
+        };
+        assert_eq!(added_id.get(), 4);
+        assert_eq!(runtime.bookmarks_mutation_revision(profile).unwrap(), 5);
+        assert_eq!(runtime.active_bookmarks(profile).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn toggle_rejects_stale_profile_without_retargeting_replacement() {
+        let first_root = TempRoot::new();
+        let second_root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let first = load_profile(&mut runtime, first_root.path());
+        let selection = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
+        let prepared = super::super::PreparedProfile::load(&selection).unwrap();
+        let replacement = runtime.commit_selection(prepared).unwrap();
+        let second = replacement.active_profile();
+        replacement
+            .into_replaced_profile()
+            .unwrap()
+            .into_profile_lock()
+            .release()
+            .unwrap();
+
+        assert!(matches!(
+            runtime.toggle_bookmark(first, "", "https://example.test/stale-toggle"),
+            Err(ProfileBookmarksRuntimeError::StaleProfile {
+                expected: Some(expected),
+                actual,
+            }) if expected == second && actual == first
+        ));
+        assert!(runtime.active_bookmarks(second).unwrap().is_empty());
+        assert_eq!(runtime.bookmarks_mutation_revision(second).unwrap(), 0);
+    }
+
+    #[test]
+    fn toggle_revision_exhaustion_is_failure_atomic_for_add_and_duplicate_removal() {
+        let add_root = TempRoot::new();
+        let mut add_runtime = ProfileRuntime::new();
+        let add_profile = load_profile(&mut add_runtime, add_root.path());
+        add_runtime
+            .active
+            .as_mut()
+            .unwrap()
+            .bookmarks
+            .mutation_revision = u64::MAX;
+
+        assert_eq!(
+            add_runtime.toggle_bookmark(add_profile, "", "https://example.test/exhausted-add"),
+            Err(ProfileBookmarksRuntimeError::MutationRevisionExhausted)
+        );
+        assert!(
+            add_runtime
+                .active_bookmarks(add_profile)
+                .unwrap()
+                .is_empty()
+        );
+
+        let remove_root = TempRoot::new();
+        let mut remove_runtime = ProfileRuntime::new();
+        let remove_profile = load_profile(&mut remove_runtime, remove_root.path());
+        let location = "https://example.test/exhausted-remove";
+        remove_runtime
+            .active
+            .as_mut()
+            .unwrap()
+            .bookmarks
+            .snapshot
+            .add_bookmark("First", location)
+            .unwrap();
+        remove_runtime
+            .active
+            .as_mut()
+            .unwrap()
+            .bookmarks
+            .snapshot
+            .add_bookmark("Second", location)
+            .unwrap();
+        remove_runtime
+            .active
+            .as_mut()
+            .unwrap()
+            .bookmarks
+            .mutation_revision = u64::MAX;
+        let before = remove_runtime
+            .active_bookmarks(remove_profile)
+            .unwrap()
+            .clone();
+
+        assert_eq!(
+            remove_runtime.toggle_bookmark(remove_profile, "", location),
+            Err(ProfileBookmarksRuntimeError::MutationRevisionExhausted)
+        );
+        assert_eq!(
+            remove_runtime.active_bookmarks(remove_profile).unwrap(),
+            &before
+        );
     }
 }

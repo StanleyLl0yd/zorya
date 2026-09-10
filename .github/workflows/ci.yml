@@ -141,6 +141,13 @@ jobs:
           } finally {
             $env:LOCALAPPDATA = $previousLocalAppData
           }
+      - name: Smoke test native committed-page bookmark toggle persistence and reload
+        shell: pwsh
+        run: |
+          & ".github/scripts/smoke-bookmark-toggle.ps1" `
+            -Executable ".\\target\\debug\\zorya.exe" `
+            -ScratchRoot (Join-Path $env:RUNNER_TEMP "zorya-bookmark-toggle-debug")
+
       - name: Upload developer executable
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

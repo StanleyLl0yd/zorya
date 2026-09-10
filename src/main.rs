@@ -31,6 +31,12 @@ fn main() -> ExitCode {
         (Some(argument), None) if argument == "--native-bookmarks-persistence-smoke" => {
             finish(zorya::run_native_bookmarks_persistence_smoke())
         }
+        (Some(argument), None) if argument == "--native-bookmark-toggle-add-smoke" => {
+            finish(zorya::run_native_bookmark_toggle_add_smoke())
+        }
+        (Some(argument), None) if argument == "--native-bookmark-toggle-remove-smoke" => {
+            finish(zorya::run_native_bookmark_toggle_remove_smoke())
+        }
         (None, None) => finish(zorya::run()),
         _ => {
             eprintln!("zorya: unsupported command-line arguments");

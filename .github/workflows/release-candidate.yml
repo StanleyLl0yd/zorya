@@ -216,6 +216,13 @@ jobs:
             $env:LOCALAPPDATA = $previousLocalAppData
           }
 
+      - name: Smoke test release committed-page bookmark toggle persistence and reload
+        shell: pwsh
+        run: |
+          & ".github/scripts/smoke-bookmark-toggle.ps1" `
+            -Executable (Join-Path "target/release" "zorya.exe") `
+            -ScratchRoot (Join-Path $env:RUNNER_TEMP "zorya-bookmark-toggle-release")
+
       - name: Package release candidate
         shell: pwsh
         env:
@@ -342,6 +349,10 @@ jobs:
           } finally {
             $env:LOCALAPPDATA = $previousLocalAppData
           }
+
+          & ".github/scripts/smoke-bookmark-toggle.ps1" `
+            -Executable $packagedExecutable `
+            -ScratchRoot (Join-Path $env:RUNNER_TEMP "zorya-bookmark-toggle-package")
 
           $buildInfoPath = Join-Path $packageRoot "BUILD-INFO.txt"
           if (-not (Test-Path -LiteralPath $buildInfoPath -PathType Leaf)) {

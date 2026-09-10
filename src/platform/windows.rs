@@ -10,11 +10,11 @@ use crate::engine::{
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     ColorSchemePreference, NavigationId, NavigationStart, PreparedProfile, PresentationFramePermit,
-    PresentationGeneration, PresentationHandoffError, ProfileBookmarksSavePolicy,
-    ProfileBookmarksSaveScheduler, ProfileBookmarksSaveUrgency, ProfileCatalogCreateIntent,
-    ProfileCatalogDiscoverIntent, ProfileCatalogEntry, ProfileHistorySavePolicy,
-    ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileId, ProfileLock,
-    ProfileLockOwner, ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent,
+    PresentationGeneration, PresentationHandoffError, ProfileBookmarkToggleOutcome,
+    ProfileBookmarksSavePolicy, ProfileBookmarksSaveScheduler, ProfileBookmarksSaveUrgency,
+    ProfileCatalogCreateIntent, ProfileCatalogDiscoverIntent, ProfileCatalogEntry,
+    ProfileHistorySavePolicy, ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileId,
+    ProfileLock, ProfileLockOwner, ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent,
     ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency,
     ProfileStorageId, ProfileWorker, ProfileWorkerCompletion, TabActivationStart, TabCloseStart,
     TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
@@ -775,6 +775,121 @@ impl NativeShell {
         if self.run_mode == RunMode::ExitAfterColorSchemeCycle {
             eprintln!("zorya color-scheme smoke: {stage}");
         }
+    }
+
+    fn toggle_active_committed_bookmark(
+        &mut self,
+    ) -> Result<Option<ProfileBookmarkToggleOutcome>, String> {
+        let location = self
+            .browser
+            .window(self.browser_window)
+            .and_then(|window| window.active_committed_location())
+            .map(str::to_owned);
+        let Some(location) = location else {
+            return Ok(None);
+        };
+        let profile = self.active_profile_id()?;
+        let outcome = self
+            .profile_runtime
+            .toggle_bookmark(profile, "", location)
+            .map_err(|error| format!("failed to toggle active committed bookmark: {error}"))?;
+        self.drive_bookmarks_save(ProfileBookmarksSaveUrgency::Normal)?;
+        Ok(Some(outcome))
+    }
+
+    fn run_bookmark_toggle_smoke(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
+        let expects_existing = match self.run_mode {
+            RunMode::ExitAfterBookmarkToggleAdd => false,
+            RunMode::ExitAfterBookmarkToggleRemove => true,
+            _ => return Err("bookmark toggle smoke started outside its run mode".into()),
+        };
+        let location = self
+            .browser
+            .window(self.browser_window)
+            .and_then(|window| window.active_committed_location())
+            .ok_or_else(|| "bookmark toggle smoke requires a committed active page".to_string())?
+            .to_owned();
+        if location != START_LOCATION {
+            return Err(format!(
+                "bookmark toggle smoke expected committed {START_LOCATION}, found {location}"
+            ));
+        }
+
+        let profile = self.active_profile_id()?;
+        let before_count = self
+            .profile_runtime
+            .active_bookmarks(profile)
+            .map_err(|error| format!("failed to inspect bookmark toggle smoke state: {error}"))?
+            .bookmarks()
+            .iter()
+            .filter(|bookmark| bookmark.location() == location.as_str())
+            .count();
+        let expected_before = usize::from(expects_existing);
+        if before_count != expected_before {
+            return Err(format!(
+                "bookmark toggle smoke expected {expected_before} persisted matches before toggle, found {before_count}"
+            ));
+        }
+        let before_revision = self
+            .profile_runtime
+            .bookmarks_mutation_revision(profile)
+            .map_err(|error| format!("failed to inspect bookmark toggle revision: {error}"))?;
+
+        let outcome = self
+            .toggle_active_committed_bookmark()?
+            .ok_or_else(|| "bookmark toggle smoke lost its committed target".to_string())?;
+        match (expects_existing, outcome) {
+            (false, ProfileBookmarkToggleOutcome::Added { bookmark }) => {
+                let created = self
+                    .profile_runtime
+                    .active_bookmarks(profile)
+                    .map_err(|error| format!("failed to inspect added bookmark: {error}"))?
+                    .bookmark(bookmark)
+                    .ok_or_else(|| "bookmark toggle smoke lost newly added bookmark".to_string())?;
+                if !created.title().is_empty() || created.location() != location {
+                    return Err(
+                        "bookmark toggle smoke synthesized title or changed committed target"
+                            .into(),
+                    );
+                }
+            }
+            (true, ProfileBookmarkToggleOutcome::Removed { count: 1 }) => {}
+            (_, outcome) => {
+                return Err(format!(
+                    "bookmark toggle smoke returned unexpected outcome: {outcome:?}"
+                ));
+            }
+        }
+
+        let expected_revision = before_revision
+            .checked_add(1)
+            .ok_or_else(|| "bookmark toggle smoke revision overflowed".to_string())?;
+        let actual_revision = self
+            .profile_runtime
+            .bookmarks_mutation_revision(profile)
+            .map_err(|error| format!("failed to inspect bookmark toggle revision: {error}"))?;
+        if actual_revision != expected_revision {
+            return Err(format!(
+                "bookmark toggle smoke advanced revision to {actual_revision}; expected {expected_revision}"
+            ));
+        }
+        let after_count = self
+            .profile_runtime
+            .active_bookmarks(profile)
+            .map_err(|error| format!("failed to inspect bookmark toggle result: {error}"))?
+            .bookmarks()
+            .iter()
+            .filter(|bookmark| bookmark.location() == location.as_str())
+            .count();
+        let expected_after = usize::from(!expects_existing);
+        if after_count != expected_after {
+            return Err(format!(
+                "bookmark toggle smoke expected {expected_after} matches after toggle, found {after_count}"
+            ));
+        }
+
+        self.shutdown(event_loop);
+        Ok(())
     }
 
     fn run_bookmarks_persistence_smoke(
@@ -2809,6 +2924,11 @@ impl NativeShell {
                 self.handle_browser_command(BrowserCommand::ReloadOrStop)
             }
             Key::Character(character)
+                if !self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("d") =>
+            {
+                self.toggle_active_committed_bookmark().map(|_| ())
+            }
+            Key::Character(character)
                 if self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("m") =>
             {
                 self.begin_profile_cycle()
@@ -3421,6 +3541,14 @@ impl NativeShell {
                             }
                         } else if self.run_mode == RunMode::ExitAfterBookmarksPersistence {
                             if let Err(error) = self.run_bookmarks_persistence_smoke(event_loop) {
+                                self.fail(event_loop, error);
+                            }
+                        } else if matches!(
+                            self.run_mode,
+                            RunMode::ExitAfterBookmarkToggleAdd
+                                | RunMode::ExitAfterBookmarkToggleRemove
+                        ) {
+                            if let Err(error) = self.run_bookmark_toggle_smoke(event_loop) {
                                 self.fail(event_loop, error);
                             }
                         } else if self.run_mode == RunMode::ExitAfterFirstPresentation {

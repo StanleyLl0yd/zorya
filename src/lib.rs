@@ -82,11 +82,11 @@ pub use profile_metadata::{
 };
 pub use profile_runtime::{
     ActiveProfile, ColorSchemePreference, PreparedProfile, ProductSettings,
-    ProfileBookmarksRuntimeError, ProfileBookmarksSaveCompletion, ProfileBookmarksSaveId,
-    ProfileBookmarksSaveIntent, ProfileHistorySaveCompletion, ProfileHistorySaveId,
-    ProfileHistorySaveIntent, ProfileId, ProfilePreparationError, ProfileRuntime,
-    ProfileRuntimeError, ProfileSelectionCommit, ProfileSelectionCommitError, ProfileSelectionId,
-    ProfileSelectionIntent, ProfileSelectionStart, ProfileSettingsError,
+    ProfileBookmarkToggleOutcome, ProfileBookmarksRuntimeError, ProfileBookmarksSaveCompletion,
+    ProfileBookmarksSaveId, ProfileBookmarksSaveIntent, ProfileHistorySaveCompletion,
+    ProfileHistorySaveId, ProfileHistorySaveIntent, ProfileId, ProfilePreparationError,
+    ProfileRuntime, ProfileRuntimeError, ProfileSelectionCommit, ProfileSelectionCommitError,
+    ProfileSelectionId, ProfileSelectionIntent, ProfileSelectionStart, ProfileSettingsError,
     ProfileSettingsSaveCompletion, ProfileSettingsSaveId, ProfileSettingsSaveIntent,
 };
 pub use profile_settings_scheduler::{
@@ -147,4 +147,14 @@ pub fn run_native_color_scheme_smoke() -> Result<(), Box<dyn std::error::Error>>
 #[doc(hidden)]
 pub fn run_native_bookmarks_persistence_smoke() -> Result<(), Box<dyn std::error::Error>> {
     platform::run(platform::RunMode::ExitAfterBookmarksPersistence)
+}
+
+#[doc(hidden)]
+pub fn run_native_bookmark_toggle_add_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    platform::run(platform::RunMode::ExitAfterBookmarkToggleAdd)
+}
+
+#[doc(hidden)]
+pub fn run_native_bookmark_toggle_remove_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    platform::run(platform::RunMode::ExitAfterBookmarkToggleRemove)
 }
