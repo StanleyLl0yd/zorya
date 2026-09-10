@@ -173,7 +173,6 @@ jobs:
                   '',
               ]),
           )
-
           insert_before_once(
               path,
               '    fn profile_flush_complete(&self) -> Result<bool, String> {\n',
@@ -256,7 +255,6 @@ jobs:
                   '',
               ]),
           )
-
           replace_once(
               path,
               block([
@@ -313,7 +311,6 @@ jobs:
                   '            }',
               ]),
           )
-
           insert_before_once(
               path,
               '    fn begin_profile_cycle_smoke_create(&mut self) -> Result<(), String> {\n',
@@ -355,7 +352,6 @@ jobs:
                   '',
               ]),
           )
-
           replace_once(
               path,
               block([
@@ -371,7 +367,6 @@ jobs:
                   '                            self.shutdown(event_loop);',
               ]),
           )
-
           replace_once(
               path,
               block([
@@ -442,104 +437,6 @@ jobs:
                   '        }',
               ]),
           )
-
-          replace_once(
-              '.github/workflows/ci.yml',
-              '      - name: Upload developer executable\n',
-              block([
-                  '      - name: Smoke test native bookmark persistence and reload',
-                  '        shell: pwsh',
-                  '        run: |',
-                  '          $smokeRoot = Join-Path $env:RUNNER_TEMP "zorya-bookmark-persistence-debug"',
-                  '          if (Test-Path -LiteralPath $smokeRoot) { Remove-Item -LiteralPath $smokeRoot -Recurse -Force }',
-                  '          $previousLocalAppData = $env:LOCALAPPDATA',
-                  '          $env:LOCALAPPDATA = $smokeRoot',
-                  '          try {',
-                  '            foreach ($attempt in 1..2) {',
-                  '              $process = Start-Process -FilePath ".\\target\\debug\\zorya.exe" -ArgumentList "--native-bookmarks-persistence-smoke" -PassThru -NoNewWindow',
-                  '              if (-not $process.WaitForExit(60000)) {',
-                  '                $process.Kill()',
-                  '                throw "native bookmark persistence smoke attempt $attempt timed out"',
-                  '              }',
-                  '              if ($process.ExitCode -ne 0) {',
-                  '                throw "native bookmark persistence smoke attempt $attempt failed with exit code $($process.ExitCode)"',
-                  '              }',
-                  '            }',
-                  '          } finally {',
-                  '            $env:LOCALAPPDATA = $previousLocalAppData',
-                  '          }',
-                  '      - name: Upload developer executable',
-              ]),
-          )
-
-          replace_once(
-              '.github/workflows/release-candidate.yml',
-              '      - name: Package release candidate\n',
-              block([
-                  '      - name: Smoke test release native bookmark persistence and reload',
-                  '        shell: pwsh',
-                  '        run: |',
-                  '          $executable = Join-Path "target/release" "zorya.exe"',
-                  '          $smokeRoot = Join-Path $env:RUNNER_TEMP "zorya-bookmark-persistence-release"',
-                  '          if (Test-Path -LiteralPath $smokeRoot) { Remove-Item -LiteralPath $smokeRoot -Recurse -Force }',
-                  '          $previousLocalAppData = $env:LOCALAPPDATA',
-                  '          $env:LOCALAPPDATA = $smokeRoot',
-                  '          try {',
-                  '            foreach ($attempt in 1..2) {',
-                  '              $process = Start-Process -FilePath $executable -ArgumentList "--native-bookmarks-persistence-smoke" -PassThru -NoNewWindow',
-                  '              if (-not $process.WaitForExit(60000)) {',
-                  '                $process.Kill()',
-                  '                throw "release bookmark persistence smoke attempt $attempt timed out"',
-                  '              }',
-                  '              if ($process.ExitCode -ne 0) {',
-                  '                throw "release bookmark persistence smoke attempt $attempt failed with exit code $($process.ExitCode)"',
-                  '              }',
-                  '            }',
-                  '          } finally {',
-                  '            $env:LOCALAPPDATA = $previousLocalAppData',
-                  '          }',
-                  '',
-                  '      - name: Package release candidate',
-              ]),
-          )
-          replace_once(
-              '.github/workflows/release-candidate.yml',
-              block([
-                  '          if ($process.ExitCode -ne 0) {',
-                  '            throw "packaged native color-scheme smoke test failed with exit code $($process.ExitCode)"',
-                  '          }',
-                  '',
-                  '          $buildInfoPath = Join-Path $packageRoot "BUILD-INFO.txt"',
-              ]),
-              block([
-                  '          if ($process.ExitCode -ne 0) {',
-                  '            throw "packaged native color-scheme smoke test failed with exit code $($process.ExitCode)"',
-                  '          }',
-                  '',
-                  '          $bookmarkSmokeRoot = Join-Path $env:RUNNER_TEMP "zorya-bookmark-persistence-package"',
-                  '          if (Test-Path -LiteralPath $bookmarkSmokeRoot) { Remove-Item -LiteralPath $bookmarkSmokeRoot -Recurse -Force }',
-                  '          $previousLocalAppData = $env:LOCALAPPDATA',
-                  '          $env:LOCALAPPDATA = $bookmarkSmokeRoot',
-                  '          try {',
-                  '            foreach ($attempt in 1..2) {',
-                  '              $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-bookmarks-persistence-smoke" -PassThru -NoNewWindow',
-                  '              if (-not $process.WaitForExit(60000)) {',
-                  '                $process.Kill()',
-                  '                throw "packaged bookmark persistence smoke attempt $attempt timed out"',
-                  '              }',
-                  '              if ($process.ExitCode -ne 0) {',
-                  '                throw "packaged bookmark persistence smoke attempt $attempt failed with exit code $($process.ExitCode)"',
-                  '              }',
-                  '            }',
-                  '          } finally {',
-                  '            $env:LOCALAPPDATA = $previousLocalAppData',
-                  '          }',
-                  '',
-                  '          $buildInfoPath = Join-Path $packageRoot "BUILD-INFO.txt"',
-              ]),
-          )
-
-          Path('.github/workflows/z3-bookmarks-native-persistence-one-shot.yml').unlink()
           PY
           cargo fmt --all
           cargo fmt --all -- --check
@@ -547,12 +444,12 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked --all-targets
           git diff --check
-      - name: Commit native bookmark persistence
+      - name: Commit native bookmark persistence Rust wiring
         shell: bash
         run: |
           git config user.name "Stanley Lloyd"
           git config user.email "131160519+StanleyLl0yd@users.noreply.github.com"
-          git add src/platform/windows.rs src/platform/mod.rs src/lib.rs src/main.rs .github/workflows/ci.yml .github/workflows/release-candidate.yml .github/workflows/z3-bookmarks-native-persistence-one-shot.yml
+          git add src/platform/windows.rs src/platform/mod.rs src/lib.rs src/main.rs
           git diff --cached --stat
-          git commit -m "Z3: wire native bookmark persistence"
+          git commit -m "Z3: wire native bookmark persistence runtime"
           git push origin HEAD:${{ github.event.pull_request.head.ref }}
