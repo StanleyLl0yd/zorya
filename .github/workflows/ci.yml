@@ -14,46 +14,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  document-bookmarks-storage:
-    name: Temporary bookmarks architecture update
-    if: github.event_name == 'pull_request' && github.head_ref == 'z3/bookmarks-store'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout PR head
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.head_ref }}
-          persist-credentials: true
-      - name: Document bookmarks storage and remove this job
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("docs/ARCHITECTURE.md")
-          text = path.read_text(encoding="utf-8")
-          marker = "`PreparedProfile::load` opens both recoverable settings and browsing-history state on the background/profile-worker side."
-          paragraph = "Persistent bookmarks are profile-local product state with their own stable `BookmarkId` namespace, separate from tab history and Web-engine identities. `BookmarksStore` stores bounded title/location text in immutable versioned generations under the profile root, verifies the exact `ProfileLock` before write work and again immediately before no-overwrite publication, and rejects stale or concurrently-created generations. Loading scans bounded directory state newest-first, reports skipped corrupt generations explicitly, and fails closed on unsupported schemas; bookmark identifiers remain monotonic across edit, removal and clear. The storage primitive is synchronous and therefore belongs on profile/background workers; loading into `PreparedProfile`, runtime dirty/save coordination and native bookmarks UX are later Z3 work."
-          if paragraph in text:
-              raise SystemExit("bookmarks architecture paragraph already present")
-          if marker not in text:
-              raise SystemExit("bookmarks architecture insertion marker not found")
-          text = text.replace(marker, paragraph + "\n\n" + marker, 1)
-          path.write_text(text, encoding="utf-8", newline="\n")
-          PY
-          git fetch origin main --depth=1
-          git checkout origin/main -- .github/workflows/ci.yml
-          git diff --check
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -u
-          git commit -m "docs: define bookmarks storage boundary"
-          git push origin HEAD:${{ github.head_ref }}
-
   windows:
     name: Windows primary
     runs-on: windows-latest
