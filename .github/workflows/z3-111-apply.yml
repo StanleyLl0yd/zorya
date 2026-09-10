@@ -26,7 +26,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply focused transform
-        run: python scripts/z3_111_apply.py
+        run: |
+          python scripts/z3_111_apply.py
+          python scripts/z3_111_fix.py
       - name: Format
         run: cargo fmt --all
       - name: Verify format
