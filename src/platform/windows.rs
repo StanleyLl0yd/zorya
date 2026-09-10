@@ -741,9 +741,7 @@ impl NativeShell {
         Ok(())
     }
 
-    fn cycle_active_color_scheme_preference(
-        &mut self,
-    ) -> Result<ColorSchemePreference, String> {
+    fn cycle_active_color_scheme_preference(&mut self) -> Result<ColorSchemePreference, String> {
         let profile = self.active_profile_id()?;
         let current = self.active_color_scheme_preference()?;
         let next = current.cycle_next();
@@ -3193,7 +3191,8 @@ impl NativeShell {
                                         return;
                                     }
                                 };
-                                let window_matches = match self.active_color_scheme_matches_window() {
+                                let window_matches = match self.active_color_scheme_matches_window()
+                                {
                                     Ok(matches) => matches,
                                     Err(error) => {
                                         self.fail(event_loop, error);
