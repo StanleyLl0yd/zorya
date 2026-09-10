@@ -368,6 +368,7 @@ jobs:
           if ($buildInfo -notmatch [regex]::Escape("Source head commit: $env:ZORYA_SOURCE_COMMIT")) {
             throw "packaged build provenance has the wrong source head commit"
           }
+
           $licenseRoot = Join-Path $packageRoot "THIRD_PARTY_LICENSES"
           $licenseIndex = Join-Path $licenseRoot "README.md"
           if (-not (Test-Path -LiteralPath $licenseIndex -PathType Leaf)) {
