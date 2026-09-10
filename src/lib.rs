@@ -87,7 +87,9 @@ pub use profile_runtime::{
     ProfileBookmarksSaveId, ProfileBookmarksSaveIntent, ProfileHistorySaveCompletion,
     ProfileHistorySaveId, ProfileHistorySaveIntent, ProfileId, ProfilePreparationError,
     ProfileRuntime, ProfileRuntimeError, ProfileSelectionCommit, ProfileSelectionCommitError,
-    ProfileSelectionId, ProfileSelectionIntent, ProfileSelectionStart, ProfileSettingsError,
+    ProfileSelectionId, ProfileSelectionIntent, ProfileSelectionStart,
+    ProfileSessionRestoreRuntimeError, ProfileSessionRestoreSaveCompletion,
+    ProfileSessionRestoreSaveId, ProfileSessionRestoreSaveIntent, ProfileSettingsError,
     ProfileSettingsSaveCompletion, ProfileSettingsSaveId, ProfileSettingsSaveIntent,
 };
 pub use profile_settings_scheduler::{

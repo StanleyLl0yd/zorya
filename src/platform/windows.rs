@@ -2158,6 +2158,10 @@ impl NativeShell {
                     ),
                 }
             }
+            ProfileWorkerCompletion::SessionRestoreSaved(_) => self.fail(
+                event_loop,
+                "unexpected session-restore-save completion arrived without native session persistence wiring",
+            ),
             ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
                 event_loop,
                 "unexpected profile rename completion arrived without native mutation UX",

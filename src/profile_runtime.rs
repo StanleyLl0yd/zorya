@@ -21,11 +21,17 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 mod bookmarks_persistence;
+mod session_restore_persistence;
 
 use bookmarks_persistence::{BookmarksRuntimeState, PendingProfileBookmarksSave};
 pub use bookmarks_persistence::{
     ProfileBookmarkToggleOutcome, ProfileBookmarksRuntimeError, ProfileBookmarksSaveCompletion,
     ProfileBookmarksSaveId, ProfileBookmarksSaveIntent,
+};
+use session_restore_persistence::{PendingProfileSessionRestoreSave, SessionRestoreRuntimeState};
+pub use session_restore_persistence::{
+    ProfileSessionRestoreRuntimeError, ProfileSessionRestoreSaveCompletion,
+    ProfileSessionRestoreSaveId, ProfileSessionRestoreSaveIntent,
 };
 
 const COLOR_SCHEME_KEY: &str = "ui.color_scheme";
@@ -489,8 +495,7 @@ pub struct ActiveProfile {
     browsing_history: BrowsingHistorySnapshot,
     browsing_history_recovery: Option<BrowsingHistoryRecovery>,
     bookmarks: BookmarksRuntimeState,
-    session_restore: SessionRestoreSnapshot,
-    session_restore_recovery: Option<SessionRestoreRecovery>,
+    session_restore: SessionRestoreRuntimeState,
     settings_revision: u64,
     durable_settings_revision: u64,
     browsing_history_revision: u64,
@@ -549,11 +554,11 @@ impl ActiveProfile {
     }
 
     pub const fn session_restore(&self) -> &SessionRestoreSnapshot {
-        &self.session_restore
+        self.session_restore.snapshot()
     }
 
     pub const fn session_restore_recovery(&self) -> Option<&SessionRestoreRecovery> {
-        self.session_restore_recovery.as_ref()
+        self.session_restore.recovery()
     }
 }
 
@@ -1010,11 +1015,13 @@ pub struct ProfileRuntime {
     next_settings_save_id: u64,
     next_history_save_id: u64,
     next_bookmarks_save_id: u64,
+    next_session_restore_save_id: u64,
     active: Option<ActiveProfile>,
     pending: Option<ProfileSelectionIntent>,
     pending_settings_save: Option<PendingProfileSettingsSave>,
     pending_history_save: Option<PendingProfileHistorySave>,
     pending_bookmarks_save: Option<PendingProfileBookmarksSave>,
+    pending_session_restore_save: Option<PendingProfileSessionRestoreSave>,
 }
 
 impl Default for ProfileRuntime {
@@ -1031,11 +1038,13 @@ impl ProfileRuntime {
             next_settings_save_id: 1,
             next_history_save_id: 1,
             next_bookmarks_save_id: 1,
+            next_session_restore_save_id: 1,
             active: None,
             pending: None,
             pending_settings_save: None,
             pending_history_save: None,
             pending_bookmarks_save: None,
+            pending_session_restore_save: None,
         }
     }
 
@@ -1134,10 +1143,12 @@ impl ProfileRuntime {
 
             let persistence_pending = self.pending_settings_save.is_some()
                 || self.pending_history_save.is_some()
-                || self.pending_bookmarks_save.is_some();
+                || self.pending_bookmarks_save.is_some()
+                || self.pending_session_restore_save.is_some();
             let persistence_dirty = active.settings_revision != active.durable_settings_revision
                 || active.browsing_history_revision != active.durable_browsing_history_revision
-                || active.bookmarks.is_dirty();
+                || active.bookmarks.is_dirty()
+                || active.session_restore.is_dirty();
             if persistence_pending || persistence_dirty {
                 return Err(ProfileSelectionCommitError {
                     error: ProfileRuntimeError::ActiveProfileNotDurable { profile: active.id },
@@ -1166,8 +1177,10 @@ impl ProfileRuntime {
             browsing_history: prepared.browsing_history,
             browsing_history_recovery: prepared.browsing_history_recovery,
             bookmarks: BookmarksRuntimeState::new(prepared.bookmarks, prepared.bookmarks_recovery),
-            session_restore: prepared.session_restore,
-            session_restore_recovery: prepared.session_restore_recovery,
+            session_restore: SessionRestoreRuntimeState::new(
+                prepared.session_restore,
+                prepared.session_restore_recovery,
+            ),
             settings_revision: 0,
             durable_settings_revision: 0,
             browsing_history_revision: 0,

@@ -255,6 +255,18 @@ impl SessionRestoreSnapshot {
         }
         Ok(Some(removed))
     }
+
+    pub(crate) fn advance_generation_after_save(
+        &mut self,
+        expected_generation: u64,
+        saved_generation: u64,
+    ) -> bool {
+        if self.generation != expected_generation || saved_generation <= expected_generation {
+            return false;
+        }
+        self.generation = saved_generation;
+        true
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
