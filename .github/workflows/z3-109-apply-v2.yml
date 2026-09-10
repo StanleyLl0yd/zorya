@@ -29,7 +29,7 @@ jobs:
         shell: bash
         run: |
           python scripts/z3_109_apply.py
-          git checkout HEAD -- .github/workflows/ci.yml .github/workflows/release.yml
+          git checkout HEAD -- .github/workflows/ci.yml .github/workflows/release-candidate.yml .github/workflows/release.yml
           rm scripts/z3_109_apply.py .github/workflows/z3-109-apply-v2.yml
       - name: Format
         run: cargo fmt --all
