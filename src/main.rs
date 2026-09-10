@@ -25,6 +25,9 @@ fn main() -> ExitCode {
         (Some(argument), None) if argument == "--native-profile-cycle-smoke" => {
             finish(zorya::run_native_profile_cycle_smoke())
         }
+        (Some(argument), None) if argument == "--native-color-scheme-smoke" => {
+            finish(zorya::run_native_color_scheme_smoke())
+        }
         (None, None) => finish(zorya::run()),
         _ => {
             eprintln!("zorya: unsupported command-line arguments");
