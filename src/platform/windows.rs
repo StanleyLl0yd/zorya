@@ -9,7 +9,7 @@ use crate::engine::{
 };
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
-    NavigationId, NavigationStart, PreparedProfile, PresentationFramePermit,
+    ColorSchemePreference, NavigationId, NavigationStart, PreparedProfile, PresentationFramePermit,
     PresentationGeneration, PresentationHandoffError, ProfileCatalogCreateIntent,
     ProfileCatalogDiscoverIntent, ProfileCatalogEntry, ProfileHistorySavePolicy,
     ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileId, ProfileLock,
@@ -39,7 +39,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Icon, Window, WindowId};
+use winit::window::{Icon, Theme, Window, WindowId};
 
 const START_LOCATION: &str = "about:blank";
 const START_PAGE: &str = include_str!("../../assets/z1-start.html");
@@ -92,6 +92,14 @@ fn native_history_save_policy() -> ProfileHistorySavePolicy {
         HISTORY_SAVE_MUTATION_THRESHOLD,
     )
     .expect("native browsing-history save policy is valid")
+}
+
+const fn native_window_theme(preference: ColorSchemePreference) -> Option<Theme> {
+    match preference {
+        ColorSchemePreference::System => None,
+        ColorSchemePreference::Light => Some(Theme::Light),
+        ColorSchemePreference::Dark => Some(Theme::Dark),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -542,6 +550,8 @@ struct NativeShell {
     pending_profile_catalog_discovery: Option<PendingProfileCatalogDiscovery>,
     pending_profile_smoke_create: Option<PendingProfileSmokeCreate>,
     profile_cycle_smoke_start: Option<ProfileStorageId>,
+    color_scheme_smoke_start: Option<ColorSchemePreference>,
+    applied_color_scheme_preference: Option<ColorSchemePreference>,
     pending_profile_selection_submission: Option<ProfileSelectionIntent>,
     pending_profile_replacement: Option<PreparedProfile>,
     pending_profile_session_reset: PendingRequest,
@@ -610,6 +620,8 @@ impl NativeShell {
             pending_profile_catalog_discovery: None,
             pending_profile_smoke_create: None,
             profile_cycle_smoke_start: None,
+            color_scheme_smoke_start: None,
+            applied_color_scheme_preference: None,
             pending_profile_selection_submission: None,
             pending_profile_replacement: None,
             pending_profile_session_reset: PendingRequest::default(),
@@ -698,6 +710,52 @@ impl NativeShell {
             .unwrap_or_else(|| "Zorya".to_string());
         if let Some(window) = &self.window {
             window.set_title(&title);
+        }
+    }
+
+    fn active_color_scheme_preference(&self) -> Result<ColorSchemePreference, String> {
+        self.profile_runtime
+            .active_profile()
+            .map(|profile| profile.settings().color_scheme())
+            .ok_or_else(|| "native color-scheme work requires an active profile".to_string())
+    }
+
+    fn active_color_scheme_matches_window(&self) -> Result<bool, String> {
+        let preference = self.active_color_scheme_preference()?;
+        if self.window.is_none() {
+            return Err("native window is unavailable for color-scheme validation".to_string());
+        }
+        Ok(self.applied_color_scheme_preference == Some(preference))
+    }
+
+    fn apply_active_color_scheme_preference(&mut self) -> Result<(), String> {
+        let preference = self.active_color_scheme_preference()?;
+        let window = self
+            .window
+            .as_ref()
+            .ok_or_else(|| "native window is unavailable for color-scheme update".to_string())?;
+        window.set_theme(native_window_theme(preference));
+        self.applied_color_scheme_preference = Some(preference);
+        Ok(())
+    }
+
+    fn cycle_active_color_scheme_preference(&mut self) -> Result<ColorSchemePreference, String> {
+        let profile = self.active_profile_id()?;
+        let current = self.active_color_scheme_preference()?;
+        let next = current.cycle_next();
+        self.profile_runtime
+            .active_settings_mut(profile)
+            .map_err(|error| format!("failed to mutate active profile settings: {error}"))?
+            .set_color_scheme(next)
+            .map_err(|error| format!("failed to update active profile color scheme: {error}"))?;
+        self.apply_active_color_scheme_preference()?;
+        self.drive_settings_save(ProfileSettingsSaveUrgency::Normal)?;
+        Ok(next)
+    }
+
+    fn color_scheme_smoke_trace(&self, stage: &str) {
+        if self.run_mode == RunMode::ExitAfterColorSchemeCycle {
+            eprintln!("zorya color-scheme smoke: {stage}");
         }
     }
 
@@ -1827,10 +1885,13 @@ impl NativeShell {
             application_icon.height,
         )
         .map_err(|error| format!("failed to build Zorya application icon: {error}"))?;
+        let color_scheme_preference = self.active_color_scheme_preference()?;
+        let theme = native_window_theme(color_scheme_preference);
         let attributes = Window::default_attributes()
             .with_title("Zorya")
             .with_window_icon(Some(icon))
-            .with_inner_size(LogicalSize::new(1100.0, 760.0));
+            .with_inner_size(LogicalSize::new(1100.0, 760.0))
+            .with_theme(theme);
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
@@ -1854,6 +1915,7 @@ impl NativeShell {
             };
 
         self.window = Some(window);
+        self.applied_color_scheme_preference = Some(color_scheme_preference);
         self.worker = Some(worker);
         self.update_window_title();
         Ok(())
@@ -2571,6 +2633,11 @@ impl NativeShell {
             {
                 self.begin_profile_cycle()
             }
+            Key::Character(character)
+                if self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("l") =>
+            {
+                self.cycle_active_color_scheme_preference().map(|_| ())
+            }
             Key::Named(NamedKey::Tab) => {
                 let direction = if self.modifiers.shift_key() {
                     TabCycleDirection::Previous
@@ -2861,6 +2928,10 @@ impl NativeShell {
                         }
                         self.worker_ready = true;
                         self.needs_redraw = true;
+                        if let Err(error) = self.apply_active_color_scheme_preference() {
+                            self.fail(event_loop, error);
+                            return;
+                        }
                         self.update_window_title();
                         if !self.profile_transition_in_progress()
                             && let Err(error) = self.start_frame()
@@ -3109,6 +3180,65 @@ impl NativeShell {
                             } else if let Err(error) = self.begin_profile_cycle_smoke_create() {
                                 self.fail(event_loop, error);
                             }
+                        } else if self.run_mode == RunMode::ExitAfterColorSchemeCycle {
+                            self.color_scheme_smoke_trace("frame presented");
+                            if let Some(start) = self.color_scheme_smoke_start {
+                                let expected = start.cycle_next();
+                                let active = match self.active_color_scheme_preference() {
+                                    Ok(active) => active,
+                                    Err(error) => {
+                                        self.fail(event_loop, error);
+                                        return;
+                                    }
+                                };
+                                let window_matches = match self.active_color_scheme_matches_window()
+                                {
+                                    Ok(matches) => matches,
+                                    Err(error) => {
+                                        self.fail(event_loop, error);
+                                        return;
+                                    }
+                                };
+                                if active != expected || !window_matches {
+                                    self.fail(
+                                        event_loop,
+                                        "native color-scheme smoke did not apply the cycled active profile preference",
+                                    );
+                                    return;
+                                }
+                                self.color_scheme_smoke_trace("cycled preference validated");
+                                self.shutdown(event_loop);
+                            } else {
+                                let start = match self.active_color_scheme_preference() {
+                                    Ok(start) => start,
+                                    Err(error) => {
+                                        self.fail(event_loop, error);
+                                        return;
+                                    }
+                                };
+                                match self.active_color_scheme_matches_window() {
+                                    Ok(true) => {}
+                                    Ok(false) => {
+                                        self.fail(
+                                            event_loop,
+                                            "native color-scheme smoke did not consume the loaded active profile preference",
+                                        );
+                                        return;
+                                    }
+                                    Err(error) => {
+                                        self.fail(event_loop, error);
+                                        return;
+                                    }
+                                }
+                                self.color_scheme_smoke_start = Some(start);
+                                if let Err(error) = self.cycle_active_color_scheme_preference() {
+                                    self.fail(event_loop, error);
+                                    return;
+                                }
+                                self.color_scheme_smoke_trace("preference cycled");
+                                self.needs_redraw = true;
+                                self.request_redraw();
+                            }
                         } else if self.run_mode == RunMode::ExitAfterFirstPresentation {
                             self.shutdown(event_loop);
                         } else if self.run_mode == RunMode::ExitAfterTabActivation {
@@ -3299,6 +3429,7 @@ impl NativeShell {
         self.gpu = None;
         self.browser.close_window(self.browser_window);
         self.window = None;
+        self.applied_color_scheme_preference = None;
     }
 
     fn finish_shutdown(&mut self, event_loop: &ActiveEventLoop) {
@@ -4317,6 +4448,19 @@ mod tests {
         browser
             .commit_navigation(window, tab, navigation, location)
             .unwrap()
+    }
+
+    #[test]
+    fn native_window_theme_maps_typed_profile_preference() {
+        assert_eq!(native_window_theme(ColorSchemePreference::System), None);
+        assert_eq!(
+            native_window_theme(ColorSchemePreference::Light),
+            Some(Theme::Light)
+        );
+        assert_eq!(
+            native_window_theme(ColorSchemePreference::Dark),
+            Some(Theme::Dark)
+        );
     }
 
     #[test]

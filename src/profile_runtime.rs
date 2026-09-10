@@ -92,6 +92,14 @@ pub enum ColorSchemePreference {
 }
 
 impl ColorSchemePreference {
+    pub const fn cycle_next(self) -> Self {
+        match self {
+            Self::System => Self::Light,
+            Self::Light => Self::Dark,
+            Self::Dark => Self::System,
+        }
+    }
+
     const fn encoded(self) -> &'static str {
         match self {
             Self::System => "system",
@@ -1767,6 +1775,22 @@ mod tests {
         assert!(runtime.active_profile().is_none());
         let reacquired = ProfileLock::acquire(root.path()).unwrap();
         reacquired.release().unwrap();
+    }
+
+    #[test]
+    fn color_scheme_preference_cycle_is_bounded_and_wraps() {
+        assert_eq!(
+            ColorSchemePreference::System.cycle_next(),
+            ColorSchemePreference::Light
+        );
+        assert_eq!(
+            ColorSchemePreference::Light.cycle_next(),
+            ColorSchemePreference::Dark
+        );
+        assert_eq!(
+            ColorSchemePreference::Dark.cycle_next(),
+            ColorSchemePreference::System
+        );
     }
 
     #[test]

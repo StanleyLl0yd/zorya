@@ -125,3 +125,8 @@ pub fn run_native_http_navigation_smoke() -> Result<(), Box<dyn std::error::Erro
 pub fn run_native_profile_cycle_smoke() -> Result<(), Box<dyn std::error::Error>> {
     platform::run(platform::RunMode::ExitAfterProfileCycle)
 }
+
+#[doc(hidden)]
+pub fn run_native_color_scheme_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    platform::run(platform::RunMode::ExitAfterColorSchemeCycle)
+}

@@ -179,6 +179,18 @@ jobs:
           if ($process.ExitCode -ne 0) {
             throw "release native profile cycle smoke test failed with exit code $($process.ExitCode)"
           }
+      - name: Smoke test release native color-scheme profile setting
+        shell: pwsh
+        run: |
+          $executable = Join-Path "target/release" "zorya.exe"
+          $process = Start-Process -FilePath $executable -ArgumentList "--native-color-scheme-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "release native color-scheme smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "release native color-scheme smoke test failed with exit code $($process.ExitCode)"
+          }
 
       - name: Package release candidate
         shell: pwsh
@@ -275,6 +287,15 @@ jobs:
           }
           if ($process.ExitCode -ne 0) {
             throw "packaged native profile cycle smoke test failed with exit code $($process.ExitCode)"
+          }
+
+          $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-color-scheme-smoke" -PassThru -NoNewWindow
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "packaged native color-scheme smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "packaged native color-scheme smoke test failed with exit code $($process.ExitCode)"
           }
 
           $buildInfoPath = Join-Path $packageRoot "BUILD-INFO.txt"
