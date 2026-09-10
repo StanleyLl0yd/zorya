@@ -1,4 +1,4 @@
-name: Z3 bookmarks save-id one-shot
+name: Z3 bookmarks persistence one-shot
 
 on:
   pull_request:
@@ -22,7 +22,7 @@ jobs:
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           components: rustfmt, clippy
-      - name: Make bookmark save identity process-monotonic
+      - name: Harden bookmark save identity
         shell: bash
         run: |
           python3 - <<'PY'
@@ -36,305 +36,199 @@ jobs:
                   raise SystemExit(f"{path}: expected one anchor, found {count}: {old[:100]!r}")
               p.write_text(text.replace(old, new, 1))
 
-          replace_once(
-              'src/profile_runtime.rs',
+          def replace_region(path, start, end, replacement):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(start) != 1:
+                  raise SystemExit(f"{path}: start anchor count is {text.count(start)}")
+              begin = text.index(start)
+              finish = text.find(end, begin)
+              if finish < 0:
+                  raise SystemExit(f"{path}: end anchor not found")
+              p.write_text(text[:begin] + replacement + text[finish:])
+
+          runtime = 'src/profile_runtime.rs'
+          replace_once(runtime,
               'use bookmarks_persistence::BookmarksRuntimeState;\n',
-              'use bookmarks_persistence::{BookmarksRuntimeState, PendingProfileBookmarksSave};\n',
-          )
-          replace_once(
-              'src/profile_runtime.rs',
+              'use bookmarks_persistence::{BookmarksRuntimeState, PendingProfileBookmarksSave};\n')
+          replace_once(runtime,
               '    next_settings_save_id: u64,\n    next_history_save_id: u64,\n    active: Option<ActiveProfile>,\n',
-              '    next_settings_save_id: u64,\n    next_history_save_id: u64,\n    next_bookmarks_save_id: u64,\n    active: Option<ActiveProfile>,\n',
-          )
-          replace_once(
-              'src/profile_runtime.rs',
+              '    next_settings_save_id: u64,\n    next_history_save_id: u64,\n    next_bookmarks_save_id: u64,\n    active: Option<ActiveProfile>,\n')
+          replace_once(runtime,
               '    pending_settings_save: Option<PendingProfileSettingsSave>,\n    pending_history_save: Option<PendingProfileHistorySave>,\n',
-              '    pending_settings_save: Option<PendingProfileSettingsSave>,\n    pending_history_save: Option<PendingProfileHistorySave>,\n    pending_bookmarks_save: Option<PendingProfileBookmarksSave>,\n',
-          )
-          replace_once(
-              'src/profile_runtime.rs',
+              '    pending_settings_save: Option<PendingProfileSettingsSave>,\n    pending_history_save: Option<PendingProfileHistorySave>,\n    pending_bookmarks_save: Option<PendingProfileBookmarksSave>,\n')
+          replace_once(runtime,
               '            next_settings_save_id: 1,\n            next_history_save_id: 1,\n            active: None,\n',
-              '            next_settings_save_id: 1,\n            next_history_save_id: 1,\n            next_bookmarks_save_id: 1,\n            active: None,\n',
-          )
-          replace_once(
-              'src/profile_runtime.rs',
+              '            next_settings_save_id: 1,\n            next_history_save_id: 1,\n            next_bookmarks_save_id: 1,\n            active: None,\n')
+          replace_once(runtime,
               '            pending_settings_save: None,\n            pending_history_save: None,\n',
-              '            pending_settings_save: None,\n            pending_history_save: None,\n            pending_bookmarks_save: None,\n',
-          )
-          replace_once(
-              'src/profile_runtime.rs',
-              '''            let persistence_pending =
-                self.pending_settings_save.is_some() || self.pending_history_save.is_some();
-            let persistence_dirty = active.settings_revision != active.durable_settings_revision
-                || active.browsing_history_revision != active.durable_browsing_history_revision;
-            if persistence_pending || persistence_dirty || !active.bookmarks.is_durable() {
-''',
-              '''            let persistence_pending = self.pending_settings_save.is_some()
-                || self.pending_history_save.is_some()
-                || self.pending_bookmarks_save.is_some();
-            let persistence_dirty = active.settings_revision != active.durable_settings_revision
-                || active.browsing_history_revision != active.durable_browsing_history_revision
-                || active.bookmarks.is_dirty();
-            if persistence_pending || persistence_dirty {
-''',
-          )
+              '            pending_settings_save: None,\n            pending_history_save: None,\n            pending_bookmarks_save: None,\n')
+          replace_once(runtime,
+              '            let persistence_pending =\n                self.pending_settings_save.is_some() || self.pending_history_save.is_some();\n            let persistence_dirty = active.settings_revision != active.durable_settings_revision\n                || active.browsing_history_revision != active.durable_browsing_history_revision;\n            if persistence_pending || persistence_dirty || !active.bookmarks.is_durable() {\n',
+              '            let persistence_pending = self.pending_settings_save.is_some()\n                || self.pending_history_save.is_some()\n                || self.pending_bookmarks_save.is_some();\n            let persistence_dirty = active.settings_revision != active.durable_settings_revision\n                || active.browsing_history_revision != active.durable_browsing_history_revision\n                || active.bookmarks.is_dirty();\n            if persistence_pending || persistence_dirty {\n')
 
-          replace_once(
-              'src/profile_runtime/bookmarks_persistence.rs',
-              '''#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PendingBookmarksSave {
-    id: ProfileBookmarksSaveId,
-    base_generation: u64,
-    mutation_revision: u64,
-}
-''',
-              '''#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct PendingProfileBookmarksSave {
-    id: ProfileBookmarksSaveId,
-    profile: ProfileId,
-    base_generation: u64,
-    mutation_revision: u64,
-}
-''',
-          )
-          replace_once(
-              'src/profile_runtime/bookmarks_persistence.rs',
-              '''    mutation_revision: u64,
-    durable_revision: u64,
-    next_save_id: u64,
-    pending_save: Option<PendingBookmarksSave>,
-''',
-              '''    mutation_revision: u64,
-    durable_revision: u64,
-''',
-          )
-          replace_once(
-              'src/profile_runtime/bookmarks_persistence.rs',
-              '''            mutation_revision: 0,
-            durable_revision: 0,
-            next_save_id: 1,
-            pending_save: None,
-''',
-              '''            mutation_revision: 0,
-            durable_revision: 0,
-''',
-          )
-          replace_once(
-              'src/profile_runtime/bookmarks_persistence.rs',
-              '''    pub(super) const fn is_durable(&self) -> bool {
-        self.pending_save.is_none() && self.mutation_revision == self.durable_revision
-    }
-''',
-              '''    pub(super) const fn is_dirty(&self) -> bool {
-        self.mutation_revision != self.durable_revision
-    }
-''',
-          )
-          replace_once(
-              'src/profile_runtime/bookmarks_persistence.rs',
-              '''    pub fn pending_bookmarks_save(&self) -> Option<ProfileBookmarksSaveId> {
-        self.active
-            .as_ref()
-            .and_then(|active| active.bookmarks.pending_save.map(|pending| pending.id))
-    }
-''',
-              '''    pub const fn pending_bookmarks_save(&self) -> Option<ProfileBookmarksSaveId> {
-        match self.pending_bookmarks_save {
-            Some(pending) => Some(pending.id),
-            None => None,
-        }
-    }
-''',
-          )
-          replace_once(
-              'src/profile_runtime/bookmarks_persistence.rs',
-              '''        let active = self.active.as_mut().expect("active profile was validated");
-        if let Some(pending) = active.bookmarks.pending_save {
-            return Err(ProfileBookmarksRuntimeError::SaveAlreadyPending {
-                pending: pending.id,
-            });
-        }
+          bp = 'src/profile_runtime/bookmarks_persistence.rs'
+          replace_once(bp,
+              '#[derive(Clone, Copy, Debug, PartialEq, Eq)]\nstruct PendingBookmarksSave {\n    id: ProfileBookmarksSaveId,\n    base_generation: u64,\n    mutation_revision: u64,\n}\n',
+              '#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub(super) struct PendingProfileBookmarksSave {\n    id: ProfileBookmarksSaveId,\n    profile: ProfileId,\n    base_generation: u64,\n    mutation_revision: u64,\n}\n')
+          replace_once(bp,
+              '    mutation_revision: u64,\n    durable_revision: u64,\n    next_save_id: u64,\n    pending_save: Option<PendingBookmarksSave>,\n',
+              '    mutation_revision: u64,\n    durable_revision: u64,\n')
+          replace_once(bp,
+              '            mutation_revision: 0,\n            durable_revision: 0,\n            next_save_id: 1,\n            pending_save: None,\n',
+              '            mutation_revision: 0,\n            durable_revision: 0,\n')
+          replace_once(bp,
+              '    pub(super) const fn is_durable(&self) -> bool {\n        self.pending_save.is_none() && self.mutation_revision == self.durable_revision\n    }\n',
+              '    pub(super) const fn is_dirty(&self) -> bool {\n        self.mutation_revision != self.durable_revision\n    }\n')
 
-        let id = ProfileBookmarksSaveId(active.bookmarks.next_save_id);
-        let next_save_id = active
-            .bookmarks
-            .next_save_id
-            .checked_add(1)
-            .ok_or(ProfileBookmarksRuntimeError::SaveIdExhausted)?;
-        let root = active.root.clone();
-        let lock = active.lock.clone();
-        let snapshot = active.bookmarks.snapshot.clone();
-        let base_generation = snapshot.generation();
-        let mutation_revision = active.bookmarks.mutation_revision;
-        active.bookmarks.next_save_id = next_save_id;
-        active.bookmarks.pending_save = Some(PendingBookmarksSave {
-            id,
-            base_generation,
-            mutation_revision,
-        });
-''',
-              '''        if let Some(pending) = self.pending_bookmarks_save {
-            return Err(ProfileBookmarksRuntimeError::SaveAlreadyPending {
-                pending: pending.id,
-            });
-        }
+          pending_method = '\n'.join([
+              '    pub const fn pending_bookmarks_save(&self) -> Option<ProfileBookmarksSaveId> {',
+              '        match self.pending_bookmarks_save {',
+              '            Some(pending) => Some(pending.id),',
+              '            None => None,',
+              '        }',
+              '    }',
+              '',
+          ])
+          replace_region(bp, '    pub fn pending_bookmarks_save(', '    pub fn add_bookmark(', pending_method)
 
-        let active = self.active.as_ref().expect("active profile was validated");
-        let root = active.root.clone();
-        let lock = active.lock.clone();
-        let snapshot = active.bookmarks.snapshot.clone();
-        let base_generation = snapshot.generation();
-        let mutation_revision = active.bookmarks.mutation_revision;
-        let id = ProfileBookmarksSaveId(self.next_bookmarks_save_id);
-        self.next_bookmarks_save_id = self
-            .next_bookmarks_save_id
-            .checked_add(1)
-            .ok_or(ProfileBookmarksRuntimeError::SaveIdExhausted)?;
-        self.pending_bookmarks_save = Some(PendingProfileBookmarksSave {
-            id,
-            profile,
-            base_generation,
-            mutation_revision,
-        });
-''',
-          )
-          replace_once(
-              'src/profile_runtime/bookmarks_persistence.rs',
-              '''        let expected = self
-            .active
-            .as_ref()
-            .and_then(|active| active.bookmarks.pending_save.map(|pending| pending.id));
-        if expected != Some(save) {
-            return Err(ProfileBookmarksRuntimeError::StaleSave {
-                expected,
-                actual: save,
-            });
-        }
-        self.active
-            .as_mut()
-            .expect("pending bookmarks save requires an active profile")
-            .bookmarks
-            .pending_save = None;
-        Ok(())
-''',
-              '''        let expected = self.pending_bookmarks_save.map(|pending| pending.id);
-        if expected != Some(save) {
-            return Err(ProfileBookmarksRuntimeError::StaleSave {
-                expected,
-                actual: save,
-            });
-        }
-        self.pending_bookmarks_save = None;
-        Ok(())
-''',
-          )
-          replace_once(
-              'src/profile_runtime/bookmarks_persistence.rs',
-              '''        let expected = self
-            .active
-            .as_ref()
-            .and_then(|active| active.bookmarks.pending_save.map(|pending| pending.id));
-        if expected != Some(completion.id) {
-            return Err(ProfileBookmarksRuntimeError::StaleSave {
-                expected,
-                actual: completion.id,
-            });
-        }
+          begin_method = '\n'.join([
+              '    pub fn begin_bookmarks_save(',
+              '        &mut self,',
+              '        profile: ProfileId,',
+              '    ) -> Result<ProfileBookmarksSaveIntent, ProfileBookmarksRuntimeError> {',
+              '        let expected = self.active.as_ref().map(ActiveProfile::id);',
+              '        if expected != Some(profile) {',
+              '            return Err(ProfileBookmarksRuntimeError::StaleProfile {',
+              '                expected,',
+              '                actual: profile,',
+              '            });',
+              '        }',
+              '        if let Some(pending) = self.pending_bookmarks_save {',
+              '            return Err(ProfileBookmarksRuntimeError::SaveAlreadyPending {',
+              '                pending: pending.id,',
+              '            });',
+              '        }',
+              '',
+              '        let active = self.active.as_ref().expect("active profile was validated");',
+              '        let root = active.root.clone();',
+              '        let lock = active.lock.clone();',
+              '        let snapshot = active.bookmarks.snapshot.clone();',
+              '        let base_generation = snapshot.generation();',
+              '        let mutation_revision = active.bookmarks.mutation_revision;',
+              '        let id = ProfileBookmarksSaveId(self.next_bookmarks_save_id);',
+              '        self.next_bookmarks_save_id = self',
+              '            .next_bookmarks_save_id',
+              '            .checked_add(1)',
+              '            .ok_or(ProfileBookmarksRuntimeError::SaveIdExhausted)?;',
+              '        self.pending_bookmarks_save = Some(PendingProfileBookmarksSave {',
+              '            id,',
+              '            profile,',
+              '            base_generation,',
+              '            mutation_revision,',
+              '        });',
+              '        Ok(ProfileBookmarksSaveIntent {',
+              '            id,',
+              '            profile,',
+              '            root,',
+              '            lock,',
+              '            snapshot,',
+              '            mutation_revision,',
+              '        })',
+              '    }',
+              '',
+          ])
+          replace_region(bp, '    pub fn begin_bookmarks_save(', '    pub fn cancel_bookmarks_save(', begin_method)
 
-        let active = self
-            .active
-            .as_mut()
-            .expect("pending bookmarks save requires an active profile");
-        let pending = active
-            .bookmarks
-            .pending_save
-            .expect("pending bookmarks save was validated");
-        if active.id != completion.profile
-            || active.root != completion.root
-            || pending.base_generation != completion.base_generation
-            || pending.mutation_revision != completion.mutation_revision
-        {
-            return Err(ProfileBookmarksRuntimeError::SaveTargetMismatch {
-                save: completion.id,
-            });
-        }
+          cancel_method = '\n'.join([
+              '    pub fn cancel_bookmarks_save(',
+              '        &mut self,',
+              '        save: ProfileBookmarksSaveId,',
+              '    ) -> Result<(), ProfileBookmarksRuntimeError> {',
+              '        let expected = self.pending_bookmarks_save.map(|pending| pending.id);',
+              '        if expected != Some(save) {',
+              '            return Err(ProfileBookmarksRuntimeError::StaleSave {',
+              '                expected,',
+              '                actual: save,',
+              '            });',
+              '        }',
+              '        self.pending_bookmarks_save = None;',
+              '        Ok(())',
+              '    }',
+              '',
+          ])
+          replace_region(bp, '    pub fn cancel_bookmarks_save(', '    pub fn complete_bookmarks_save(', cancel_method)
 
-        active.bookmarks.pending_save = None;
-        if let Ok(saved) = &completion.result {
-            let current_generation = active.bookmarks.snapshot.generation();
-            let saved_generation = saved.snapshot().generation();
-            if !active
-                .bookmarks
-                .snapshot
-                .advance_generation_after_save(pending.base_generation, saved_generation)
-            {
-                return Err(ProfileBookmarksRuntimeError::SaveGenerationMismatch {
-                    expected_generation: pending.base_generation,
-                    current_generation,
-                    saved_generation,
-                });
-            }
-            active.bookmarks.durable_revision = pending.mutation_revision;
-        }
-''',
-              '''        let expected = self.pending_bookmarks_save.map(|pending| pending.id);
-        if expected != Some(completion.id) {
-            return Err(ProfileBookmarksRuntimeError::StaleSave {
-                expected,
-                actual: completion.id,
-            });
-        }
-
-        let pending = self
-            .pending_bookmarks_save
-            .expect("pending bookmarks save was validated");
-        let active = self
-            .active
-            .as_ref()
-            .ok_or(ProfileBookmarksRuntimeError::SaveTargetMismatch {
-                save: completion.id,
-            })?;
-        if pending.profile != completion.profile
-            || pending.base_generation != completion.base_generation
-            || pending.mutation_revision != completion.mutation_revision
-            || active.id != completion.profile
-            || active.root != completion.root
-        {
-            return Err(ProfileBookmarksRuntimeError::SaveTargetMismatch {
-                save: completion.id,
-            });
-        }
-
-        self.pending_bookmarks_save = None;
-        if let Ok(saved) = &completion.result {
-            let active = self
-                .active
-                .as_mut()
-                .expect("bookmarks save target was validated");
-            let current_generation = active.bookmarks.snapshot.generation();
-            let saved_generation = saved.snapshot().generation();
-            if !active
-                .bookmarks
-                .snapshot
-                .advance_generation_after_save(pending.base_generation, saved_generation)
-            {
-                return Err(ProfileBookmarksRuntimeError::SaveGenerationMismatch {
-                    expected_generation: pending.base_generation,
-                    current_generation,
-                    saved_generation,
-                });
-            }
-            active.bookmarks.durable_revision = pending.mutation_revision;
-        }
-''',
-          )
-          replace_once(
-              'src/profile_runtime/bookmarks_persistence.rs',
+          complete_method = '\n'.join([
+              '    pub fn complete_bookmarks_save(',
+              '        &mut self,',
+              '        completion: ProfileBookmarksSaveCompletion,',
+              '    ) -> Result<ProfileBookmarksSaveCompletion, ProfileBookmarksRuntimeError> {',
+              '        let expected = self.pending_bookmarks_save.map(|pending| pending.id);',
+              '        if expected != Some(completion.id) {',
+              '            return Err(ProfileBookmarksRuntimeError::StaleSave {',
+              '                expected,',
+              '                actual: completion.id,',
+              '            });',
+              '        }',
+              '',
+              '        let pending = self',
+              '            .pending_bookmarks_save',
+              '            .expect("pending bookmarks save was validated");',
+              '        let active = self',
+              '            .active',
+              '            .as_ref()',
+              '            .ok_or(ProfileBookmarksRuntimeError::SaveTargetMismatch {',
+              '                save: completion.id,',
+              '            })?;',
+              '        if pending.profile != completion.profile',
+              '            || pending.base_generation != completion.base_generation',
+              '            || pending.mutation_revision != completion.mutation_revision',
+              '            || active.id != completion.profile',
+              '            || active.root != completion.root',
+              '        {',
+              '            return Err(ProfileBookmarksRuntimeError::SaveTargetMismatch {',
+              '                save: completion.id,',
+              '            });',
+              '        }',
+              '',
+              '        self.pending_bookmarks_save = None;',
+              '        if let Ok(saved) = &completion.result {',
+              '            let active = self',
+              '                .active',
+              '                .as_mut()',
+              '                .expect("bookmarks save target was validated");',
+              '            let current_generation = active.bookmarks.snapshot.generation();',
+              '            let saved_generation = saved.snapshot().generation();',
+              '            if !active',
+              '                .bookmarks',
+              '                .snapshot',
+              '                .advance_generation_after_save(pending.base_generation, saved_generation)',
+              '            {',
+              '                return Err(ProfileBookmarksRuntimeError::SaveGenerationMismatch {',
+              '                    expected_generation: pending.base_generation,',
+              '                    current_generation,',
+              '                    saved_generation,',
+              '                });',
+              '            }',
+              '            active.bookmarks.durable_revision = pending.mutation_revision;',
+              '        }',
+              '        Ok(completion)',
+              '    }',
+              '',
+          ])
+          replace_region(bp, '    pub fn complete_bookmarks_save(', '}\n\n#[cfg(test)]', complete_method)
+          replace_once(bp,
               '        runtime.active.as_mut().unwrap().bookmarks.next_save_id = u64::MAX;\n',
-              '        runtime.next_bookmarks_save_id = u64::MAX;\n',
-          )
+              '        runtime.next_bookmarks_save_id = u64::MAX;\n')
 
-          Path('.github/workflows/z3-bookmarks-save-id-one-shot.yml').unlink()
+          for workflow in [
+              '.github/workflows/z3-bookmarks-persistence-one-shot.yml',
+              '.github/workflows/z3-bookmarks-save-id-one-shot.yml',
+          ]:
+              p = Path(workflow)
+              if p.exists():
+                  p.unlink()
           PY
           cargo fmt --all
           cargo fmt --all -- --check
@@ -342,12 +236,12 @@ pub(super) struct PendingProfileBookmarksSave {
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked --all-targets
           git diff --check
-      - name: Commit hardened identity lifecycle
+      - name: Commit hardened lifecycle
         shell: bash
         run: |
           git config user.name "Stanley Lloyd"
           git config user.email "131160519+StanleyLl0yd@users.noreply.github.com"
-          git add src/profile_runtime.rs src/profile_runtime/bookmarks_persistence.rs .github/workflows/z3-bookmarks-save-id-one-shot.yml
+          git add src/profile_runtime.rs src/profile_runtime/bookmarks_persistence.rs .github/workflows/z3-bookmarks-persistence-one-shot.yml .github/workflows/z3-bookmarks-save-id-one-shot.yml
           git diff --cached --stat
           git commit -m "refactor: make bookmark save ids process-monotonic"
           git push origin HEAD:${{ github.event.pull_request.head.ref }}
