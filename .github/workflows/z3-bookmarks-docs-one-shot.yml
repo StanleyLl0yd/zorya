@@ -1,22 +1,21 @@
 name: Z3 bookmarks persistence docs one-shot
 
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches: [z3/bookmarks-native-persistence]
 
 permissions:
   contents: write
 
 jobs:
   update-docs:
-    if: github.event.pull_request.head.ref == 'z3/bookmarks-native-persistence'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Checkout feature branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: z3/bookmarks-native-persistence
           persist-credentials: true
       - name: Update bookmarks persistence architecture
         shell: bash
