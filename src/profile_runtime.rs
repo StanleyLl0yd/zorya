@@ -17,6 +17,14 @@ use crate::profile_metadata::{
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+mod bookmarks_persistence;
+
+use bookmarks_persistence::{BookmarksRuntimeState, PendingProfileBookmarksSave};
+pub use bookmarks_persistence::{
+    ProfileBookmarksRuntimeError, ProfileBookmarksSaveCompletion, ProfileBookmarksSaveId,
+    ProfileBookmarksSaveIntent,
+};
+
 const COLOR_SCHEME_KEY: &str = "ui.color_scheme";
 const CONFIRM_CLOSE_MULTIPLE_TABS_KEY: &str = "tabs.confirm_close_multiple";
 
@@ -450,8 +458,7 @@ pub struct ActiveProfile {
     settings_recovery: Option<SettingsRecovery>,
     browsing_history: BrowsingHistorySnapshot,
     browsing_history_recovery: Option<BrowsingHistoryRecovery>,
-    bookmarks: BookmarksSnapshot,
-    bookmarks_recovery: Option<BookmarksRecovery>,
+    bookmarks: BookmarksRuntimeState,
     settings_revision: u64,
     durable_settings_revision: u64,
     browsing_history_revision: u64,
@@ -502,11 +509,11 @@ impl ActiveProfile {
     }
 
     pub const fn bookmarks(&self) -> &BookmarksSnapshot {
-        &self.bookmarks
+        self.bookmarks.snapshot()
     }
 
     pub const fn bookmarks_recovery(&self) -> Option<&BookmarksRecovery> {
-        self.bookmarks_recovery.as_ref()
+        self.bookmarks.recovery()
     }
 }
 
@@ -962,10 +969,12 @@ pub struct ProfileRuntime {
     next_selection_id: u64,
     next_settings_save_id: u64,
     next_history_save_id: u64,
+    next_bookmarks_save_id: u64,
     active: Option<ActiveProfile>,
     pending: Option<ProfileSelectionIntent>,
     pending_settings_save: Option<PendingProfileSettingsSave>,
     pending_history_save: Option<PendingProfileHistorySave>,
+    pending_bookmarks_save: Option<PendingProfileBookmarksSave>,
 }
 
 impl Default for ProfileRuntime {
@@ -981,10 +990,12 @@ impl ProfileRuntime {
             next_selection_id: 1,
             next_settings_save_id: 1,
             next_history_save_id: 1,
+            next_bookmarks_save_id: 1,
             active: None,
             pending: None,
             pending_settings_save: None,
             pending_history_save: None,
+            pending_bookmarks_save: None,
         }
     }
 
@@ -1081,10 +1092,12 @@ impl ProfileRuntime {
                 });
             }
 
-            let persistence_pending =
-                self.pending_settings_save.is_some() || self.pending_history_save.is_some();
+            let persistence_pending = self.pending_settings_save.is_some()
+                || self.pending_history_save.is_some()
+                || self.pending_bookmarks_save.is_some();
             let persistence_dirty = active.settings_revision != active.durable_settings_revision
-                || active.browsing_history_revision != active.durable_browsing_history_revision;
+                || active.browsing_history_revision != active.durable_browsing_history_revision
+                || active.bookmarks.is_dirty();
             if persistence_pending || persistence_dirty {
                 return Err(ProfileSelectionCommitError {
                     error: ProfileRuntimeError::ActiveProfileNotDurable { profile: active.id },
@@ -1112,8 +1125,7 @@ impl ProfileRuntime {
             settings_recovery: prepared.settings_recovery,
             browsing_history: prepared.browsing_history,
             browsing_history_recovery: prepared.browsing_history_recovery,
-            bookmarks: prepared.bookmarks,
-            bookmarks_recovery: prepared.bookmarks_recovery,
+            bookmarks: BookmarksRuntimeState::new(prepared.bookmarks, prepared.bookmarks_recovery),
             settings_revision: 0,
             durable_settings_revision: 0,
             browsing_history_revision: 0,

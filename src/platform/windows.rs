@@ -1863,6 +1863,10 @@ impl NativeShell {
                     ),
                 }
             }
+            ProfileWorkerCompletion::BookmarksSaved(_) => self.fail(
+                event_loop,
+                "unexpected bookmarks-save completion arrived without native bookmark persistence wiring",
+            ),
             ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
                 event_loop,
                 "unexpected profile rename completion arrived without native mutation UX",
