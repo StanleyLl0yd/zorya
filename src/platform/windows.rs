@@ -160,12 +160,7 @@ fn spawn_http_smoke_server() -> Result<String, std::io::Error> {
             let mut request = [0_u8; 4096];
             let _ = stream.read(&mut request);
             let response = format!(
-                "HTTP/1.1 200 OK\r\
-Content-Type: text/html; charset=utf-8\r\
-Content-Length: {}\r\
-Connection: close\r\
-\r\
-{}",
+                "HTTP/1.1 200 OK\\r\\nContent-Type: text/html; charset=utf-8\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
                 HTTP_SMOKE_BODY.len(),
                 HTTP_SMOKE_BODY
             );
@@ -872,7 +867,6 @@ impl NativeShell {
             }
             Err(error) if error.is_full() => {
                 let returned = error.into_work();
-                debug_assert_eq!(returned.id(), pending.intent.id());
                 self.pending_profile_catalog_discovery
                     .as_mut()
                     .expect("catalog discovery remains pending")
@@ -888,7 +882,9 @@ impl NativeShell {
                     .expect("catalog discovery remains pending")
                     .intent;
                 debug_assert_eq!(returned, expected);
-                Err(format!("failed to submit profile catalog discovery: {message}"))
+                Err(format!(
+                    "failed to submit profile catalog discovery: {message}"
+                ))
             }
         }
     }
