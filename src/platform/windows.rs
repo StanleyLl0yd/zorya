@@ -10,7 +10,8 @@ use crate::engine::{
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     ColorSchemePreference, NavigationId, NavigationStart, PreparedProfile, PresentationFramePermit,
-    PresentationGeneration, PresentationHandoffError, ProfileCatalogCreateIntent,
+    PresentationGeneration, PresentationHandoffError, ProfileBookmarksSavePolicy,
+    ProfileBookmarksSaveScheduler, ProfileBookmarksSaveUrgency, ProfileCatalogCreateIntent,
     ProfileCatalogDiscoverIntent, ProfileCatalogEntry, ProfileHistorySavePolicy,
     ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileId, ProfileLock,
     ProfileLockOwner, ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent,
@@ -54,6 +55,12 @@ const SETTINGS_SAVE_MUTATION_THRESHOLD: u64 = 8;
 const HISTORY_SAVE_DEBOUNCE_MILLIS: u64 = 5_000;
 const HISTORY_SAVE_MAX_DIRTY_MILLIS: u64 = 30_000;
 const HISTORY_SAVE_MUTATION_THRESHOLD: u64 = 32;
+const BOOKMARKS_SAVE_DEBOUNCE_MILLIS: u64 = 1_000;
+const BOOKMARKS_SAVE_MAX_DIRTY_MILLIS: u64 = 10_000;
+const BOOKMARKS_SAVE_MUTATION_THRESHOLD: u64 = 8;
+const BOOKMARKS_PERSISTENCE_SMOKE_TITLE: &str = "Zorya native bookmark persistence smoke";
+const BOOKMARKS_PERSISTENCE_SMOKE_LOCATION: &str =
+    "https://example.test/zorya-bookmark-persistence-smoke";
 
 #[derive(Debug)]
 struct NativeProfileClock {
@@ -92,6 +99,15 @@ fn native_history_save_policy() -> ProfileHistorySavePolicy {
         HISTORY_SAVE_MUTATION_THRESHOLD,
     )
     .expect("native browsing-history save policy is valid")
+}
+
+fn native_bookmarks_save_policy() -> ProfileBookmarksSavePolicy {
+    ProfileBookmarksSavePolicy::new(
+        BOOKMARKS_SAVE_DEBOUNCE_MILLIS,
+        BOOKMARKS_SAVE_MAX_DIRTY_MILLIS,
+        BOOKMARKS_SAVE_MUTATION_THRESHOLD,
+    )
+    .expect("native bookmarks save policy is valid")
 }
 
 const fn native_window_theme(preference: ColorSchemePreference) -> Option<Theme> {
@@ -544,6 +560,7 @@ struct NativeShell {
     profile_worker: Option<ProfileWorker>,
     settings_scheduler: ProfileSettingsSaveScheduler,
     history_scheduler: ProfileHistorySaveScheduler,
+    bookmarks_scheduler: ProfileBookmarksSaveScheduler,
     profile_clock: NativeProfileClock,
     initial_profile_selection: Option<ProfileSelectionIntent>,
     profiles_root: PathBuf,
@@ -614,6 +631,7 @@ impl NativeShell {
             profile_worker: Some(profile_worker),
             settings_scheduler: ProfileSettingsSaveScheduler::new(native_settings_save_policy()),
             history_scheduler: ProfileHistorySaveScheduler::new(native_history_save_policy()),
+            bookmarks_scheduler: ProfileBookmarksSaveScheduler::new(native_bookmarks_save_policy()),
             profile_clock: NativeProfileClock::new(),
             initial_profile_selection: Some(initial_profile_selection),
             profiles_root,
@@ -757,6 +775,41 @@ impl NativeShell {
         if self.run_mode == RunMode::ExitAfterColorSchemeCycle {
             eprintln!("zorya color-scheme smoke: {stage}");
         }
+    }
+
+    fn run_bookmarks_persistence_smoke(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) -> Result<(), String> {
+        if self.run_mode != RunMode::ExitAfterBookmarksPersistence {
+            return Err("bookmarks persistence smoke started outside its run mode".into());
+        }
+        let profile = self.active_profile_id()?;
+        let marker_count = self
+            .profile_runtime
+            .active_bookmarks(profile)
+            .map_err(|error| format!("failed to inspect active bookmarks: {error}"))?
+            .bookmarks()
+            .iter()
+            .filter(|bookmark| {
+                bookmark.title() == BOOKMARKS_PERSISTENCE_SMOKE_TITLE
+                    && bookmark.location() == BOOKMARKS_PERSISTENCE_SMOKE_LOCATION
+            })
+            .count();
+        if marker_count > 1 {
+            return Err("bookmarks persistence smoke found duplicate persisted markers".into());
+        }
+        if marker_count == 0 {
+            self.profile_runtime
+                .add_bookmark(
+                    profile,
+                    BOOKMARKS_PERSISTENCE_SMOKE_TITLE,
+                    BOOKMARKS_PERSISTENCE_SMOKE_LOCATION,
+                )
+                .map_err(|error| format!("failed to create bookmark smoke marker: {error}"))?;
+        }
+        self.shutdown(event_loop);
+        Ok(())
     }
 
     fn begin_profile_cycle_smoke_create(&mut self) -> Result<(), String> {
@@ -1122,6 +1175,55 @@ impl NativeShell {
         }
     }
 
+    fn drive_bookmarks_save(&mut self, urgency: ProfileBookmarksSaveUrgency) -> Result<(), String> {
+        let Some(profile) = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| profile.id())
+        else {
+            return Ok(());
+        };
+        let now_millis = self.profile_clock.now_millis();
+        let Some(intent) = self
+            .bookmarks_scheduler
+            .poll(&mut self.profile_runtime, profile, now_millis, urgency)
+            .map_err(|error| format!("failed to schedule bookmarks save: {error}"))?
+        else {
+            return Ok(());
+        };
+        let save = intent.id();
+        let worker = self
+            .profile_worker
+            .as_ref()
+            .ok_or_else(|| "profile worker is unavailable for bookmarks save".to_string())?;
+
+        match worker.save_bookmarks(intent) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let queue_full = error.is_full();
+                let message = error.to_string();
+                let intent = error.into_work();
+                debug_assert_eq!(intent.id(), save);
+                self.profile_runtime
+                    .cancel_bookmarks_save(save)
+                    .map_err(|cancel| {
+                        format!(
+                            "failed to submit bookmarks save {}: {message}; failed to cancel pending save: {cancel}",
+                            save.get()
+                        )
+                    })?;
+                if queue_full {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "failed to submit bookmarks save {}: {message}",
+                        save.get()
+                    ))
+                }
+            }
+        }
+    }
+
     fn settings_flush_complete(&self) -> Result<bool, String> {
         let Some(profile) = self
             .profile_runtime
@@ -1160,8 +1262,27 @@ impl NativeShell {
             .map_err(|error| format!("failed to inspect browsing-history dirty state: {error}"))
     }
 
+    fn bookmarks_flush_complete(&self) -> Result<bool, String> {
+        let Some(profile) = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| profile.id())
+        else {
+            return Ok(true);
+        };
+        if self.profile_runtime.pending_bookmarks_save().is_some() {
+            return Ok(false);
+        }
+        self.profile_runtime
+            .bookmarks_is_dirty(profile)
+            .map(|dirty| !dirty)
+            .map_err(|error| format!("failed to inspect bookmarks dirty state: {error}"))
+    }
+
     fn profile_flush_complete(&self) -> Result<bool, String> {
-        Ok(self.settings_flush_complete()? && self.history_flush_complete()?)
+        Ok(self.settings_flush_complete()?
+            && self.history_flush_complete()?
+            && self.bookmarks_flush_complete()?)
     }
 
     fn drive_profile_saves(&mut self, flush: bool) -> Result<(), String> {
@@ -1175,8 +1296,25 @@ impl NativeShell {
         } else {
             ProfileHistorySaveUrgency::Normal
         };
+        let bookmarks_urgency = if flush {
+            ProfileBookmarksSaveUrgency::Flush
+        } else {
+            ProfileBookmarksSaveUrgency::Normal
+        };
         self.drive_settings_save(settings_urgency)?;
-        self.drive_history_save(history_urgency)
+        self.drive_history_save(history_urgency)?;
+        self.drive_bookmarks_save(bookmarks_urgency)
+    }
+
+    fn next_profile_save_due_millis(&self) -> Option<u64> {
+        [
+            self.settings_scheduler.next_save_due_millis(),
+            self.history_scheduler.next_save_due_millis(),
+            self.bookmarks_scheduler.next_save_due_millis(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn replacement_flush_requested(&self) -> bool {
@@ -1863,10 +2001,48 @@ impl NativeShell {
                     ),
                 }
             }
-            ProfileWorkerCompletion::BookmarksSaved(_) => self.fail(
-                event_loop,
-                "unexpected bookmarks-save completion arrived without native bookmark persistence wiring",
-            ),
+            ProfileWorkerCompletion::BookmarksSaved(completion) => {
+                let save = completion.id();
+                let storage_error = completion.result().as_ref().err().map(ToString::to_string);
+                match self.profile_runtime.complete_bookmarks_save(completion) {
+                    Ok(_) => {
+                        if let Some(error) = storage_error {
+                            if self.fatal_error.is_none() {
+                                self.fatal_error = Some(format!(
+                                    "bookmarks save {} failed on profile worker: {error}",
+                                    save.get()
+                                ));
+                            }
+                            self.begin_shutdown();
+                            self.finish_shutdown(event_loop);
+                            return;
+                        }
+
+                        let flush = self.shutdown_requested || self.replacement_flush_requested();
+                        if let Err(error) = self.drive_profile_saves(flush) {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+                        if self.shutdown_requested {
+                            match self.profile_flush_complete() {
+                                Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
+                                Ok(false) => {}
+                                Err(error) => self.fail(event_loop, error),
+                            }
+                        } else if self.pending_profile_replacement.is_some() {
+                            match self.profile_flush_complete() {
+                                Ok(true) => self.continue_profile_replacement(event_loop),
+                                Ok(false) => {}
+                                Err(error) => self.fail(event_loop, error),
+                            }
+                        }
+                    }
+                    Err(error) => self.fail(
+                        event_loop,
+                        format!("failed to reconcile bookmarks save {}: {error}", save.get()),
+                    ),
+                }
+            }
             ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
                 event_loop,
                 "unexpected profile rename completion arrived without native mutation UX",
@@ -3243,6 +3419,10 @@ impl NativeShell {
                                 self.needs_redraw = true;
                                 self.request_redraw();
                             }
+                        } else if self.run_mode == RunMode::ExitAfterBookmarksPersistence {
+                            if let Err(error) = self.run_bookmarks_persistence_smoke(event_loop) {
+                                self.fail(event_loop, error);
+                            }
                         } else if self.run_mode == RunMode::ExitAfterFirstPresentation {
                             self.shutdown(event_loop);
                         } else if self.run_mode == RunMode::ExitAfterTabActivation {
@@ -3548,16 +3728,9 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
             || self
                 .profile_runtime
                 .pending_browsing_history_save()
-                .is_some();
-        let next_save_due = match (
-            self.settings_scheduler.next_save_due_millis(),
-            self.history_scheduler.next_save_due_millis(),
-        ) {
-            (Some(settings), Some(history)) => Some(settings.min(history)),
-            (Some(settings), None) => Some(settings),
-            (None, Some(history)) => Some(history),
-            (None, None) => None,
-        };
+                .is_some()
+            || self.profile_runtime.pending_bookmarks_save().is_some();
+        let next_save_due = self.next_profile_save_due_millis();
         let control_flow = if save_pending {
             ControlFlow::Wait
         } else {

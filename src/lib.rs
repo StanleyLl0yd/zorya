@@ -143,3 +143,8 @@ pub fn run_native_profile_cycle_smoke() -> Result<(), Box<dyn std::error::Error>
 pub fn run_native_color_scheme_smoke() -> Result<(), Box<dyn std::error::Error>> {
     platform::run(platform::RunMode::ExitAfterColorSchemeCycle)
 }
+
+#[doc(hidden)]
+pub fn run_native_bookmarks_persistence_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    platform::run(platform::RunMode::ExitAfterBookmarksPersistence)
+}
