@@ -14,6 +14,197 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  implement-bookmarks-attachment:
+    name: Temporary bookmarks attachment implementation
+    if: github.event_name == 'pull_request' && github.head_ref == 'z3/bookmarks-profile-attachment'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: true
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt
+      - name: Implement attachment and remove this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          path = Path("src/profile_runtime.rs")
+          text = path.read_text(encoding="utf-8")
+          text = replace_once(
+              text,
+              "use crate::app::BrowserNavigationCommit;\nuse crate::browsing_history::{",
+              "use crate::app::BrowserNavigationCommit;\nuse crate::bookmarks::{BookmarksError, BookmarksRecovery, BookmarksSnapshot, BookmarksStore};\nuse crate::browsing_history::{",
+              "bookmarks import",
+          )
+
+          old_fields = "    browsing_history: BrowsingHistorySnapshot,\n    browsing_history_recovery: Option<BrowsingHistoryRecovery>,\n}"
+          new_fields = "    browsing_history: BrowsingHistorySnapshot,\n    browsing_history_recovery: Option<BrowsingHistoryRecovery>,\n    bookmarks: BookmarksSnapshot,\n    bookmarks_recovery: Option<BookmarksRecovery>,\n}"
+          text = replace_once(text, old_fields, new_fields, "prepared bookmarks fields")
+
+          text = replace_once(
+              text,
+              "            let browsing_history_recovery = history_load.recovery().cloned();\n            let browsing_history = history_load.into_snapshot();\n\n            Ok((",
+              "            let browsing_history_recovery = history_load.recovery().cloned();\n            let browsing_history = history_load.into_snapshot();\n\n            let bookmarks_store = BookmarksStore::open(intent.root.clone())\n                .map_err(ProfilePreparationError::Bookmarks)?;\n            let bookmarks_load = bookmarks_store\n                .load()\n                .map_err(ProfilePreparationError::Bookmarks)?;\n            let bookmarks_recovery = bookmarks_load.recovery().cloned();\n            let bookmarks = bookmarks_load.into_snapshot();\n\n            Ok((",
+              "bookmarks load",
+          )
+          text = replace_once(
+              text,
+              "                browsing_history,\n                browsing_history_recovery,\n            ))",
+              "                browsing_history,\n                browsing_history_recovery,\n                bookmarks,\n                bookmarks_recovery,\n            ))",
+              "prepared tuple return",
+          )
+          text = replace_once(
+              text,
+              "            browsing_history,\n            browsing_history_recovery,\n        ) = match prepared {",
+              "            browsing_history,\n            browsing_history_recovery,\n            bookmarks,\n            bookmarks_recovery,\n        ) = match prepared {",
+              "prepared tuple destructure",
+          )
+          text = replace_once(
+              text,
+              "            browsing_history,\n            browsing_history_recovery,\n        })",
+              "            browsing_history,\n            browsing_history_recovery,\n            bookmarks,\n            bookmarks_recovery,\n        })",
+              "prepared construction",
+          )
+
+          accessor = "    pub const fn browsing_history_recovery(&self) -> Option<&BrowsingHistoryRecovery> {\n        self.browsing_history_recovery.as_ref()\n    }\n"
+          prepared_accessor = accessor + "\n    pub const fn bookmarks(&self) -> &BookmarksSnapshot {\n        &self.bookmarks\n    }\n\n    pub const fn bookmarks_recovery(&self) -> Option<&BookmarksRecovery> {\n        self.bookmarks_recovery.as_ref()\n    }\n"
+          text = replace_once(text, accessor, prepared_accessor, "prepared bookmark accessors")
+
+          text = replace_once(
+              text,
+              "    BrowsingHistory(crate::browsing_history::BrowsingHistoryError),\n    LockRelease {",
+              "    BrowsingHistory(crate::browsing_history::BrowsingHistoryError),\n    Bookmarks(BookmarksError),\n    LockRelease {",
+              "preparation bookmarks error variant",
+          )
+          text = replace_once(
+              text,
+              "            Self::BrowsingHistory(error) => error.fmt(formatter),\n            Self::LockRelease {",
+              "            Self::BrowsingHistory(error) => error.fmt(formatter),\n            Self::Bookmarks(error) => error.fmt(formatter),\n            Self::LockRelease {",
+              "preparation bookmarks display",
+          )
+          text = replace_once(
+              text,
+              "            Self::BrowsingHistory(error) => Some(error),\n            Self::LockRelease { preparation, .. } => Some(preparation.as_ref()),",
+              "            Self::BrowsingHistory(error) => Some(error),\n            Self::Bookmarks(error) => Some(error),\n            Self::LockRelease { preparation, .. } => Some(preparation.as_ref()),",
+              "preparation bookmarks source",
+          )
+
+          text = replace_once(text, old_fields, new_fields, "active bookmarks fields")
+          active_accessor = accessor + "\n    pub const fn bookmarks(&self) -> &BookmarksSnapshot {\n        &self.bookmarks\n    }\n\n    pub const fn bookmarks_recovery(&self) -> Option<&BookmarksRecovery> {\n        self.bookmarks_recovery.as_ref()\n    }\n"
+          text = replace_once(text, accessor, active_accessor, "active bookmark accessors")
+
+          text = replace_once(
+              text,
+              "            browsing_history: prepared.browsing_history,\n            browsing_history_recovery: prepared.browsing_history_recovery,\n            settings_revision: 0,",
+              "            browsing_history: prepared.browsing_history,\n            browsing_history_recovery: prepared.browsing_history_recovery,\n            bookmarks: prepared.bookmarks,\n            bookmarks_recovery: prepared.bookmarks_recovery,\n            settings_revision: 0,",
+              "active bookmark transfer",
+          )
+
+          marker = "    #[test]\n    fn committed_profile_survives_pending_selection_and_exact_cancel() {"
+          test = '''    #[test]
+    fn prepared_and_active_profile_preserve_bookmarks_and_recovery() {
+        let root = TempRoot::new();
+        fs::create_dir_all(root.path()).unwrap();
+        let lock = ProfileLock::acquire(root.path()).unwrap();
+        let store = BookmarksStore::open(root.path()).unwrap();
+        let mut first_input = BookmarksSnapshot::default();
+        let first_id = first_input
+            .add_bookmark("One", "https://one.test")
+            .unwrap();
+        let first = store.save(&lock, &first_input).unwrap().into_snapshot();
+        let mut second_input = first.clone();
+        second_input
+            .add_bookmark("Two", "https://two.test")
+            .unwrap();
+        let second = store.save(&lock, &second_input).unwrap().into_snapshot();
+        lock.release().unwrap();
+
+        let newest = fs::read_dir(root.path().join("bookmarks"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_file())
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("bookmarks-") && name.ends_with(".bin"))
+            })
+            .max_by_key(|entry| entry.file_name())
+            .unwrap()
+            .path();
+        let mut bytes = fs::read(&newest).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        fs::write(newest, bytes).unwrap();
+
+        let mut runtime = ProfileRuntime::new();
+        let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
+        let prepared = PreparedProfile::load(&intent).unwrap();
+        assert_eq!(prepared.bookmarks(), &first);
+        assert_eq!(
+            prepared.bookmarks_recovery().unwrap().skipped_generations(),
+            &[second.generation()]
+        );
+        assert_eq!(prepared.bookmarks().bookmark(first_id).unwrap().title(), "One");
+
+        runtime.commit_selection(prepared).unwrap();
+        let active = runtime.active_profile().unwrap();
+        assert_eq!(active.bookmarks(), &first);
+        assert_eq!(
+            active.bookmarks_recovery().unwrap().skipped_generations(),
+            &[second.generation()]
+        );
+        assert_eq!(active.bookmarks().bookmark(first_id).unwrap().location(), "https://one.test");
+    }
+
+'''
+          text = replace_once(text, marker, test + marker, "bookmark attachment test")
+          path.write_text(text, encoding="utf-8", newline="\n")
+
+          arch = Path("docs/ARCHITECTURE.md")
+          text = arch.read_text(encoding="utf-8")
+          old = "Persistent bookmarks are profile-local product state with their own stable `BookmarkId` namespace, separate from tab history and Web-engine identities. `BookmarksStore` stores bounded title/location text in immutable versioned generations under the profile root, verifies the exact `ProfileLock` before write work and again immediately before no-overwrite publication, and rejects stale or concurrently-created generations. Loading scans bounded directory state newest-first, reports skipped corrupt generations explicitly, and fails closed on unsupported schemas; bookmark identifiers remain monotonic across edit, removal and clear. The storage primitive is synchronous and therefore belongs on profile/background workers; loading into `PreparedProfile`, runtime dirty/save coordination and native bookmarks UX are later Z3 work."
+          new = "Persistent bookmarks are profile-local product state with their own stable `BookmarkId` namespace, separate from tab history and Web-engine identities. `BookmarksStore` stores bounded title/location text in immutable versioned generations under the profile root, verifies the exact `ProfileLock` before write work and again immediately before no-overwrite publication, and rejects stale or concurrently-created generations. Loading scans bounded directory state newest-first, reports skipped corrupt generations explicitly, and fails closed on unsupported schemas; bookmark identifiers remain monotonic across edit, removal and clear. The storage primitive is synchronous and therefore belongs on profile/background workers. `PreparedProfile::load` now loads bookmarks while the exact profile lock is held and carries both the snapshot and any explicit recovery report unchanged into `ActiveProfile`; bookmark mutation/save coordination and native bookmarks UX remain later Z3 work."
+          text = replace_once(text, old, new, "architecture bookmarks attachment")
+          old = "`PreparedProfile::load` opens both recoverable settings and browsing-history state on the background/profile-worker side. A successful exact profile-selection commit transfers the history snapshot and any recovery report into `ActiveProfile`; runtime history access is gated by the same process-local stable `ProfileId` used for settings so a replaced profile cannot be mutated through a stale identity."
+          new = "`PreparedProfile::load` opens recoverable settings, browsing-history and bookmarks state on the background/profile-worker side. A successful exact profile-selection commit transfers those snapshots and recovery reports into `ActiveProfile`; process-local `ProfileId` remains distinct from every persisted record identity, and later mutable runtime access must stay gated by that exact active profile identity."
+          text = replace_once(text, old, new, "architecture preparation state")
+          arch.write_text(text, encoding="utf-8", newline="\n")
+
+          roadmap = Path("docs/ROADMAP.md")
+          text = roadmap.read_text(encoding="utf-8")
+          old = "- bounded, versioned and recoverable profile-local bookmarks storage with stable monotonic bookmark identities, bounded title/location records, exact profile-lock verification before write and publication, immutable no-clobber generations, stale/concurrent writer rejection, explicit corruption fallback, fail-closed unsupported schemas and bounded retained generations; runtime attachment, worker persistence lifecycle and native bookmarks UX remain;"
+          new = "- bounded, versioned and recoverable profile-local bookmarks storage with stable monotonic bookmark identities, bounded title/location records, exact profile-lock verification before write and publication, immutable no-clobber generations, stale/concurrent writer rejection, explicit corruption fallback, fail-closed unsupported schemas and bounded retained generations; locked background profile preparation now loads the bookmark snapshot/recovery state and exact selection commit carries both unchanged into `ActiveProfile`; mutation/save lifecycle and native bookmarks UX remain;"
+          text = replace_once(text, old, new, "roadmap bookmarks attachment")
+          roadmap.write_text(text, encoding="utf-8", newline="\n")
+          PY
+          cargo fmt --all
+          cargo test --locked --all-targets
+          git fetch origin main --depth=1
+          git checkout origin/main -- .github/workflows/ci.yml
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -u
+          git commit -m "Z3: attach bookmarks to active profiles"
+          git push origin HEAD:${{ github.head_ref }}
+
   windows:
     name: Windows primary
     runs-on: windows-latest
