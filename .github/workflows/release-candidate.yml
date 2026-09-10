@@ -216,6 +216,31 @@ jobs:
             $env:LOCALAPPDATA = $previousLocalAppData
           }
 
+      - name: Smoke test release native session restore persistence and reload
+        shell: pwsh
+        run: |
+          $executable = Join-Path "target/release" "zorya.exe"
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "zorya-session-restore-persistence-release"
+          if (Test-Path -LiteralPath $smokeRoot) {
+            Remove-Item -LiteralPath $smokeRoot -Recurse -Force
+          }
+          $previousLocalAppData = $env:LOCALAPPDATA
+          $env:LOCALAPPDATA = $smokeRoot
+          try {
+            foreach ($attempt in 1..2) {
+              $process = Start-Process -FilePath $executable -ArgumentList "--native-session-restore-persistence-smoke" -PassThru -NoNewWindow
+              if (-not $process.WaitForExit(60000)) {
+                $process.Kill()
+                throw "release session restore persistence smoke attempt $attempt timed out"
+              }
+              if ($process.ExitCode -ne 0) {
+                throw "release session restore persistence smoke attempt $attempt failed with exit code $($process.ExitCode)"
+              }
+            }
+          } finally {
+            $env:LOCALAPPDATA = $previousLocalAppData
+          }
+
       - name: Smoke test release committed-page bookmark toggle persistence and reload
         shell: pwsh
         run: |
@@ -344,6 +369,27 @@ jobs:
               }
               if ($process.ExitCode -ne 0) {
                 throw "packaged bookmark persistence smoke attempt $attempt failed with exit code $($process.ExitCode)"
+              }
+            }
+          } finally {
+            $env:LOCALAPPDATA = $previousLocalAppData
+          }
+
+          $sessionSmokeRoot = Join-Path $env:RUNNER_TEMP "zorya-session-restore-persistence-package"
+          if (Test-Path -LiteralPath $sessionSmokeRoot) {
+            Remove-Item -LiteralPath $sessionSmokeRoot -Recurse -Force
+          }
+          $previousLocalAppData = $env:LOCALAPPDATA
+          $env:LOCALAPPDATA = $sessionSmokeRoot
+          try {
+            foreach ($attempt in 1..2) {
+              $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-session-restore-persistence-smoke" -PassThru -NoNewWindow
+              if (-not $process.WaitForExit(60000)) {
+                $process.Kill()
+                throw "packaged session restore persistence smoke attempt $attempt timed out"
+              }
+              if ($process.ExitCode -ne 0) {
+                throw "packaged session restore persistence smoke attempt $attempt failed with exit code $($process.ExitCode)"
               }
             }
           } finally {

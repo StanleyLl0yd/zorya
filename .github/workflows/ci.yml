@@ -141,6 +141,29 @@ jobs:
           } finally {
             $env:LOCALAPPDATA = $previousLocalAppData
           }
+      - name: Smoke test native session restore persistence and reload
+        shell: pwsh
+        run: |
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "zorya-session-restore-persistence-debug"
+          if (Test-Path -LiteralPath $smokeRoot) {
+            Remove-Item -LiteralPath $smokeRoot -Recurse -Force
+          }
+          $previousLocalAppData = $env:LOCALAPPDATA
+          $env:LOCALAPPDATA = $smokeRoot
+          try {
+            foreach ($attempt in 1..2) {
+              $process = Start-Process -FilePath ".\target\debug\zorya.exe" -ArgumentList "--native-session-restore-persistence-smoke" -PassThru -NoNewWindow
+              if (-not $process.WaitForExit(60000)) {
+                $process.Kill()
+                throw "native session restore persistence smoke attempt $attempt timed out"
+              }
+              if ($process.ExitCode -ne 0) {
+                throw "native session restore persistence smoke attempt $attempt failed with exit code $($process.ExitCode)"
+              }
+            }
+          } finally {
+            $env:LOCALAPPDATA = $previousLocalAppData
+          }
       - name: Smoke test native committed-page bookmark toggle persistence and reload
         shell: pwsh
         run: |
