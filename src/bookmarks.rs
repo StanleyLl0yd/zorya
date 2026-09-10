@@ -147,6 +147,13 @@ impl BookmarksSnapshot {
         Some(self.bookmarks.remove(index))
     }
 
+    pub(crate) fn remove_bookmarks_at_exact_location(&mut self, location: &str) -> usize {
+        let previous_len = self.bookmarks.len();
+        self.bookmarks
+            .retain(|bookmark| bookmark.location() != location);
+        previous_len - self.bookmarks.len()
+    }
+
     pub fn clear(&mut self) {
         self.bookmarks.clear();
     }

@@ -21,8 +21,8 @@ mod bookmarks_persistence;
 
 use bookmarks_persistence::{BookmarksRuntimeState, PendingProfileBookmarksSave};
 pub use bookmarks_persistence::{
-    ProfileBookmarksRuntimeError, ProfileBookmarksSaveCompletion, ProfileBookmarksSaveId,
-    ProfileBookmarksSaveIntent,
+    ProfileBookmarkToggleOutcome, ProfileBookmarksRuntimeError, ProfileBookmarksSaveCompletion,
+    ProfileBookmarksSaveId, ProfileBookmarksSaveIntent,
 };
 
 const COLOR_SCHEME_KEY: &str = "ui.color_scheme";

@@ -14,6 +14,8 @@ pub(crate) enum RunMode {
     ExitAfterProfileCycle,
     ExitAfterColorSchemeCycle,
     ExitAfterBookmarksPersistence,
+    ExitAfterBookmarkToggleAdd,
+    ExitAfterBookmarkToggleRemove,
 }
 
 #[cfg(target_os = "windows")]
