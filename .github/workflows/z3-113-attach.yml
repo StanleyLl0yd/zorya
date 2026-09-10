@@ -5,6 +5,7 @@ on:
     branches: [z3/session-restore-profile-attachment]
     paths:
       - scripts/z3_113_attach.py
+      - scripts/z3_113_worker_box.py
       - .github/workflows/z3-113-attach.yml
   workflow_dispatch:
 
@@ -30,7 +31,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply attachment
-        run: python3 scripts/z3_113_attach.py
+        run: |
+          python3 scripts/z3_113_attach.py
+          python3 scripts/z3_113_worker_box.py
       - name: Format
         run: |
           cargo fmt --all
