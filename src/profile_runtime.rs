@@ -14,6 +14,9 @@ use crate::profile_lock::{ProfileLock, ProfileLockError};
 use crate::profile_metadata::{
     ProfileDisplayName, ProfileMetadata, ProfileMetadataError, load_or_create_profile_metadata,
 };
+use crate::session_restore::{
+    SessionRestoreError, SessionRestoreRecovery, SessionRestoreSnapshot, SessionRestoreStore,
+};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -261,6 +264,8 @@ pub struct PreparedProfile {
     browsing_history_recovery: Option<BrowsingHistoryRecovery>,
     bookmarks: BookmarksSnapshot,
     bookmarks_recovery: Option<BookmarksRecovery>,
+    session_restore: SessionRestoreSnapshot,
+    session_restore_recovery: Option<SessionRestoreRecovery>,
 }
 
 impl PreparedProfile {
@@ -301,6 +306,14 @@ impl PreparedProfile {
             let bookmarks_recovery = bookmarks_load.recovery().cloned();
             let bookmarks = bookmarks_load.into_snapshot();
 
+            let session_restore_store = SessionRestoreStore::open(intent.root.clone())
+                .map_err(ProfilePreparationError::SessionRestore)?;
+            let session_restore_load = session_restore_store
+                .load()
+                .map_err(ProfilePreparationError::SessionRestore)?;
+            let session_restore_recovery = session_restore_load.recovery().cloned();
+            let session_restore = session_restore_load.into_snapshot();
+
             Ok((
                 storage_id,
                 metadata,
@@ -310,6 +323,8 @@ impl PreparedProfile {
                 browsing_history_recovery,
                 bookmarks,
                 bookmarks_recovery,
+                session_restore,
+                session_restore_recovery,
             ))
         })();
 
@@ -322,6 +337,8 @@ impl PreparedProfile {
             browsing_history_recovery,
             bookmarks,
             bookmarks_recovery,
+            session_restore,
+            session_restore_recovery,
         ) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -347,6 +364,8 @@ impl PreparedProfile {
             browsing_history_recovery,
             bookmarks,
             bookmarks_recovery,
+            session_restore,
+            session_restore_recovery,
         })
     }
 
@@ -390,6 +409,14 @@ impl PreparedProfile {
         self.bookmarks_recovery.as_ref()
     }
 
+    pub const fn session_restore(&self) -> &SessionRestoreSnapshot {
+        &self.session_restore
+    }
+
+    pub const fn session_restore_recovery(&self) -> Option<&SessionRestoreRecovery> {
+        self.session_restore_recovery.as_ref()
+    }
+
     #[cfg(any(test, target_os = "windows"))]
     pub(crate) fn into_profile_lock(self) -> ProfileLock {
         self.lock
@@ -405,6 +432,7 @@ pub enum ProfilePreparationError {
     Settings(ProfileSettingsError),
     BrowsingHistory(crate::browsing_history::BrowsingHistoryError),
     Bookmarks(BookmarksError),
+    SessionRestore(SessionRestoreError),
     LockRelease {
         preparation: Box<ProfilePreparationError>,
         release: ProfileLockError,
@@ -421,6 +449,7 @@ impl fmt::Display for ProfilePreparationError {
             Self::Settings(error) => error.fmt(formatter),
             Self::BrowsingHistory(error) => error.fmt(formatter),
             Self::Bookmarks(error) => error.fmt(formatter),
+            Self::SessionRestore(error) => error.fmt(formatter),
             Self::LockRelease {
                 preparation,
                 release,
@@ -442,6 +471,7 @@ impl std::error::Error for ProfilePreparationError {
             Self::Settings(error) => Some(error),
             Self::BrowsingHistory(error) => Some(error),
             Self::Bookmarks(error) => Some(error),
+            Self::SessionRestore(error) => Some(error),
             Self::LockRelease { preparation, .. } => Some(preparation.as_ref()),
         }
     }
@@ -459,6 +489,8 @@ pub struct ActiveProfile {
     browsing_history: BrowsingHistorySnapshot,
     browsing_history_recovery: Option<BrowsingHistoryRecovery>,
     bookmarks: BookmarksRuntimeState,
+    session_restore: SessionRestoreSnapshot,
+    session_restore_recovery: Option<SessionRestoreRecovery>,
     settings_revision: u64,
     durable_settings_revision: u64,
     browsing_history_revision: u64,
@@ -514,6 +546,14 @@ impl ActiveProfile {
 
     pub const fn bookmarks_recovery(&self) -> Option<&BookmarksRecovery> {
         self.bookmarks.recovery()
+    }
+
+    pub const fn session_restore(&self) -> &SessionRestoreSnapshot {
+        &self.session_restore
+    }
+
+    pub const fn session_restore_recovery(&self) -> Option<&SessionRestoreRecovery> {
+        self.session_restore_recovery.as_ref()
     }
 }
 
@@ -1126,6 +1166,8 @@ impl ProfileRuntime {
             browsing_history: prepared.browsing_history,
             browsing_history_recovery: prepared.browsing_history_recovery,
             bookmarks: BookmarksRuntimeState::new(prepared.bookmarks, prepared.bookmarks_recovery),
+            session_restore: prepared.session_restore,
+            session_restore_recovery: prepared.session_restore_recovery,
             settings_revision: 0,
             durable_settings_revision: 0,
             browsing_history_revision: 0,

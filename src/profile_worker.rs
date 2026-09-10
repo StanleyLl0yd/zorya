@@ -33,7 +33,7 @@ enum ProfileWorkerCommand {
 pub enum ProfileWorkerCompletion {
     Prepared {
         selection: ProfileSelectionId,
-        result: Result<PreparedProfile, ProfilePreparationError>,
+        result: Result<Box<PreparedProfile>, ProfilePreparationError>,
     },
     SettingsSaved(ProfileSettingsSaveCompletion),
     HistorySaved(ProfileHistorySaveCompletion),
@@ -316,7 +316,7 @@ fn profile_worker_main(
         let completion = match command {
             ProfileWorkerCommand::Prepare(intent) => {
                 let selection = intent.id();
-                let result = PreparedProfile::load(&intent);
+                let result = PreparedProfile::load(&intent).map(Box::new);
                 ProfileWorkerCompletion::Prepared { selection, result }
             }
             ProfileWorkerCommand::SaveSettings(intent) => {
@@ -540,7 +540,7 @@ mod tests {
             panic!("expected prepared profile completion");
         };
         assert_eq!(completed_selection, selection);
-        let prepared = result.unwrap();
+        let prepared = *result.unwrap();
         assert_eq!(prepared.selection(), selection);
         runtime.commit_selection(prepared).unwrap();
         assert_eq!(runtime.active_profile().unwrap().id().get(), 1);
@@ -841,7 +841,7 @@ mod tests {
         let ProfileWorkerCompletion::Prepared { result, .. } = completion else {
             panic!("expected prepared replacement profile");
         };
-        let rejection = runtime.commit_selection(result.unwrap()).unwrap_err();
+        let rejection = runtime.commit_selection(*result.unwrap()).unwrap_err();
         assert_eq!(
             rejection.error(),
             &ProfileRuntimeError::ActiveProfileNotDurable { profile: first }
@@ -912,7 +912,7 @@ mod tests {
             panic!("expected prepared profile completion");
         };
         assert_eq!(selection, first_id);
-        let rejection = runtime.commit_selection(result.unwrap()).unwrap_err();
+        let rejection = runtime.commit_selection(*result.unwrap()).unwrap_err();
         assert!(matches!(
             rejection.error(),
             ProfileRuntimeError::StaleSelection {
@@ -937,6 +937,6 @@ mod tests {
         let ProfileWorkerCompletion::Prepared { result, .. } = completion else {
             panic!("expected prepared profile completion");
         };
-        runtime.commit_selection(result.unwrap()).unwrap();
+        runtime.commit_selection(*result.unwrap()).unwrap();
     }
 }
