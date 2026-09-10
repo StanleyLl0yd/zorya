@@ -47,7 +47,9 @@ fn bookmark_save_identity_is_process_monotonic_across_profile_replacement() {
         .unwrap();
     let first_save = runtime.begin_bookmarks_save(first).unwrap();
     let first_save_id = first_save.id();
-    runtime.complete_bookmarks_save(first_save.execute()).unwrap();
+    runtime
+        .complete_bookmarks_save(first_save.execute())
+        .unwrap();
     assert!(!runtime.bookmarks_is_dirty(first).unwrap());
 
     let selection = runtime
