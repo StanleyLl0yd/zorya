@@ -14,6 +14,7 @@ pub(crate) enum RunMode {
     ExitAfterProfileCycle,
     ExitAfterColorSchemeCycle,
     ExitAfterBookmarksPersistence,
+    ExitAfterSessionRestorePersistence,
     ExitAfterBookmarkToggleAdd,
     ExitAfterBookmarkToggleRemove,
 }

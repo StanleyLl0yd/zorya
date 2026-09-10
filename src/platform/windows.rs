@@ -15,9 +15,11 @@ use crate::{
     ProfileCatalogCreateIntent, ProfileCatalogDiscoverIntent, ProfileCatalogEntry,
     ProfileHistorySavePolicy, ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileId,
     ProfileLock, ProfileLockOwner, ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent,
-    ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency,
-    ProfileStorageId, ProfileWorker, ProfileWorkerCompletion, TabActivationStart, TabCloseStart,
-    TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
+    ProfileSessionRestoreSavePolicy, ProfileSessionRestoreSaveScheduler,
+    ProfileSessionRestoreSaveUrgency, ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler,
+    ProfileSettingsSaveUrgency, ProfileStorageId, ProfileWorker, ProfileWorkerCompletion,
+    TabActivationStart, TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff,
+    TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -61,6 +63,11 @@ const BOOKMARKS_SAVE_MUTATION_THRESHOLD: u64 = 8;
 const BOOKMARKS_PERSISTENCE_SMOKE_TITLE: &str = "Zorya native bookmark persistence smoke";
 const BOOKMARKS_PERSISTENCE_SMOKE_LOCATION: &str =
     "https://example.test/zorya-bookmark-persistence-smoke";
+const SESSION_RESTORE_SAVE_DEBOUNCE_MILLIS: u64 = 1_000;
+const SESSION_RESTORE_SAVE_MAX_DIRTY_MILLIS: u64 = 10_000;
+const SESSION_RESTORE_SAVE_MUTATION_THRESHOLD: u64 = 8;
+const SESSION_RESTORE_PERSISTENCE_SMOKE_LOCATION: &str =
+    "https://example.test/zorya-session-restore-persistence-smoke";
 
 #[derive(Debug)]
 struct NativeProfileClock {
@@ -108,6 +115,15 @@ fn native_bookmarks_save_policy() -> ProfileBookmarksSavePolicy {
         BOOKMARKS_SAVE_MUTATION_THRESHOLD,
     )
     .expect("native bookmarks save policy is valid")
+}
+
+fn native_session_restore_save_policy() -> ProfileSessionRestoreSavePolicy {
+    ProfileSessionRestoreSavePolicy::new(
+        SESSION_RESTORE_SAVE_DEBOUNCE_MILLIS,
+        SESSION_RESTORE_SAVE_MAX_DIRTY_MILLIS,
+        SESSION_RESTORE_SAVE_MUTATION_THRESHOLD,
+    )
+    .expect("native session-restore save policy is valid")
 }
 
 const fn native_window_theme(preference: ColorSchemePreference) -> Option<Theme> {
@@ -561,6 +577,7 @@ struct NativeShell {
     settings_scheduler: ProfileSettingsSaveScheduler,
     history_scheduler: ProfileHistorySaveScheduler,
     bookmarks_scheduler: ProfileBookmarksSaveScheduler,
+    session_restore_scheduler: ProfileSessionRestoreSaveScheduler,
     profile_clock: NativeProfileClock,
     initial_profile_selection: Option<ProfileSelectionIntent>,
     profiles_root: PathBuf,
@@ -632,6 +649,9 @@ impl NativeShell {
             settings_scheduler: ProfileSettingsSaveScheduler::new(native_settings_save_policy()),
             history_scheduler: ProfileHistorySaveScheduler::new(native_history_save_policy()),
             bookmarks_scheduler: ProfileBookmarksSaveScheduler::new(native_bookmarks_save_policy()),
+            session_restore_scheduler: ProfileSessionRestoreSaveScheduler::new(
+                native_session_restore_save_policy(),
+            ),
             profile_clock: NativeProfileClock::new(),
             initial_profile_selection: Some(initial_profile_selection),
             profiles_root,
@@ -922,6 +942,41 @@ impl NativeShell {
                     BOOKMARKS_PERSISTENCE_SMOKE_LOCATION,
                 )
                 .map_err(|error| format!("failed to create bookmark smoke marker: {error}"))?;
+        }
+        self.shutdown(event_loop);
+        Ok(())
+    }
+
+    fn run_session_restore_persistence_smoke(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) -> Result<(), String> {
+        if self.run_mode != RunMode::ExitAfterSessionRestorePersistence {
+            return Err("session-restore persistence smoke started outside its run mode".into());
+        }
+        let profile = self.active_profile_id()?;
+        let marker_count = self
+            .profile_runtime
+            .active_session_restore(profile)
+            .map_err(|error| format!("failed to inspect active session restore: {error}"))?
+            .windows()
+            .iter()
+            .flat_map(|window| window.tabs().iter())
+            .filter(|tab| tab.location() == SESSION_RESTORE_PERSISTENCE_SMOKE_LOCATION)
+            .count();
+        if marker_count > 1 {
+            return Err(
+                "session-restore persistence smoke found duplicate persisted markers".into(),
+            );
+        }
+        if marker_count == 0 {
+            let window = self
+                .profile_runtime
+                .add_session_window(profile)
+                .map_err(|error| format!("failed to create session smoke window: {error}"))?;
+            self.profile_runtime
+                .add_session_tab(profile, window, SESSION_RESTORE_PERSISTENCE_SMOKE_LOCATION)
+                .map_err(|error| format!("failed to create session smoke tab: {error}"))?;
         }
         self.shutdown(event_loop);
         Ok(())
@@ -1339,6 +1394,58 @@ impl NativeShell {
         }
     }
 
+    fn drive_session_restore_save(
+        &mut self,
+        urgency: ProfileSessionRestoreSaveUrgency,
+    ) -> Result<(), String> {
+        let Some(profile) = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| profile.id())
+        else {
+            return Ok(());
+        };
+        let now_millis = self.profile_clock.now_millis();
+        let Some(intent) = self
+            .session_restore_scheduler
+            .poll(&mut self.profile_runtime, profile, now_millis, urgency)
+            .map_err(|error| format!("failed to schedule session-restore save: {error}"))?
+        else {
+            return Ok(());
+        };
+        let save = intent.id();
+        let worker = self
+            .profile_worker
+            .as_ref()
+            .ok_or_else(|| "profile worker is unavailable for session-restore save".to_string())?;
+
+        match worker.save_session_restore(intent) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let queue_full = error.is_full();
+                let message = error.to_string();
+                let intent = error.into_work();
+                debug_assert_eq!(intent.id(), save);
+                self.profile_runtime
+                    .cancel_session_restore_save(save)
+                    .map_err(|cancel| {
+                        format!(
+                            "failed to submit session-restore save {}: {message}; failed to cancel pending save: {cancel}",
+                            save.get()
+                        )
+                    })?;
+                if queue_full {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "failed to submit session-restore save {}: {message}",
+                        save.get()
+                    ))
+                }
+            }
+        }
+    }
+
     fn settings_flush_complete(&self) -> Result<bool, String> {
         let Some(profile) = self
             .profile_runtime
@@ -1394,10 +1501,32 @@ impl NativeShell {
             .map_err(|error| format!("failed to inspect bookmarks dirty state: {error}"))
     }
 
+    fn session_restore_flush_complete(&self) -> Result<bool, String> {
+        let Some(profile) = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| profile.id())
+        else {
+            return Ok(true);
+        };
+        if self
+            .profile_runtime
+            .pending_session_restore_save()
+            .is_some()
+        {
+            return Ok(false);
+        }
+        self.profile_runtime
+            .session_restore_is_dirty(profile)
+            .map(|dirty| !dirty)
+            .map_err(|error| format!("failed to inspect session-restore dirty state: {error}"))
+    }
+
     fn profile_flush_complete(&self) -> Result<bool, String> {
         Ok(self.settings_flush_complete()?
             && self.history_flush_complete()?
-            && self.bookmarks_flush_complete()?)
+            && self.bookmarks_flush_complete()?
+            && self.session_restore_flush_complete()?)
     }
 
     fn drive_profile_saves(&mut self, flush: bool) -> Result<(), String> {
@@ -1416,9 +1545,15 @@ impl NativeShell {
         } else {
             ProfileBookmarksSaveUrgency::Normal
         };
+        let session_restore_urgency = if flush {
+            ProfileSessionRestoreSaveUrgency::Flush
+        } else {
+            ProfileSessionRestoreSaveUrgency::Normal
+        };
         self.drive_settings_save(settings_urgency)?;
         self.drive_history_save(history_urgency)?;
-        self.drive_bookmarks_save(bookmarks_urgency)
+        self.drive_bookmarks_save(bookmarks_urgency)?;
+        self.drive_session_restore_save(session_restore_urgency)
     }
 
     fn next_profile_save_due_millis(&self) -> Option<u64> {
@@ -1426,6 +1561,7 @@ impl NativeShell {
             self.settings_scheduler.next_save_due_millis(),
             self.history_scheduler.next_save_due_millis(),
             self.bookmarks_scheduler.next_save_due_millis(),
+            self.session_restore_scheduler.next_save_due_millis(),
         ]
         .into_iter()
         .flatten()
@@ -2158,10 +2294,54 @@ impl NativeShell {
                     ),
                 }
             }
-            ProfileWorkerCompletion::SessionRestoreSaved(_) => self.fail(
-                event_loop,
-                "unexpected session-restore-save completion arrived without native session persistence wiring",
-            ),
+            ProfileWorkerCompletion::SessionRestoreSaved(completion) => {
+                let save = completion.id();
+                let storage_error = completion.result().as_ref().err().map(ToString::to_string);
+                match self
+                    .profile_runtime
+                    .complete_session_restore_save(completion)
+                {
+                    Ok(_) => {
+                        if let Some(error) = storage_error {
+                            if self.fatal_error.is_none() {
+                                self.fatal_error = Some(format!(
+                                    "session-restore save {} failed on profile worker: {error}",
+                                    save.get()
+                                ));
+                            }
+                            self.begin_shutdown();
+                            self.finish_shutdown(event_loop);
+                            return;
+                        }
+
+                        let flush = self.shutdown_requested || self.replacement_flush_requested();
+                        if let Err(error) = self.drive_profile_saves(flush) {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+                        if self.shutdown_requested {
+                            match self.profile_flush_complete() {
+                                Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
+                                Ok(false) => {}
+                                Err(error) => self.fail(event_loop, error),
+                            }
+                        } else if self.pending_profile_replacement.is_some() {
+                            match self.profile_flush_complete() {
+                                Ok(true) => self.continue_profile_replacement(event_loop),
+                                Ok(false) => {}
+                                Err(error) => self.fail(event_loop, error),
+                            }
+                        }
+                    }
+                    Err(error) => self.fail(
+                        event_loop,
+                        format!(
+                            "failed to reconcile session-restore save {}: {error}",
+                            save.get()
+                        ),
+                    ),
+                }
+            }
             ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
                 event_loop,
                 "unexpected profile rename completion arrived without native mutation UX",
@@ -3547,6 +3727,12 @@ impl NativeShell {
                             if let Err(error) = self.run_bookmarks_persistence_smoke(event_loop) {
                                 self.fail(event_loop, error);
                             }
+                        } else if self.run_mode == RunMode::ExitAfterSessionRestorePersistence {
+                            if let Err(error) =
+                                self.run_session_restore_persistence_smoke(event_loop)
+                            {
+                                self.fail(event_loop, error);
+                            }
                         } else if matches!(
                             self.run_mode,
                             RunMode::ExitAfterBookmarkToggleAdd
@@ -3861,7 +4047,11 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
                 .profile_runtime
                 .pending_browsing_history_save()
                 .is_some()
-            || self.profile_runtime.pending_bookmarks_save().is_some();
+            || self.profile_runtime.pending_bookmarks_save().is_some()
+            || self
+                .profile_runtime
+                .pending_session_restore_save()
+                .is_some();
         let next_save_due = self.next_profile_save_due_millis();
         let control_flow = if save_pending {
             ControlFlow::Wait

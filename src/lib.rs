@@ -19,6 +19,7 @@ mod profile_history_scheduler;
 mod profile_lock;
 mod profile_metadata;
 mod profile_runtime;
+mod profile_session_restore_scheduler;
 mod profile_settings_scheduler;
 mod profile_worker;
 mod session_restore;
@@ -92,6 +93,10 @@ pub use profile_runtime::{
     ProfileSessionRestoreSaveId, ProfileSessionRestoreSaveIntent, ProfileSettingsError,
     ProfileSettingsSaveCompletion, ProfileSettingsSaveId, ProfileSettingsSaveIntent,
 };
+pub use profile_session_restore_scheduler::{
+    ProfileSessionRestoreSavePolicy, ProfileSessionRestoreSavePolicyError,
+    ProfileSessionRestoreSaveScheduler, ProfileSessionRestoreSaveUrgency,
+};
 pub use profile_settings_scheduler::{
     ProfileSettingsSavePolicy, ProfileSettingsSavePolicyError, ProfileSettingsSaveScheduler,
     ProfileSettingsSaveUrgency,
@@ -157,6 +162,11 @@ pub fn run_native_color_scheme_smoke() -> Result<(), Box<dyn std::error::Error>>
 #[doc(hidden)]
 pub fn run_native_bookmarks_persistence_smoke() -> Result<(), Box<dyn std::error::Error>> {
     platform::run(platform::RunMode::ExitAfterBookmarksPersistence)
+}
+
+#[doc(hidden)]
+pub fn run_native_session_restore_persistence_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    platform::run(platform::RunMode::ExitAfterSessionRestorePersistence)
 }
 
 #[doc(hidden)]
