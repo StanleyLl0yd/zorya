@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 mod bookmarks_persistence;
 
-use bookmarks_persistence::BookmarksRuntimeState;
+use bookmarks_persistence::{BookmarksRuntimeState, PendingProfileBookmarksSave};
 pub use bookmarks_persistence::{
     ProfileBookmarksRuntimeError, ProfileBookmarksSaveCompletion, ProfileBookmarksSaveId,
     ProfileBookmarksSaveIntent,
@@ -969,10 +969,12 @@ pub struct ProfileRuntime {
     next_selection_id: u64,
     next_settings_save_id: u64,
     next_history_save_id: u64,
+    next_bookmarks_save_id: u64,
     active: Option<ActiveProfile>,
     pending: Option<ProfileSelectionIntent>,
     pending_settings_save: Option<PendingProfileSettingsSave>,
     pending_history_save: Option<PendingProfileHistorySave>,
+    pending_bookmarks_save: Option<PendingProfileBookmarksSave>,
 }
 
 impl Default for ProfileRuntime {
@@ -988,10 +990,12 @@ impl ProfileRuntime {
             next_selection_id: 1,
             next_settings_save_id: 1,
             next_history_save_id: 1,
+            next_bookmarks_save_id: 1,
             active: None,
             pending: None,
             pending_settings_save: None,
             pending_history_save: None,
+            pending_bookmarks_save: None,
         }
     }
 
@@ -1088,11 +1092,13 @@ impl ProfileRuntime {
                 });
             }
 
-            let persistence_pending =
-                self.pending_settings_save.is_some() || self.pending_history_save.is_some();
+            let persistence_pending = self.pending_settings_save.is_some()
+                || self.pending_history_save.is_some()
+                || self.pending_bookmarks_save.is_some();
             let persistence_dirty = active.settings_revision != active.durable_settings_revision
-                || active.browsing_history_revision != active.durable_browsing_history_revision;
-            if persistence_pending || persistence_dirty || !active.bookmarks.is_durable() {
+                || active.browsing_history_revision != active.durable_browsing_history_revision
+                || active.bookmarks.is_dirty();
+            if persistence_pending || persistence_dirty {
                 return Err(ProfileSelectionCommitError {
                     error: ProfileRuntimeError::ActiveProfileNotDurable { profile: active.id },
                     prepared: Box::new(prepared),

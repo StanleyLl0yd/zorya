@@ -103,8 +103,9 @@ impl ProfileBookmarksSaveCompletion {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PendingBookmarksSave {
+pub(super) struct PendingProfileBookmarksSave {
     id: ProfileBookmarksSaveId,
+    profile: ProfileId,
     base_generation: u64,
     mutation_revision: u64,
 }
@@ -115,8 +116,6 @@ pub(super) struct BookmarksRuntimeState {
     recovery: Option<BookmarksRecovery>,
     mutation_revision: u64,
     durable_revision: u64,
-    next_save_id: u64,
-    pending_save: Option<PendingBookmarksSave>,
 }
 
 impl BookmarksRuntimeState {
@@ -129,8 +128,6 @@ impl BookmarksRuntimeState {
             recovery,
             mutation_revision: 0,
             durable_revision: 0,
-            next_save_id: 1,
-            pending_save: None,
         }
     }
 
@@ -142,8 +139,8 @@ impl BookmarksRuntimeState {
         self.recovery.as_ref()
     }
 
-    pub(super) const fn is_durable(&self) -> bool {
-        self.pending_save.is_none() && self.mutation_revision == self.durable_revision
+    pub(super) const fn is_dirty(&self) -> bool {
+        self.mutation_revision != self.durable_revision
     }
 }
 
@@ -309,12 +306,12 @@ impl ProfileRuntime {
         Ok(self.active_bookmarks_state(profile)?.mutation_revision)
     }
 
-    pub fn pending_bookmarks_save(&self) -> Option<ProfileBookmarksSaveId> {
-        self.active
-            .as_ref()
-            .and_then(|active| active.bookmarks.pending_save.map(|pending| pending.id))
+    pub const fn pending_bookmarks_save(&self) -> Option<ProfileBookmarksSaveId> {
+        match self.pending_bookmarks_save {
+            Some(pending) => Some(pending.id),
+            None => None,
+        }
     }
-
     pub fn add_bookmark(
         &mut self,
         profile: ProfileId,
@@ -422,27 +419,26 @@ impl ProfileRuntime {
                 actual: profile,
             });
         }
-        let active = self.active.as_mut().expect("active profile was validated");
-        if let Some(pending) = active.bookmarks.pending_save {
+        if let Some(pending) = self.pending_bookmarks_save {
             return Err(ProfileBookmarksRuntimeError::SaveAlreadyPending {
                 pending: pending.id,
             });
         }
 
-        let id = ProfileBookmarksSaveId(active.bookmarks.next_save_id);
-        let next_save_id = active
-            .bookmarks
-            .next_save_id
-            .checked_add(1)
-            .ok_or(ProfileBookmarksRuntimeError::SaveIdExhausted)?;
+        let active = self.active.as_ref().expect("active profile was validated");
         let root = active.root.clone();
         let lock = active.lock.clone();
         let snapshot = active.bookmarks.snapshot.clone();
         let base_generation = snapshot.generation();
         let mutation_revision = active.bookmarks.mutation_revision;
-        active.bookmarks.next_save_id = next_save_id;
-        active.bookmarks.pending_save = Some(PendingBookmarksSave {
+        let id = ProfileBookmarksSaveId(self.next_bookmarks_save_id);
+        self.next_bookmarks_save_id = self
+            .next_bookmarks_save_id
+            .checked_add(1)
+            .ok_or(ProfileBookmarksRuntimeError::SaveIdExhausted)?;
+        self.pending_bookmarks_save = Some(PendingProfileBookmarksSave {
             id,
+            profile,
             base_generation,
             mutation_revision,
         });
@@ -455,37 +451,25 @@ impl ProfileRuntime {
             mutation_revision,
         })
     }
-
     pub fn cancel_bookmarks_save(
         &mut self,
         save: ProfileBookmarksSaveId,
     ) -> Result<(), ProfileBookmarksRuntimeError> {
-        let expected = self
-            .active
-            .as_ref()
-            .and_then(|active| active.bookmarks.pending_save.map(|pending| pending.id));
+        let expected = self.pending_bookmarks_save.map(|pending| pending.id);
         if expected != Some(save) {
             return Err(ProfileBookmarksRuntimeError::StaleSave {
                 expected,
                 actual: save,
             });
         }
-        self.active
-            .as_mut()
-            .expect("pending bookmarks save requires an active profile")
-            .bookmarks
-            .pending_save = None;
+        self.pending_bookmarks_save = None;
         Ok(())
     }
-
     pub fn complete_bookmarks_save(
         &mut self,
         completion: ProfileBookmarksSaveCompletion,
     ) -> Result<ProfileBookmarksSaveCompletion, ProfileBookmarksRuntimeError> {
-        let expected = self
-            .active
-            .as_ref()
-            .and_then(|active| active.bookmarks.pending_save.map(|pending| pending.id));
+        let expected = self.pending_bookmarks_save.map(|pending| pending.id);
         if expected != Some(completion.id) {
             return Err(ProfileBookmarksRuntimeError::StaleSave {
                 expected,
@@ -493,26 +477,32 @@ impl ProfileRuntime {
             });
         }
 
-        let active = self
-            .active
-            .as_mut()
-            .expect("pending bookmarks save requires an active profile");
-        let pending = active
-            .bookmarks
-            .pending_save
+        let pending = self
+            .pending_bookmarks_save
             .expect("pending bookmarks save was validated");
-        if active.id != completion.profile
-            || active.root != completion.root
+        let active =
+            self.active
+                .as_ref()
+                .ok_or(ProfileBookmarksRuntimeError::SaveTargetMismatch {
+                    save: completion.id,
+                })?;
+        if pending.profile != completion.profile
             || pending.base_generation != completion.base_generation
             || pending.mutation_revision != completion.mutation_revision
+            || active.id != completion.profile
+            || active.root != completion.root
         {
             return Err(ProfileBookmarksRuntimeError::SaveTargetMismatch {
                 save: completion.id,
             });
         }
 
-        active.bookmarks.pending_save = None;
+        self.pending_bookmarks_save = None;
         if let Ok(saved) = &completion.result {
+            let active = self
+                .active
+                .as_mut()
+                .expect("bookmarks save target was validated");
             let current_generation = active.bookmarks.snapshot.generation();
             let saved_generation = saved.snapshot().generation();
             if !active
@@ -810,7 +800,7 @@ mod tests {
         runtime
             .add_bookmark(profile, "Example", "https://example.test/")
             .unwrap();
-        runtime.active.as_mut().unwrap().bookmarks.next_save_id = u64::MAX;
+        runtime.next_bookmarks_save_id = u64::MAX;
         assert_eq!(
             runtime.begin_bookmarks_save(profile),
             Err(ProfileBookmarksRuntimeError::SaveIdExhausted)
