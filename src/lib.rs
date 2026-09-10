@@ -1,6 +1,7 @@
 mod app;
 #[cfg(any(target_os = "windows", test))]
 mod async_lifecycle;
+mod bookmarks;
 #[cfg(target_os = "windows")]
 mod branding;
 mod browsing_history;
@@ -26,6 +27,12 @@ mod tab_strip;
 pub use app::{
     BrowserApp, BrowserModelError, BrowserNavigationCommit, BrowserWindow, BrowserWindowId, Tab,
     TabCloseResult, TabId,
+};
+pub use bookmarks::{
+    BOOKMARKS_SCHEMA_VERSION, Bookmark, BookmarkId, BookmarksCleanupWarning, BookmarksError,
+    BookmarksLoad, BookmarksRecovery, BookmarksSave, BookmarksSnapshot, BookmarksStore,
+    MAX_BOOKMARK_LOCATION_BYTES, MAX_BOOKMARK_TITLE_BYTES, MAX_BOOKMARKS,
+    MAX_BOOKMARKS_RECORD_BYTES,
 };
 pub use browsing_history::{
     BROWSING_HISTORY_SCHEMA_VERSION, BrowsingHistoryCleanupWarning, BrowsingHistoryError,
