@@ -26,10 +26,12 @@ impl ProfileSessionRestoreSavePolicy {
             return Err(ProfileSessionRestoreSavePolicyError::ZeroMutationThreshold);
         }
         if max_dirty_millis < debounce_millis {
-            return Err(ProfileSessionRestoreSavePolicyError::MaxDirtyAgeBeforeDebounce {
-                debounce_millis,
-                max_dirty_millis,
-            });
+            return Err(
+                ProfileSessionRestoreSavePolicyError::MaxDirtyAgeBeforeDebounce {
+                    debounce_millis,
+                    max_dirty_millis,
+                },
+            );
         }
         Ok(Self {
             debounce_millis,
@@ -258,12 +260,8 @@ mod tests {
         max_dirty_millis: u64,
         mutation_threshold: u64,
     ) -> ProfileSessionRestoreSavePolicy {
-        ProfileSessionRestoreSavePolicy::new(
-            debounce_millis,
-            max_dirty_millis,
-            mutation_threshold,
-        )
-        .unwrap()
+        ProfileSessionRestoreSavePolicy::new(debounce_millis, max_dirty_millis, mutation_threshold)
+            .unwrap()
     }
 
     fn load_profile(runtime: &mut ProfileRuntime, root: &Path) -> ProfileId {
@@ -305,10 +303,12 @@ mod tests {
         );
         assert_eq!(
             ProfileSessionRestoreSavePolicy::new(10, 9, 1),
-            Err(ProfileSessionRestoreSavePolicyError::MaxDirtyAgeBeforeDebounce {
-                debounce_millis: 10,
-                max_dirty_millis: 9,
-            })
+            Err(
+                ProfileSessionRestoreSavePolicyError::MaxDirtyAgeBeforeDebounce {
+                    debounce_millis: 10,
+                    max_dirty_millis: 9,
+                }
+            )
         );
     }
 
@@ -343,12 +343,42 @@ mod tests {
         let mut scheduler = ProfileSessionRestoreSaveScheduler::new(policy(10, 100, 10));
 
         mutate(&mut runtime, profile);
-        assert!(!scheduled(&mut scheduler, &mut runtime, profile, 0, ProfileSessionRestoreSaveUrgency::Normal));
-        assert!(!scheduled(&mut scheduler, &mut runtime, profile, 9, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            0,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            9,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
         mutate(&mut runtime, profile);
-        assert!(!scheduled(&mut scheduler, &mut runtime, profile, 9, ProfileSessionRestoreSaveUrgency::Normal));
-        assert!(!scheduled(&mut scheduler, &mut runtime, profile, 18, ProfileSessionRestoreSaveUrgency::Normal));
-        assert!(scheduled(&mut scheduler, &mut runtime, profile, 19, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            9,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            18,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
+        assert!(scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            19,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
     }
 
     #[test]
@@ -360,15 +390,39 @@ mod tests {
 
         assert_eq!(scheduler.next_save_due_millis(), None);
         mutate(&mut runtime, profile);
-        assert!(!scheduled(&mut scheduler, &mut runtime, profile, 0, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            0,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
         assert_eq!(scheduler.next_save_due_millis(), Some(10));
         mutate(&mut runtime, profile);
-        assert!(!scheduled(&mut scheduler, &mut runtime, profile, 9, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            9,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
         assert_eq!(scheduler.next_save_due_millis(), Some(19));
         mutate(&mut runtime, profile);
-        assert!(!scheduled(&mut scheduler, &mut runtime, profile, 15, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            15,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
         assert_eq!(scheduler.next_save_due_millis(), Some(20));
-        assert!(scheduled(&mut scheduler, &mut runtime, profile, 20, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            20,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
         assert_eq!(scheduler.next_save_due_millis(), None);
     }
 
@@ -377,18 +431,37 @@ mod tests {
         let threshold_root = TempRoot::new();
         let mut threshold_runtime = ProfileRuntime::new();
         let threshold_profile = load_profile(&mut threshold_runtime, threshold_root.path());
-        let mut threshold_scheduler = ProfileSessionRestoreSaveScheduler::new(policy(100, 1_000, 2));
+        let mut threshold_scheduler =
+            ProfileSessionRestoreSaveScheduler::new(policy(100, 1_000, 2));
         mutate(&mut threshold_runtime, threshold_profile);
-        assert!(!scheduled(&mut threshold_scheduler, &mut threshold_runtime, threshold_profile, 0, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(!scheduled(
+            &mut threshold_scheduler,
+            &mut threshold_runtime,
+            threshold_profile,
+            0,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
         mutate(&mut threshold_runtime, threshold_profile);
-        assert!(scheduled(&mut threshold_scheduler, &mut threshold_runtime, threshold_profile, 1, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(scheduled(
+            &mut threshold_scheduler,
+            &mut threshold_runtime,
+            threshold_profile,
+            1,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
 
         let flush_root = TempRoot::new();
         let mut flush_runtime = ProfileRuntime::new();
         let flush_profile = load_profile(&mut flush_runtime, flush_root.path());
         let mut flush_scheduler = ProfileSessionRestoreSaveScheduler::new(policy(100, 1_000, 10));
         mutate(&mut flush_runtime, flush_profile);
-        assert!(scheduled(&mut flush_scheduler, &mut flush_runtime, flush_profile, 0, ProfileSessionRestoreSaveUrgency::Flush));
+        assert!(scheduled(
+            &mut flush_scheduler,
+            &mut flush_runtime,
+            flush_profile,
+            0,
+            ProfileSessionRestoreSaveUrgency::Flush
+        ));
 
         let age_root = TempRoot::new();
         let mut age_runtime = ProfileRuntime::new();
@@ -396,10 +469,22 @@ mod tests {
         let mut age_scheduler = ProfileSessionRestoreSaveScheduler::new(policy(10, 20, 100));
         for now in [0, 5, 10, 15] {
             mutate(&mut age_runtime, age_profile);
-            assert!(!scheduled(&mut age_scheduler, &mut age_runtime, age_profile, now, ProfileSessionRestoreSaveUrgency::Normal));
+            assert!(!scheduled(
+                &mut age_scheduler,
+                &mut age_runtime,
+                age_profile,
+                now,
+                ProfileSessionRestoreSaveUrgency::Normal
+            ));
         }
         mutate(&mut age_runtime, age_profile);
-        assert!(scheduled(&mut age_scheduler, &mut age_runtime, age_profile, 20, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(scheduled(
+            &mut age_scheduler,
+            &mut age_runtime,
+            age_profile,
+            20,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
     }
 
     #[test]
@@ -409,8 +494,20 @@ mod tests {
         let profile = load_profile(&mut runtime, root.path());
         let mut scheduler = ProfileSessionRestoreSaveScheduler::new(policy(100, 1_000, 100));
         mutate(&mut runtime, profile);
-        assert!(!scheduled(&mut scheduler, &mut runtime, profile, 100, ProfileSessionRestoreSaveUrgency::Normal));
-        assert!(scheduled(&mut scheduler, &mut runtime, profile, 99, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            100,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
+        assert!(scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            99,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
     }
 
     #[test]
@@ -421,20 +518,44 @@ mod tests {
         let mut scheduler = ProfileSessionRestoreSaveScheduler::new(policy(10, 100, 100));
         mutate(&mut runtime, profile);
         let first = scheduler
-            .poll(&mut runtime, profile, 0, ProfileSessionRestoreSaveUrgency::Flush)
+            .poll(
+                &mut runtime,
+                profile,
+                0,
+                ProfileSessionRestoreSaveUrgency::Flush,
+            )
             .unwrap()
             .unwrap();
         mutate(&mut runtime, profile);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 1, ProfileSessionRestoreSaveUrgency::Flush)
-            .unwrap()
-            .is_none());
-        runtime.complete_session_restore_save(first.execute()).unwrap();
-        assert_eq!(runtime.session_restore_unsaved_mutations(profile).unwrap(), 1);
-        assert!(scheduler
-            .poll(&mut runtime, profile, 1, ProfileSessionRestoreSaveUrgency::Flush)
-            .unwrap()
-            .is_some());
+        assert!(
+            scheduler
+                .poll(
+                    &mut runtime,
+                    profile,
+                    1,
+                    ProfileSessionRestoreSaveUrgency::Flush
+                )
+                .unwrap()
+                .is_none()
+        );
+        runtime
+            .complete_session_restore_save(first.execute())
+            .unwrap();
+        assert_eq!(
+            runtime.session_restore_unsaved_mutations(profile).unwrap(),
+            1
+        );
+        assert!(
+            scheduler
+                .poll(
+                    &mut runtime,
+                    profile,
+                    1,
+                    ProfileSessionRestoreSaveUrgency::Flush
+                )
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -445,14 +566,31 @@ mod tests {
         let mut scheduler = ProfileSessionRestoreSaveScheduler::new(policy(10, 100, 100));
         mutate(&mut runtime, profile);
         let save = scheduler
-            .poll(&mut runtime, profile, 0, ProfileSessionRestoreSaveUrgency::Flush)
+            .poll(
+                &mut runtime,
+                profile,
+                0,
+                ProfileSessionRestoreSaveUrgency::Flush,
+            )
             .unwrap()
             .unwrap()
             .id();
         runtime.cancel_session_restore_save(save).unwrap();
-        assert!(!scheduled(&mut scheduler, &mut runtime, profile, 1, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            1,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
         assert_eq!(scheduler.next_save_due_millis(), Some(11));
-        assert!(scheduled(&mut scheduler, &mut runtime, profile, 11, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(scheduled(
+            &mut scheduler,
+            &mut runtime,
+            profile,
+            11,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
     }
 
     #[test]
@@ -462,9 +600,18 @@ mod tests {
         let mut runtime = ProfileRuntime::new();
         let first = load_profile(&mut runtime, first_root.path());
         let mut scheduler = ProfileSessionRestoreSaveScheduler::new(policy(10, 100, 100));
-        assert!(!scheduled(&mut scheduler, &mut runtime, first, 0, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            first,
+            0,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
 
-        let selection = runtime.begin_selection(second_root.path()).unwrap().into_intent();
+        let selection = runtime
+            .begin_selection(second_root.path())
+            .unwrap()
+            .into_intent();
         let prepared = PreparedProfile::load(&selection).unwrap();
         let replacement = runtime.commit_selection(prepared).unwrap();
         let second = replacement.active_profile();
@@ -483,7 +630,13 @@ mod tests {
             }) if expected == second && actual == first
         ));
         assert_eq!(scheduler.tracked_profile(), Some(first));
-        assert!(!scheduled(&mut scheduler, &mut runtime, second, 2, ProfileSessionRestoreSaveUrgency::Normal));
+        assert!(!scheduled(
+            &mut scheduler,
+            &mut runtime,
+            second,
+            2,
+            ProfileSessionRestoreSaveUrgency::Normal
+        ));
         assert_eq!(scheduler.tracked_profile(), Some(second));
     }
 }
