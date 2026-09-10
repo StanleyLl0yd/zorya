@@ -10,12 +10,13 @@ use crate::engine::{
 use crate::{
     BrowserApp, BrowserCommand, BrowserCommandEffect, BrowserNavigationCommit, BrowserWindowId,
     NavigationId, NavigationStart, PreparedProfile, PresentationFramePermit,
-    PresentationGeneration, PresentationHandoffError, ProfileHistorySavePolicy,
+    PresentationGeneration, PresentationHandoffError, ProfileCatalogCreateIntent,
+    ProfileCatalogDiscoverIntent, ProfileCatalogEntry, ProfileHistorySavePolicy,
     ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileId, ProfileLock,
     ProfileLockOwner, ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent,
     ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency,
-    ProfileWorker, ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection,
-    TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
+    ProfileStorageId, ProfileWorker, ProfileWorkerCompletion, TabActivationStart, TabCloseStart,
+    TabCycleDirection, TabId, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -161,23 +162,22 @@ fn spawn_http_smoke_server() -> Result<String, std::io::Error> {
     Ok(format!("http://{address}/zorya-http-smoke"))
 }
 
-fn profile_root_from_local_app_data(local_app_data: Option<OsString>) -> io::Result<PathBuf> {
+fn profiles_root_from_local_app_data(local_app_data: Option<OsString>) -> io::Result<PathBuf> {
     let local_app_data = local_app_data
         .filter(|value| !value.as_os_str().is_empty())
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "LOCALAPPDATA is unavailable for the default Zorya profile",
+                "LOCALAPPDATA is unavailable for Zorya profiles",
             )
         })?;
     Ok(PathBuf::from(local_app_data)
         .join(PRODUCT_DATA_DIRECTORY)
-        .join(PROFILES_DIRECTORY)
-        .join(DEFAULT_PROFILE_DIRECTORY))
+        .join(PROFILES_DIRECTORY))
 }
 
-fn default_profile_root() -> io::Result<PathBuf> {
-    profile_root_from_local_app_data(std::env::var_os("LOCALAPPDATA"))
+fn profile_root_from_local_app_data(local_app_data: Option<OsString>) -> io::Result<PathBuf> {
+    Ok(profiles_root_from_local_app_data(local_app_data)?.join(DEFAULT_PROFILE_DIRECTORY))
 }
 
 fn current_unix_millis() -> Result<u64, String> {
@@ -186,6 +186,32 @@ fn current_unix_millis() -> Result<u64, String> {
         .map_err(|error| format!("system clock precedes Unix epoch: {error}"))?;
     u64::try_from(elapsed.as_millis())
         .map_err(|_| "system time exceeds browsing-history timestamp range".to_string())
+}
+
+fn next_profile_cycle_root(
+    entries: &[ProfileCatalogEntry],
+    active: ProfileStorageId,
+) -> Result<Option<PathBuf>, String> {
+    let complete = entries
+        .iter()
+        .filter(|entry| entry.storage_id().is_some() && entry.metadata().is_some())
+        .collect::<Vec<_>>();
+    let Some(active_index) = complete
+        .iter()
+        .position(|entry| entry.storage_id() == Some(active))
+    else {
+        return Err(format!(
+            "active profile storage identity {active} is missing from the discovered catalog"
+        ));
+    };
+    if complete.len() < 2 {
+        return Ok(None);
+    }
+    Ok(Some(
+        complete[(active_index + 1) % complete.len()]
+            .root()
+            .to_owned(),
+    ))
 }
 
 fn browser_navigation_quiescent(browser: &BrowserApp, window: BrowserWindowId) -> bool {
@@ -240,9 +266,14 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         .intent()
         .id();
     let proxy = event_loop.create_proxy();
+    let initial_profile_root = profile_root_from_local_app_data(std::env::var_os("LOCALAPPDATA"))?;
+    let profiles_root = initial_profile_root
+        .parent()
+        .expect("default profile root has a Profiles parent")
+        .to_owned();
     let mut profile_runtime = ProfileRuntime::new();
     let initial_profile_selection = profile_runtime
-        .begin_selection(default_profile_root()?)?
+        .begin_selection(initial_profile_root)?
         .into_intent();
     let profile_worker = ProfileWorker::spawn({
         let proxy = proxy.clone();
@@ -258,6 +289,7 @@ pub(crate) fn run(mode: RunMode) -> Result<(), Box<dyn Error>> {
         profile_runtime,
         profile_worker,
         initial_profile_selection,
+        profiles_root,
         http_smoke_location,
     };
     let mut shell = NativeShell::new(startup, proxy, mode);
@@ -305,6 +337,10 @@ enum WorkerEvent {
         target: WorkerNavigationTarget,
         result: Result<bool, String>,
     },
+    ProfileSessionReset {
+        target: AsyncTarget,
+        result: Result<(), String>,
+    },
 }
 
 enum WorkerCommand {
@@ -333,6 +369,10 @@ enum WorkerCommand {
     },
     CancelNavigation {
         target: WorkerNavigationTarget,
+    },
+    ResetProfileSession {
+        target: AsyncTarget,
+        generation: PresentationGeneration,
     },
 }
 
@@ -419,6 +459,14 @@ impl WorkerHandle {
         self.send(WorkerCommand::CancelNavigation { target })
     }
 
+    fn reset_profile_session(
+        &self,
+        target: AsyncTarget,
+        generation: PresentationGeneration,
+    ) -> Result<(), String> {
+        self.send(WorkerCommand::ResetProfileSession { target, generation })
+    }
+
     fn send(&self, command: WorkerCommand) -> Result<(), String> {
         if self.cancellation.is_cancelled() {
             return Err("render worker is cancelled".into());
@@ -457,6 +505,18 @@ struct PendingNativeTabCreate {
     activate_after_create: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingProfileCatalogDiscovery {
+    intent: ProfileCatalogDiscoverIntent,
+    submitted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingProfileSmokeCreate {
+    intent: ProfileCatalogCreateIntent,
+    submitted: bool,
+}
+
 struct NativeShellStartup {
     browser: BrowserApp,
     browser_window: BrowserWindowId,
@@ -465,6 +525,7 @@ struct NativeShellStartup {
     profile_runtime: ProfileRuntime,
     profile_worker: ProfileWorker,
     initial_profile_selection: ProfileSelectionIntent,
+    profiles_root: PathBuf,
     http_smoke_location: Option<String>,
 }
 
@@ -477,7 +538,13 @@ struct NativeShell {
     history_scheduler: ProfileHistorySaveScheduler,
     profile_clock: NativeProfileClock,
     initial_profile_selection: Option<ProfileSelectionIntent>,
+    profiles_root: PathBuf,
+    pending_profile_catalog_discovery: Option<PendingProfileCatalogDiscovery>,
+    pending_profile_smoke_create: Option<PendingProfileSmokeCreate>,
+    profile_cycle_smoke_start: Option<ProfileStorageId>,
+    pending_profile_selection_submission: Option<ProfileSelectionIntent>,
     pending_profile_replacement: Option<PreparedProfile>,
+    pending_profile_session_reset: PendingRequest,
     tab: TabId,
     presentation: TabPresentationHandoff,
     pending_target_permit: Option<TargetFramePermit>,
@@ -527,6 +594,7 @@ impl NativeShell {
             profile_runtime,
             profile_worker,
             initial_profile_selection,
+            profiles_root,
             http_smoke_location,
         } = startup;
         Self {
@@ -538,7 +606,13 @@ impl NativeShell {
             history_scheduler: ProfileHistorySaveScheduler::new(native_history_save_policy()),
             profile_clock: NativeProfileClock::new(),
             initial_profile_selection: Some(initial_profile_selection),
+            profiles_root,
+            pending_profile_catalog_discovery: None,
+            pending_profile_smoke_create: None,
+            profile_cycle_smoke_start: None,
+            pending_profile_selection_submission: None,
             pending_profile_replacement: None,
+            pending_profile_session_reset: PendingRequest::default(),
             tab,
             presentation: TabPresentationHandoff::new(tab),
             pending_target_permit: None,
@@ -598,12 +672,281 @@ impl NativeShell {
     }
 
     fn profile_transition_in_progress(&self) -> bool {
-        self.profile_runtime.pending_selection().is_some()
+        self.pending_profile_catalog_discovery.is_some()
+            || self.pending_profile_smoke_create.is_some()
+            || self.profile_runtime.pending_selection().is_some()
+            || self.pending_profile_selection_submission.is_some()
             || self.pending_profile_replacement.is_some()
+            || self.pending_profile_session_reset.is_pending()
             || self.replaced_profile_lock.is_some()
             || self.pending_profile_lock_release.is_some_and(|pending| {
                 pending.purpose == ProfileLockReleasePurpose::ReplacedProfile
             })
+    }
+
+    fn profile_cycle_smoke_trace(&self, stage: &str) {
+        if self.run_mode == RunMode::ExitAfterProfileCycle {
+            eprintln!("zorya profile-cycle smoke: {stage}");
+        }
+    }
+
+    fn update_window_title(&self) {
+        let title = self
+            .profile_runtime
+            .active_profile()
+            .map(|profile| format!("Zorya — {}", profile.metadata().display_name()))
+            .unwrap_or_else(|| "Zorya".to_string());
+        if let Some(window) = &self.window {
+            window.set_title(&title);
+        }
+    }
+
+    fn begin_profile_cycle_smoke_create(&mut self) -> Result<(), String> {
+        if self.run_mode != RunMode::ExitAfterProfileCycle {
+            return Err("profile-cycle smoke creation started outside its run mode".into());
+        }
+        if self.profile_cycle_smoke_start.is_some() || self.pending_profile_smoke_create.is_some() {
+            return Ok(());
+        }
+        let active = self
+            .profile_runtime
+            .active_profile()
+            .ok_or_else(|| "profile-cycle smoke requires an active profile".to_string())?
+            .storage_id();
+        let intent = ProfileCatalogCreateIntent::new(
+            self.profiles_root.clone(),
+            "Native profile switch smoke",
+        )
+        .map_err(|error| format!("failed to build profile-cycle smoke profile: {error}"))?;
+        self.profile_cycle_smoke_start = Some(active);
+        self.profile_cycle_smoke_trace("begin create");
+        self.pending_profile_smoke_create = Some(PendingProfileSmokeCreate {
+            intent,
+            submitted: false,
+        });
+        self.drive_profile_cycle_smoke_create()
+    }
+
+    fn drive_profile_cycle_smoke_create(&mut self) -> Result<(), String> {
+        let Some(pending) = self.pending_profile_smoke_create.as_ref() else {
+            return Ok(());
+        };
+        if pending.submitted {
+            return Ok(());
+        }
+        let intent = pending.intent.clone();
+        let worker = self
+            .profile_worker
+            .as_ref()
+            .ok_or_else(|| "profile worker is unavailable for profile-cycle smoke".to_string())?;
+        match worker.create_profile(intent) {
+            Ok(()) => {
+                self.profile_cycle_smoke_trace("create submitted");
+                self.pending_profile_smoke_create
+                    .as_mut()
+                    .expect("profile-cycle smoke creation remains pending")
+                    .submitted = true;
+                Ok(())
+            }
+            Err(error) if error.is_full() => {
+                let returned = error.into_work();
+                self.pending_profile_smoke_create
+                    .as_mut()
+                    .expect("profile-cycle smoke creation remains pending")
+                    .intent = returned;
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let returned = error.into_work();
+                let expected = self
+                    .pending_profile_smoke_create
+                    .take()
+                    .expect("profile-cycle smoke creation remains pending")
+                    .intent;
+                debug_assert_eq!(returned, expected);
+                Err(format!(
+                    "failed to submit profile-cycle smoke profile creation: {message}"
+                ))
+            }
+        }
+    }
+
+    fn begin_profile_cycle(&mut self) -> Result<(), String> {
+        if self.shutdown_requested || self.profile_transition_in_progress() {
+            return Ok(());
+        }
+        self.active_profile_id()?;
+        self.profile_cycle_smoke_trace("begin catalog discovery");
+        let intent = ProfileCatalogDiscoverIntent::new(self.profiles_root.clone());
+        self.pending_profile_catalog_discovery = Some(PendingProfileCatalogDiscovery {
+            intent,
+            submitted: false,
+        });
+        self.drive_profile_catalog_discovery()
+    }
+
+    fn drive_profile_catalog_discovery(&mut self) -> Result<(), String> {
+        let Some(pending) = self.pending_profile_catalog_discovery.as_ref() else {
+            return Ok(());
+        };
+        if pending.submitted {
+            return Ok(());
+        }
+        let intent = pending.intent.clone();
+        let worker = self
+            .profile_worker
+            .as_ref()
+            .ok_or_else(|| "profile worker is unavailable for catalog discovery".to_string())?;
+        match worker.discover_profiles(intent) {
+            Ok(()) => {
+                self.profile_cycle_smoke_trace("catalog discovery submitted");
+                self.pending_profile_catalog_discovery
+                    .as_mut()
+                    .expect("catalog discovery remains pending")
+                    .submitted = true;
+                Ok(())
+            }
+            Err(error) if error.is_full() => {
+                let returned = error.into_work();
+                self.pending_profile_catalog_discovery
+                    .as_mut()
+                    .expect("catalog discovery remains pending")
+                    .intent = returned;
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let returned = error.into_work();
+                let expected = self
+                    .pending_profile_catalog_discovery
+                    .take()
+                    .expect("catalog discovery remains pending")
+                    .intent;
+                debug_assert_eq!(returned, expected);
+                Err(format!(
+                    "failed to submit profile catalog discovery: {message}"
+                ))
+            }
+        }
+    }
+
+    fn complete_profile_cycle(&mut self, entries: Vec<ProfileCatalogEntry>) -> Result<(), String> {
+        let active = self
+            .profile_runtime
+            .active_profile()
+            .ok_or_else(|| "profile catalog selection requires an active profile".to_string())?
+            .storage_id();
+        let Some(root) = next_profile_cycle_root(&entries, active)? else {
+            return Ok(());
+        };
+        let start = self
+            .profile_runtime
+            .begin_selection(root)
+            .map_err(|error| format!("failed to begin profile selection: {error}"))?;
+        if start.superseded().is_some() {
+            return Err("profile cycle unexpectedly superseded an existing selection".into());
+        }
+        self.profile_cycle_smoke_trace("catalog selected replacement");
+        self.pending_profile_selection_submission = Some(start.into_intent());
+        self.drive_pending_profile_selection_submission()
+    }
+
+    fn drive_pending_profile_selection_submission(&mut self) -> Result<(), String> {
+        let Some(intent) = self.pending_profile_selection_submission.take() else {
+            return Ok(());
+        };
+        let selection = intent.id();
+        let worker = self
+            .profile_worker
+            .as_ref()
+            .ok_or_else(|| "profile worker is unavailable for profile selection".to_string())?;
+        match worker.prepare(intent) {
+            Ok(()) => {
+                self.profile_cycle_smoke_trace("selection prepare submitted");
+                Ok(())
+            }
+            Err(error) if error.is_full() => {
+                let returned = error.into_work();
+                debug_assert_eq!(returned.id(), selection);
+                self.pending_profile_selection_submission = Some(returned);
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let returned = error.into_work();
+                debug_assert_eq!(returned.id(), selection);
+                self.profile_runtime
+                    .cancel_selection(selection)
+                    .map_err(|cancel| {
+                        format!(
+                            "failed to submit profile selection {}: {message}; failed to cancel selection: {cancel}",
+                            selection.get()
+                        )
+                    })?;
+                Err(format!(
+                    "failed to submit profile selection {}: {message}",
+                    selection.get()
+                ))
+            }
+        }
+    }
+
+    fn reset_native_session_for_profile_switch(&mut self) -> Result<(), String> {
+        if self.pending_profile_session_reset.is_pending() {
+            return Err("profile session reset is already pending".into());
+        }
+        if !self.profile_replacement_browser_quiescent() {
+            return Err("profile session reset requires a quiescent browser".into());
+        }
+        let fresh_tab = self
+            .browser
+            .reset_window_for_profile_switch(self.browser_window)
+            .map_err(|error| {
+                format!("failed to reset browser session for profile switch: {error}")
+            })?;
+        self.tab = fresh_tab;
+        self.presentation = TabPresentationHandoff::new(fresh_tab);
+        self.pending_target_permit = None;
+        self.surface_recovery_permit = None;
+        self.pending_tab_create = None;
+        self.pending_view_close = None;
+        self.pending_navigation_targets.clear();
+        self.rapid_smoke_tabs.clear();
+        self.restore_focus_after_activation = false;
+        self.pending_navigation_cancel = None;
+        self.pending_frame.invalidate();
+        self.pending_surface.invalidate();
+
+        let navigation = self
+            .browser
+            .begin_navigation(self.browser_window, fresh_tab, START_LOCATION)
+            .map_err(|error| format!("failed to begin fresh profile navigation: {error}"))?
+            .intent()
+            .id();
+        self.initial_navigation = Some(navigation);
+        let target = self
+            .requests
+            .allocate(self.browser_window, fresh_tab)
+            .map_err(|error| error.to_string())?;
+        self.pending_profile_session_reset
+            .begin(target)
+            .map_err(|error| error.to_string())?;
+        self.worker_ready = false;
+        self.needs_redraw = true;
+
+        let result = self
+            .worker
+            .as_ref()
+            .ok_or_else(|| "render worker is unavailable for profile session reset".to_string())?
+            .reset_profile_session(target, self.presentation.generation());
+        if let Err(error) = result {
+            self.pending_profile_session_reset
+                .complete_if_current(target);
+            return Err(error);
+        }
+        self.profile_cycle_smoke_trace("session reset submitted");
+        Ok(())
     }
 
     fn profile_replacement_browser_quiescent(&self) -> bool {
@@ -862,11 +1205,22 @@ impl NativeShell {
             return;
         }
 
+        let replacing = self.profile_runtime.active_profile().is_some();
+        if replacing && let Err(error) = self.enter_native_neutral() {
+            self.fail_with_rejected_profile(event_loop, prepared, error);
+            return;
+        }
+
         match self.profile_runtime.commit_selection(prepared) {
             Ok(commit) => {
                 if let Some(replaced) = commit.into_replaced_profile() {
                     debug_assert!(self.pending_profile_replacement.is_none());
                     self.replaced_profile_lock = Some(replaced.into_profile_lock());
+                    self.profile_cycle_smoke_trace("selection committed");
+                    if let Err(error) = self.reset_native_session_for_profile_switch() {
+                        self.fail(event_loop, error);
+                        return;
+                    }
                     match self.drive_replaced_profile_lock_release() {
                         Ok(true) => {}
                         Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
@@ -952,6 +1306,13 @@ impl NativeShell {
             self.finish_shutdown(event_loop);
             return;
         }
+        if self.profile_runtime.pending_selection().is_some()
+            || self.pending_profile_catalog_discovery.is_some()
+            || self.pending_profile_smoke_create.is_some()
+        {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
         if self.pending_profile_lock_release.is_some() {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
@@ -1016,6 +1377,7 @@ impl NativeShell {
             return;
         }
 
+        self.profile_cycle_smoke_trace("submitting active lock release");
         let Some(lock) = self
             .profile_runtime
             .active_profile()
@@ -1036,6 +1398,7 @@ impl NativeShell {
 
         match worker.release_lock(lock) {
             Ok(()) => {
+                self.profile_cycle_smoke_trace("active lock release submitted");
                 self.pending_profile_lock_release = Some(PendingProfileLockRelease {
                     owner,
                     purpose: ProfileLockReleasePurpose::ActiveShutdown,
@@ -1069,13 +1432,30 @@ impl NativeShell {
         prepared: crate::PreparedProfile,
         error: impl std::fmt::Display,
     ) {
+        let selection = prepared.selection();
+        let cancellation_failure = if self
+            .profile_runtime
+            .pending_selection()
+            .is_some_and(|pending| pending.id() == selection)
+        {
+            self.profile_runtime
+                .cancel_selection(selection)
+                .err()
+                .map(|cancel| format!("failed to cancel rejected profile selection: {cancel}"))
+        } else {
+            None
+        };
         let message = error.to_string();
         let navigation_failure = self.fail_initial_navigation(&message).err();
         if self.fatal_error.is_none() {
-            self.fatal_error = Some(match navigation_failure {
-                Some(failure) => format!("{message}; {failure}"),
-                None => message,
-            });
+            let mut failures = vec![message];
+            if let Some(failure) = cancellation_failure {
+                failures.push(failure);
+            }
+            if let Some(failure) = navigation_failure {
+                failures.push(failure);
+            }
+            self.fatal_error = Some(failures.join("; "));
         }
         debug_assert!(self.rejected_profile_lock.is_none());
         if self.rejected_profile_lock.is_none() {
@@ -1178,6 +1558,7 @@ impl NativeShell {
                     return;
                 }
 
+                self.profile_cycle_smoke_trace("selection prepared");
                 self.commit_prepared_profile(event_loop, selection, prepared);
             }
             ProfileWorkerCompletion::LockReleased { owner, result } => {
@@ -1234,17 +1615,22 @@ impl NativeShell {
                     }
                     ProfileLockReleasePurpose::ReplacedProfile => {
                         self.replaced_profile_lock = None;
+                        self.profile_cycle_smoke_trace("replaced lock released");
                         if self.shutdown_requested {
                             match self.profile_flush_complete() {
                                 Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
                                 Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
                                 Err(error) => self.fail(event_loop, error),
                             }
-                        } else if self.needs_redraw {
-                            self.request_redraw();
+                        } else if self.needs_redraw
+                            && !self.profile_transition_in_progress()
+                            && let Err(error) = self.start_frame()
+                        {
+                            self.fail(event_loop, error);
                         }
                     }
                     ProfileLockReleasePurpose::ActiveShutdown => {
+                        self.profile_cycle_smoke_trace("active lock released");
                         self.profile_lock_release_completed = true;
                         self.finish_shutdown(event_loop);
                     }
@@ -1343,11 +1729,85 @@ impl NativeShell {
                     ),
                 }
             }
-            ProfileWorkerCompletion::CatalogDiscovered { .. }
-            | ProfileWorkerCompletion::ProfileCreated { .. }
-            | ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
+            ProfileWorkerCompletion::CatalogDiscovered { intent, result } => {
+                self.profile_cycle_smoke_trace("catalog discovery completed");
+                let Some(pending) = self.pending_profile_catalog_discovery.take() else {
+                    self.fail(
+                        event_loop,
+                        "stale profile catalog completion has no pending request",
+                    );
+                    return;
+                };
+                if !pending.submitted || pending.intent != intent {
+                    self.fail(
+                        event_loop,
+                        "profile catalog completion does not match the exact pending request",
+                    );
+                    return;
+                }
+                if self.shutdown_requested {
+                    match self.profile_flush_complete() {
+                        Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
+                        Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                        Err(error) => self.fail(event_loop, error),
+                    }
+                    return;
+                }
+                match result {
+                    Ok(entries) => {
+                        if let Err(error) = self.complete_profile_cycle(entries) {
+                            self.fail(event_loop, error);
+                        } else {
+                            event_loop.set_control_flow(ControlFlow::Wait);
+                        }
+                    }
+                    Err(error) => self.fail(
+                        event_loop,
+                        format!("profile catalog discovery failed: {error}"),
+                    ),
+                }
+            }
+            ProfileWorkerCompletion::ProfileCreated { intent, result } => {
+                self.profile_cycle_smoke_trace("create completed");
+                let Some(pending) = self.pending_profile_smoke_create.take() else {
+                    self.fail(
+                        event_loop,
+                        "stale profile-create completion has no pending smoke request",
+                    );
+                    return;
+                };
+                if !pending.submitted || pending.intent != intent {
+                    self.fail(
+                        event_loop,
+                        "profile-create completion does not match the exact pending smoke request",
+                    );
+                    return;
+                }
+                if self.shutdown_requested {
+                    match self.profile_flush_complete() {
+                        Ok(true) => self.continue_shutdown_after_profile_flush(event_loop),
+                        Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
+                        Err(error) => self.fail(event_loop, error),
+                    }
+                    return;
+                }
+                match result {
+                    Ok(_) => {
+                        if let Err(error) = self.begin_profile_cycle() {
+                            self.fail(event_loop, error);
+                        } else {
+                            event_loop.set_control_flow(ControlFlow::Wait);
+                        }
+                    }
+                    Err(error) => self.fail(
+                        event_loop,
+                        format!("profile-cycle smoke profile creation failed: {error}"),
+                    ),
+                }
+            }
+            ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
                 event_loop,
-                "profile catalog completion arrived before native profile catalog UX is enabled",
+                "unexpected profile rename completion arrived without native mutation UX",
             ),
         }
     }
@@ -1395,6 +1855,7 @@ impl NativeShell {
 
         self.window = Some(window);
         self.worker = Some(worker);
+        self.update_window_title();
         Ok(())
     }
 
@@ -2105,6 +2566,11 @@ impl NativeShell {
             {
                 self.handle_browser_command(BrowserCommand::ReloadOrStop)
             }
+            Key::Character(character)
+                if self.modifiers.shift_key() && character.as_str().eq_ignore_ascii_case("m") =>
+            {
+                self.begin_profile_cycle()
+            }
             Key::Named(NamedKey::Tab) => {
                 let direction = if self.modifiers.shift_key() {
                     TabCycleDirection::Previous
@@ -2378,6 +2844,36 @@ impl NativeShell {
                     }
                 }
             }
+            WorkerEvent::ProfileSessionReset { target, result } => {
+                self.profile_cycle_smoke_trace("session reset completion event");
+                if !self
+                    .pending_profile_session_reset
+                    .complete_if_current(target)
+                    || !self.target_alive(target)
+                {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        if let Err(error) = self.commit_initial_navigation() {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+                        self.worker_ready = true;
+                        self.needs_redraw = true;
+                        self.update_window_title();
+                        if !self.profile_transition_in_progress()
+                            && let Err(error) = self.start_frame()
+                        {
+                            self.fail(event_loop, error);
+                        }
+                    }
+                    Err(error) => self.fail(
+                        event_loop,
+                        format!("failed to reset native profile session: {error}"),
+                    ),
+                }
+            }
             WorkerEvent::NavigationCancelFinished { target, result } => {
                 if self.pending_navigation_cancel != Some(target) {
                     return;
@@ -2536,6 +3032,18 @@ impl NativeShell {
                             }
                         }
 
+                        if !completed_target
+                            && !self.profile_transition_in_progress()
+                            && self.presentation.pending_activation().is_none()
+                            && self.presentation.content() == WebContentPresentation::Tab(self.tab)
+                            && self.window.as_ref().and_then(|window| window.is_visible())
+                                == Some(false)
+                            && let Err(error) = self.leave_native_neutral()
+                        {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+
                         if self.run_mode == RunMode::ExitAfterRealHttpNavigation {
                             if self.http_smoke_frame == Some(target) {
                                 self.shutdown(event_loop);
@@ -2549,6 +3057,57 @@ impl NativeShell {
                                 }
                             } else if self.needs_redraw {
                                 self.request_redraw();
+                            }
+                        } else if self.run_mode == RunMode::ExitAfterProfileCycle {
+                            self.profile_cycle_smoke_trace("profile-cycle frame presented");
+                            if let Some(start) = self.profile_cycle_smoke_start {
+                                let Some(active) = self
+                                    .profile_runtime
+                                    .active_profile()
+                                    .map(|profile| profile.storage_id())
+                                else {
+                                    self.fail(
+                                        event_loop,
+                                        "profile-cycle smoke lost its active profile",
+                                    );
+                                    return;
+                                };
+                                if active == start {
+                                    self.fail(
+                                        event_loop,
+                                        "profile-cycle smoke presented without changing persisted profile identity",
+                                    );
+                                    return;
+                                }
+                                let clean = self.browser.window(self.browser_window).is_some_and(
+                                    |window| {
+                                        window.tabs().len() == 1
+                                            && window.active_tab_id() == Some(self.tab)
+                                            && window.tabs()[0].navigation().history().len() == 1
+                                            && window.tabs()[0].navigation().display_location()
+                                                == Some(START_LOCATION)
+                                            && window.tabs()[0].navigation().pending().is_none()
+                                    },
+                                );
+                                let visible =
+                                    self.window.as_ref().and_then(|window| window.is_visible())
+                                        == Some(true);
+                                if !clean
+                                    || self.initial_navigation.is_some()
+                                    || self.presentation.content()
+                                        != WebContentPresentation::Tab(self.tab)
+                                    || !visible
+                                {
+                                    self.fail(
+                                        event_loop,
+                                        "profile-cycle smoke did not finish on a clean visible fresh session",
+                                    );
+                                    return;
+                                }
+                                self.profile_cycle_smoke_trace("fresh session validated");
+                                self.shutdown(event_loop);
+                            } else if let Err(error) = self.begin_profile_cycle_smoke_create() {
+                                self.fail(event_loop, error);
                             }
                         } else if self.run_mode == RunMode::ExitAfterFirstPresentation {
                             self.shutdown(event_loop);
@@ -2676,6 +3235,31 @@ impl NativeShell {
         if self.shutdown_requested {
             return;
         }
+        if self
+            .pending_profile_catalog_discovery
+            .as_ref()
+            .is_some_and(|pending| !pending.submitted)
+        {
+            self.pending_profile_catalog_discovery = None;
+        }
+        if self
+            .pending_profile_smoke_create
+            .as_ref()
+            .is_some_and(|pending| !pending.submitted)
+        {
+            self.pending_profile_smoke_create = None;
+        }
+        if let Some(intent) = self.pending_profile_selection_submission.take() {
+            let selection = intent.id();
+            if let Err(error) = self.profile_runtime.cancel_selection(selection)
+                && self.fatal_error.is_none()
+            {
+                self.fatal_error = Some(format!(
+                    "failed to cancel unsubmitted profile selection {} during shutdown: {error}",
+                    selection.get()
+                ));
+            }
+        }
         if let Some(prepared) = self.pending_profile_replacement.take() {
             let selection = prepared.selection();
             if let Err(error) = self.profile_runtime.cancel_selection(selection)
@@ -2700,6 +3284,7 @@ impl NativeShell {
         self.pending_init.invalidate();
         self.pending_frame.invalidate();
         self.pending_surface.invalidate();
+        self.pending_profile_session_reset.invalidate();
         self.pending_navigation_cancel = None;
         self.http_smoke_frame = None;
         self.pending_target_permit = None;
@@ -2717,11 +3302,13 @@ impl NativeShell {
     }
 
     fn finish_shutdown(&mut self, event_loop: &ActiveEventLoop) {
+        self.profile_cycle_smoke_trace("event loop exit");
         drop(self.profile_worker.take());
         event_loop.exit();
     }
 
     fn shutdown(&mut self, event_loop: &ActiveEventLoop) {
+        self.profile_cycle_smoke_trace("shutdown requested");
         self.begin_shutdown();
         if let Err(error) = self.drive_profile_saves(true) {
             if self.fatal_error.is_none() {
@@ -2774,6 +3361,21 @@ impl ApplicationHandler<WorkerEvent> for NativeShell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.shutdown_requested {
+            if let Err(error) = self.drive_profile_cycle_smoke_create() {
+                self.fail(event_loop, error);
+                return;
+            }
+            if let Err(error) = self.drive_profile_catalog_discovery() {
+                self.fail(event_loop, error);
+                return;
+            }
+            if let Err(error) = self.drive_pending_profile_selection_submission() {
+                self.fail(event_loop, error);
+                return;
+            }
+        }
+
         let flush = self.shutdown_requested || self.replacement_flush_requested();
         if let Err(error) = self.drive_profile_saves(flush) {
             self.fail(event_loop, error);
@@ -3010,6 +3612,15 @@ fn render_worker_main(
                         return;
                     }
                 }
+                WorkerCommand::ResetProfileSession { target, generation } => {
+                    let result = worker.reset_profile_session(target, generation);
+                    if proxy
+                        .send_event(WorkerEvent::ProfileSessionReset { target, result })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
             }
         }
 
@@ -3150,6 +3761,38 @@ impl RenderWorker {
                 tab.get()
             ));
         }
+        Ok(())
+    }
+
+    fn reset_profile_session(
+        &mut self,
+        target: AsyncTarget,
+        generation: PresentationGeneration,
+    ) -> Result<(), String> {
+        self.ensure_active()?;
+        if self.has_pending_navigation() {
+            return Err("cannot reset profile session while navigation is pending".into());
+        }
+        self.validate_new_request(target)?;
+
+        let mut engine =
+            EngineHost::new().map_err(|error| format!("failed to reset Rarog: {error}"))?;
+        engine
+            .create_view(target.tab())
+            .map_err(|error| format!("failed to create fresh profile View: {error}"))?;
+        engine
+            .load_local_html(target.tab(), START_PAGE)
+            .map_err(|error| format!("failed to load fresh profile start document: {error}"))?;
+
+        self.engine = engine;
+        self.pending_navigations.clear();
+        self.tab = target.tab();
+        self.presentation_generation = generation;
+        self.last_viewport = None;
+        self.content
+            .as_mut()
+            .ok_or_else(|| "Web content surface is not initialized".to_string())?
+            .reset_for_view_switch(self.gpu.as_ref());
         Ok(())
     }
 
@@ -3623,7 +4266,7 @@ impl WebContentSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PreparedProfile;
+    use crate::{PreparedProfile, ProfileCatalog, ProfileCatalogCreateIntent};
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -3674,6 +4317,78 @@ mod tests {
         browser
             .commit_navigation(window, tab, navigation, location)
             .unwrap()
+    }
+
+    #[test]
+    fn profiles_root_is_stable_under_local_app_data() {
+        let local_app_data = OsString::from(r"C:\Users\Zorya\AppData\Local");
+        let root = profiles_root_from_local_app_data(Some(local_app_data)).unwrap();
+
+        assert_eq!(
+            root,
+            PathBuf::from(r"C:\Users\Zorya\AppData\Local")
+                .join(PRODUCT_DATA_DIRECTORY)
+                .join(PROFILES_DIRECTORY)
+        );
+    }
+
+    #[test]
+    fn profile_cycle_uses_catalog_order_and_wraps_by_persisted_identity() {
+        let catalog_root = TestProfileRoot::new();
+        ProfileCatalogCreateIntent::new(catalog_root.path(), "First")
+            .unwrap()
+            .execute()
+            .unwrap();
+        ProfileCatalogCreateIntent::new(catalog_root.path(), "Second")
+            .unwrap()
+            .execute()
+            .unwrap();
+        ProfileCatalogCreateIntent::new(catalog_root.path(), "Third")
+            .unwrap()
+            .execute()
+            .unwrap();
+
+        let entries = ProfileCatalog::open(catalog_root.path())
+            .unwrap()
+            .discover()
+            .unwrap();
+        assert_eq!(entries.len(), 3);
+
+        for index in 0..entries.len() {
+            let active = entries[index].storage_id().unwrap();
+            let expected = entries[(index + 1) % entries.len()].root();
+            assert_eq!(
+                next_profile_cycle_root(&entries, active)
+                    .unwrap()
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn profile_cycle_is_noop_with_one_profile_and_rejects_missing_active_identity() {
+        let catalog_root = TestProfileRoot::new();
+        let only = ProfileCatalogCreateIntent::new(catalog_root.path(), "Only")
+            .unwrap()
+            .execute()
+            .unwrap();
+        let entries = ProfileCatalog::open(catalog_root.path())
+            .unwrap()
+            .discover()
+            .unwrap();
+
+        assert_eq!(
+            next_profile_cycle_root(&entries, only.storage_id().unwrap()).unwrap(),
+            None
+        );
+        let missing =
+            ProfileStorageId::from_raw(only.storage_id().unwrap().get().wrapping_add(1)).unwrap();
+        assert!(
+            next_profile_cycle_root(&entries, missing)
+                .unwrap_err()
+                .contains("missing")
+        );
     }
 
     #[test]
