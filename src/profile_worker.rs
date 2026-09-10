@@ -8,8 +8,8 @@ use crate::profile_metadata::ProfileMetadata;
 use crate::profile_runtime::{
     PreparedProfile, ProfileBookmarksSaveCompletion, ProfileBookmarksSaveIntent,
     ProfileHistorySaveCompletion, ProfileHistorySaveIntent, ProfilePreparationError,
-    ProfileSelectionId, ProfileSelectionIntent, ProfileSettingsSaveCompletion,
-    ProfileSettingsSaveIntent,
+    ProfileSelectionId, ProfileSelectionIntent, ProfileSessionRestoreSaveCompletion,
+    ProfileSessionRestoreSaveIntent, ProfileSettingsSaveCompletion, ProfileSettingsSaveIntent,
 };
 use std::fmt;
 use std::io;
@@ -23,6 +23,7 @@ enum ProfileWorkerCommand {
     SaveSettings(ProfileSettingsSaveIntent),
     SaveHistory(ProfileHistorySaveIntent),
     SaveBookmarks(ProfileBookmarksSaveIntent),
+    SaveSessionRestore(ProfileSessionRestoreSaveIntent),
     DiscoverCatalog(ProfileCatalogDiscoverIntent),
     CreateProfile(ProfileCatalogCreateIntent),
     RenameProfile(ProfileCatalogRenameIntent),
@@ -38,6 +39,7 @@ pub enum ProfileWorkerCompletion {
     SettingsSaved(ProfileSettingsSaveCompletion),
     HistorySaved(ProfileHistorySaveCompletion),
     BookmarksSaved(ProfileBookmarksSaveCompletion),
+    SessionRestoreSaved(ProfileSessionRestoreSaveCompletion),
     CatalogDiscovered {
         intent: ProfileCatalogDiscoverIntent,
         result: Result<Vec<ProfileCatalogEntry>, ProfileCatalogError>,
@@ -219,6 +221,27 @@ impl ProfileWorker {
         }
     }
 
+    pub fn save_session_restore(
+        &self,
+        intent: ProfileSessionRestoreSaveIntent,
+    ) -> Result<(), ProfileWorkerSubmitError<ProfileSessionRestoreSaveIntent>> {
+        match self
+            .sender
+            .try_send(ProfileWorkerCommand::SaveSessionRestore(intent))
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(ProfileWorkerCommand::SaveSessionRestore(intent))) => {
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
+            }
+            Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveSessionRestore(intent))) => {
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
+            }
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                unreachable!("session-restore-save submission preserves its command variant")
+            }
+        }
+    }
+
     pub fn discover_profiles(
         &self,
         intent: ProfileCatalogDiscoverIntent,
@@ -327,6 +350,9 @@ fn profile_worker_main(
             }
             ProfileWorkerCommand::SaveBookmarks(intent) => {
                 ProfileWorkerCompletion::BookmarksSaved(intent.execute())
+            }
+            ProfileWorkerCommand::SaveSessionRestore(intent) => {
+                ProfileWorkerCompletion::SessionRestoreSaved(intent.execute())
             }
             ProfileWorkerCommand::DiscoverCatalog(intent) => {
                 let result = intent.execute();
