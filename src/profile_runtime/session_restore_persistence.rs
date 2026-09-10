@@ -151,6 +151,10 @@ pub enum ProfileSessionRestoreRuntimeError {
         actual: ProfileId,
     },
     MutationRevisionExhausted,
+    SnapshotGenerationMismatch {
+        expected_generation: u64,
+        provided_generation: u64,
+    },
     SaveIdExhausted,
     SaveAlreadyPending {
         pending: ProfileSessionRestoreSaveId,
@@ -189,6 +193,13 @@ impl fmt::Display for ProfileSessionRestoreRuntimeError {
             Self::MutationRevisionExhausted => {
                 formatter.write_str("profile session-restore mutation revision space is exhausted")
             }
+            Self::SnapshotGenerationMismatch {
+                expected_generation,
+                provided_generation,
+            } => write!(
+                formatter,
+                "replacement session snapshot generation {provided_generation} does not match active generation {expected_generation}"
+            ),
             Self::SaveIdExhausted => {
                 formatter.write_str("profile session-restore save identifier space is exhausted")
             }
@@ -281,6 +292,32 @@ impl ProfileRuntime {
         profile: ProfileId,
     ) -> Result<&SessionRestoreSnapshot, ProfileSessionRestoreRuntimeError> {
         Ok(self.active_session_restore_state(profile)?.snapshot())
+    }
+
+    pub(crate) fn replace_session_restore_snapshot(
+        &mut self,
+        profile: ProfileId,
+        snapshot: SessionRestoreSnapshot,
+    ) -> Result<bool, ProfileSessionRestoreRuntimeError> {
+        let state = self.active_session_restore_state_mut(profile)?;
+        if snapshot.generation() != state.snapshot.generation() {
+            return Err(
+                ProfileSessionRestoreRuntimeError::SnapshotGenerationMismatch {
+                    expected_generation: state.snapshot.generation(),
+                    provided_generation: snapshot.generation(),
+                },
+            );
+        }
+        if snapshot == state.snapshot {
+            return Ok(false);
+        }
+        let next_revision = state
+            .mutation_revision
+            .checked_add(1)
+            .ok_or(ProfileSessionRestoreRuntimeError::MutationRevisionExhausted)?;
+        state.snapshot = snapshot;
+        state.mutation_revision = next_revision;
+        Ok(true)
     }
 
     pub fn session_restore_unsaved_mutations(
