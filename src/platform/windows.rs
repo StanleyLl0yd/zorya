@@ -160,7 +160,7 @@ fn spawn_http_smoke_server() -> Result<String, std::io::Error> {
             let mut request = [0_u8; 4096];
             let _ = stream.read(&mut request);
             let response = format!(
-                "HTTP/1.1 200 OK\\r\\nContent-Type: text/html; charset=utf-8\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 HTTP_SMOKE_BODY.len(),
                 HTTP_SMOKE_BODY
             );
