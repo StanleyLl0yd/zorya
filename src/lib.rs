@@ -1,9 +1,9 @@
 mod app;
 #[cfg(any(target_os = "windows", test))]
 mod async_lifecycle;
+mod bookmarks;
 #[cfg(target_os = "windows")]
 mod branding;
-mod bookmarks;
 mod browsing_history;
 mod chrome;
 mod commands;

@@ -140,24 +140,15 @@ impl BookmarksSnapshot {
     }
 
     pub fn remove_bookmark(&mut self, id: BookmarkId) -> Option<Bookmark> {
-        let index = self.bookmarks.iter().position(|bookmark| bookmark.id == id)?;
+        let index = self
+            .bookmarks
+            .iter()
+            .position(|bookmark| bookmark.id == id)?;
         Some(self.bookmarks.remove(index))
     }
 
     pub fn clear(&mut self) {
         self.bookmarks.clear();
-    }
-
-    pub(crate) fn advance_generation_after_save(
-        &mut self,
-        expected_generation: u64,
-        saved_generation: u64,
-    ) -> bool {
-        if self.generation != expected_generation || saved_generation <= expected_generation {
-            return false;
-        }
-        self.generation = saved_generation;
-        true
     }
 }
 
@@ -290,7 +281,11 @@ impl fmt::Display for BookmarksError {
                 operation,
                 path,
                 kind,
-            } => write!(formatter, "{operation} failed for {}: {kind}", path.display()),
+            } => write!(
+                formatter,
+                "{operation} failed for {}: {kind}",
+                path.display()
+            ),
             Self::TitleTooLarge { bytes, limit } => write!(
                 formatter,
                 "bookmark title requires {bytes} bytes; limit is {limit}"
@@ -301,7 +296,10 @@ impl fmt::Display for BookmarksError {
                 "bookmark location requires {bytes} bytes; limit is {limit}"
             ),
             Self::BookmarkLimitExceeded { found, limit } => {
-                write!(formatter, "bookmarks contain {found} entries; limit is {limit}")
+                write!(
+                    formatter,
+                    "bookmarks contain {found} entries; limit is {limit}"
+                )
             }
             Self::RecordTooLarge { bytes, limit } => write!(
                 formatter,
@@ -336,7 +334,10 @@ impl fmt::Display for BookmarksError {
                 formatter.write_str("bookmark identifier space is exhausted")
             }
             Self::ConcurrentWrite { generation } => {
-                write!(formatter, "bookmarks generation {generation} was created concurrently")
+                write!(
+                    formatter,
+                    "bookmarks generation {generation} was created concurrently"
+                )
             }
             Self::PendingFileCollisionLimit { attempts } => write!(
                 formatter,
@@ -441,11 +442,19 @@ impl BookmarksStore {
 
         if let Err(error) = file.write_all(&bytes) {
             let _ = fs::remove_file(&pending_path);
-            return Err(io_error("write pending bookmarks generation", &pending_path, error));
+            return Err(io_error(
+                "write pending bookmarks generation",
+                &pending_path,
+                error,
+            ));
         }
         if let Err(error) = file.sync_all() {
             let _ = fs::remove_file(&pending_path);
-            return Err(io_error("sync pending bookmarks generation", &pending_path, error));
+            return Err(io_error(
+                "sync pending bookmarks generation",
+                &pending_path,
+                error,
+            ));
         }
         drop(file);
 
@@ -495,8 +504,9 @@ impl BookmarksStore {
         &self,
         reserved_entries: usize,
     ) -> Result<Vec<u64>, BookmarksError> {
-        let entries = fs::read_dir(&self.bookmarks_directory)
-            .map_err(|error| io_error("read bookmarks directory", &self.bookmarks_directory, error))?;
+        let entries = fs::read_dir(&self.bookmarks_directory).map_err(|error| {
+            io_error("read bookmarks directory", &self.bookmarks_directory, error)
+        })?;
         let mut generations = Vec::new();
         let mut entry_count = 0usize;
         for entry in entries {
@@ -573,7 +583,11 @@ impl BookmarksStore {
                 Ok(file) => return Ok((path, file)),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => {
-                    return Err(io_error("create pending bookmarks generation", &path, error));
+                    return Err(io_error(
+                        "create pending bookmarks generation",
+                        &path,
+                        error,
+                    ));
                 }
             }
         }
@@ -666,7 +680,8 @@ fn parse_generation_file_name(name: &std::ffi::OsStr) -> Option<u64> {
 }
 
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, BookmarksError> {
-    let file = File::open(path).map_err(|error| io_error("open bookmarks generation", path, error))?;
+    let file =
+        File::open(path).map_err(|error| io_error("open bookmarks generation", path, error))?;
     let mut bytes = Vec::new();
     file.take((limit + 1) as u64)
         .read_to_end(&mut bytes)
@@ -913,21 +928,21 @@ mod tests {
     #[test]
     fn snapshot_uses_stable_monotonic_identity_across_edit_and_clear() {
         let mut snapshot = BookmarksSnapshot::default();
-        let first = snapshot
-            .add_bookmark("One", "https://one.test")
-            .unwrap();
-        assert!(snapshot
-            .update_bookmark(first, "Updated", "https://one.test/new")
-            .unwrap());
+        let first = snapshot.add_bookmark("One", "https://one.test").unwrap();
+        assert!(
+            snapshot
+                .update_bookmark(first, "Updated", "https://one.test/new")
+                .unwrap()
+        );
         assert_eq!(snapshot.bookmark(first).unwrap().title(), "Updated");
         snapshot.clear();
-        let second = snapshot
-            .add_bookmark("Two", "https://two.test")
-            .unwrap();
+        let second = snapshot.add_bookmark("Two", "https://two.test").unwrap();
         assert!(second > first);
-        assert!(!snapshot
-            .update_bookmark(first, "Missing", "https://missing.test")
-            .unwrap());
+        assert!(
+            !snapshot
+                .update_bookmark(first, "Missing", "https://missing.test")
+                .unwrap()
+        );
     }
 
     #[test]
@@ -951,9 +966,7 @@ mod tests {
     #[test]
     fn codec_round_trips_generation_data_and_next_identity() {
         let mut snapshot = BookmarksSnapshot::default();
-        snapshot
-            .add_bookmark("One", "https://one.test")
-            .unwrap();
+        snapshot.add_bookmark("One", "https://one.test").unwrap();
         snapshot
             .add_bookmark("Two", "https://two.test/path")
             .unwrap();
@@ -976,20 +989,32 @@ mod tests {
             1,
             BOOKMARKS_SCHEMA_VERSION,
             3,
-            &[(1, "One", "https://one.test"), (2, "Two", "https://two.test")],
+            &[
+                (1, "One", "https://one.test"),
+                (2, "Two", "https://two.test"),
+            ],
         );
         let mut corrupt = bytes.clone();
         let index = corrupt.len() - CHECKSUM_BYTES - 1;
         corrupt[index] ^= 1;
-        assert!(matches!(decode_bookmarks(&corrupt, 1), Err(DecodeError::Corrupt)));
+        assert!(matches!(
+            decode_bookmarks(&corrupt, 1),
+            Err(DecodeError::Corrupt)
+        ));
 
         let duplicate = raw_record(
             1,
             BOOKMARKS_SCHEMA_VERSION,
             3,
-            &[(2, "One", "https://one.test"), (2, "Two", "https://two.test")],
+            &[
+                (2, "One", "https://one.test"),
+                (2, "Two", "https://two.test"),
+            ],
         );
-        assert!(matches!(decode_bookmarks(&duplicate, 1), Err(DecodeError::Corrupt)));
+        assert!(matches!(
+            decode_bookmarks(&duplicate, 1),
+            Err(DecodeError::Corrupt)
+        ));
 
         let newer = raw_record(4, BOOKMARKS_SCHEMA_VERSION + 1, 1, &[]);
         assert!(matches!(
@@ -1048,7 +1073,10 @@ mod tests {
         let recovered = store.load().unwrap();
         assert_eq!(recovered.snapshot(), &first);
         assert_eq!(recovered.recovery().unwrap().skipped_generations(), &[2]);
-        let third = store.save(&lock, recovered.snapshot()).unwrap().into_snapshot();
+        let third = store
+            .save(&lock, recovered.snapshot())
+            .unwrap()
+            .into_snapshot();
         assert_eq!(third.generation(), 3);
         assert_eq!(store.load().unwrap().snapshot(), &third);
         lock.release().unwrap();
@@ -1059,11 +1087,7 @@ mod tests {
         let directory = TestDirectory::new();
         let store = BookmarksStore::open(directory.path()).unwrap();
         let path = store.bookmarks_path(1);
-        fs::write(
-            &path,
-            raw_record(1, BOOKMARKS_SCHEMA_VERSION + 1, 1, &[]),
-        )
-        .unwrap();
+        fs::write(&path, raw_record(1, BOOKMARKS_SCHEMA_VERSION + 1, 1, &[])).unwrap();
         assert_eq!(
             store.load(),
             Err(BookmarksError::UnsupportedSchema {
@@ -1084,7 +1108,11 @@ mod tests {
         assert!(store.load().unwrap().snapshot().is_empty());
 
         for index in 1..MAX_BOOKMARKS_DIRECTORY_ENTRIES {
-            fs::write(store.bookmarks_directory.join(format!("junk-{index}")), b"x").unwrap();
+            fs::write(
+                store.bookmarks_directory.join(format!("junk-{index}")),
+                b"x",
+            )
+            .unwrap();
         }
         assert!(matches!(
             store.discover_generations_with_reserve(1),
@@ -1118,12 +1146,18 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
         assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
-        assert!(results.iter().filter_map(|result| result.as_ref().err()).all(|error| {
-            matches!(
-                error,
-                BookmarksError::ConcurrentWrite { .. } | BookmarksError::StaleGeneration { .. }
-            )
-        }));
+        assert!(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .all(|error| {
+                    matches!(
+                        error,
+                        BookmarksError::ConcurrentWrite { .. }
+                            | BookmarksError::StaleGeneration { .. }
+                    )
+                })
+        );
         assert_eq!(store.load().unwrap().snapshot().generation(), 1);
     }
 }
