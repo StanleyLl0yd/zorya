@@ -528,23 +528,13 @@ mod tests {
 
         add(&mut runtime, profile, 1);
         let first = scheduler
-            .poll(
-                &mut runtime,
-                profile,
-                0,
-                ProfileBookmarksSaveUrgency::Flush,
-            )
+            .poll(&mut runtime, profile, 0, ProfileBookmarksSaveUrgency::Flush)
             .unwrap()
             .unwrap();
         add(&mut runtime, profile, 2);
         assert!(
             scheduler
-                .poll(
-                    &mut runtime,
-                    profile,
-                    1,
-                    ProfileBookmarksSaveUrgency::Flush,
-                )
+                .poll(&mut runtime, profile, 1, ProfileBookmarksSaveUrgency::Flush,)
                 .unwrap()
                 .is_none()
         );
@@ -553,12 +543,7 @@ mod tests {
         assert_eq!(runtime.bookmarks_unsaved_mutations(profile).unwrap(), 1);
         assert!(
             scheduler
-                .poll(
-                    &mut runtime,
-                    profile,
-                    1,
-                    ProfileBookmarksSaveUrgency::Flush,
-                )
+                .poll(&mut runtime, profile, 1, ProfileBookmarksSaveUrgency::Flush,)
                 .unwrap()
                 .is_some()
         );
@@ -573,12 +558,7 @@ mod tests {
 
         add(&mut runtime, profile, 1);
         let save = scheduler
-            .poll(
-                &mut runtime,
-                profile,
-                0,
-                ProfileBookmarksSaveUrgency::Flush,
-            )
+            .poll(&mut runtime, profile, 0, ProfileBookmarksSaveUrgency::Flush)
             .unwrap()
             .unwrap()
             .id();
