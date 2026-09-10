@@ -1816,7 +1816,7 @@ impl NativeShell {
         match completion {
             ProfileWorkerCompletion::Prepared { selection, result } => {
                 let prepared = match result {
-                    Ok(prepared) => prepared,
+                    Ok(prepared) => *prepared,
                     Err(error) => {
                         let cancellation = self.profile_runtime.cancel_selection(selection);
                         let message = match cancellation {
