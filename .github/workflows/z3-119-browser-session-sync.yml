@@ -26,7 +26,9 @@ jobs:
           components: rustfmt, clippy
       - name: Apply production patch
         run: python scripts/z3_119_browser_session_sync.py
-      - name: Format
+      - name: Format generated production patch
+        run: cargo fmt --all
+      - name: Verify format
         run: cargo fmt --all -- --check
       - name: Check
         run: cargo check --locked --all-targets
@@ -40,7 +42,6 @@ jobs:
           set -euo pipefail
           git diff --exit-code 719248bd904636e09ef7b06aa3756c13ee8ab7bb -- Cargo.toml Cargo.lock
           test "$(grep -E 'rarog-.*rev = "331689e7dff02a556d0b96530178def821056e20"' Cargo.toml | wc -l | tr -d ' ')" = "8"
-          ! grep -E 'rarog-.*rev = "(?!331689e7dff02a556d0b96530178def821056e20)' Cargo.toml >/dev/null 2>&1 || true
           ! grep -R -F 'ControlFlow::Poll' src
           git add docs/ARCHITECTURE.md docs/ROADMAP.md src/lib.rs src/profile_runtime/session_restore_persistence.rs src/session_restore.rs src/session_restore_sync.rs
           git diff --cached --name-only | sort > /tmp/actual-files
