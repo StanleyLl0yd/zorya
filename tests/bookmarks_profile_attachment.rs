@@ -50,14 +50,14 @@ fn corrupt_newest_bookmarks_recovery_survives_profile_commit() {
     fs::write(corrupt_newest, b"corrupt newest generation").unwrap();
 
     let mut runtime = ProfileRuntime::new();
-    let intent = runtime
-        .begin_selection(root.path())
-        .unwrap()
-        .into_intent();
+    let intent = runtime.begin_selection(root.path()).unwrap().into_intent();
     let prepared = PreparedProfile::load(&intent).unwrap();
 
     assert_eq!(prepared.bookmarks().generation(), 1);
-    assert_eq!(prepared.bookmarks().bookmark(bookmark).unwrap().title(), "Example");
+    assert_eq!(
+        prepared.bookmarks().bookmark(bookmark).unwrap().title(),
+        "Example"
+    );
     assert_eq!(
         prepared
             .bookmarks_recovery()
@@ -70,7 +70,10 @@ fn corrupt_newest_bookmarks_recovery_survives_profile_commit() {
     let active = runtime.active_profile().unwrap();
     assert_eq!(active.id(), profile);
     assert_eq!(active.bookmarks().generation(), 1);
-    assert_eq!(active.bookmarks().bookmark(bookmark).unwrap().title(), "Example");
+    assert_eq!(
+        active.bookmarks().bookmark(bookmark).unwrap().title(),
+        "Example"
+    );
     assert_eq!(
         active
             .bookmarks_recovery()
