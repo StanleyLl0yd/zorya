@@ -1,0 +1,78 @@
+name: Z3 bookmarks persistence docs one-shot
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  docs:
+    if: github.event.pull_request.head.ref == 'z3/bookmarks-persistence-lifecycle'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          persist-credentials: true
+      - name: Update Z3 persistence docs
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one anchor, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              'docs/ROADMAP.md',
+              '- bounded, versioned and recoverable profile-local bookmarks storage with stable monotonic bookmark identities, bounded title/location records, exact profile-lock verification before write and publication, immutable no-clobber generations, stale/concurrent writer rejection, explicit corruption fallback, fail-closed unsupported schemas and bounded retained generations; locked worker-side profile preparation now loads the exact bookmark snapshot plus recovery report and transfers both unchanged into the committed `ActiveProfile`; runtime bookmark mutation/dirty/save coordination, worker save dispatch and native bookmarks UX remain;\n',
+              '- bounded, versioned and recoverable profile-local bookmarks storage with stable monotonic bookmark identities, bounded title/location records, exact profile-lock verification before write and publication, immutable no-clobber generations, stale/concurrent writer rejection, explicit corruption fallback, fail-closed unsupported schemas and bounded retained generations; locked worker-side profile preparation loads the exact bookmark snapshot plus recovery report into the committed `ActiveProfile`; an exact-profile one-in-flight persistence lifecycle now tracks monotonic mutation/durable revisions, captured save generations, newer-mutation preservation and failure-safe dirty state, blocks profile replacement until bookmark state is durable, and executes saves only through the bounded `ProfileWorker` with exact queue-failure ownership; scheduler/native bookmarks UX remain;\n',
+          )
+
+          replace_once(
+              'docs/ARCHITECTURE.md',
+              'A successful preparation transfers the lock token into `ActiveProfile`. Settings and history save intents clone that exact token; both stores verify the token/root before doing write work and again immediately before immutable-generation publication.',
+              'A successful preparation transfers the lock token into `ActiveProfile`. Settings, history and bookmark save intents clone that exact token; all three stores verify the token/root before doing write work and again immediately before immutable-generation publication.',
+          )
+          replace_once(
+              'docs/ARCHITECTURE.md',
+              'If an active profile still has an exact settings/history save in flight or any mutation revision not yet durable, replacement is rejected with `ActiveProfileNotDurable` and returns the unchanged `PreparedProfile`; pending save ownership is never invalidated merely to switch profiles.',
+              'If an active profile still has exact settings/history persistence work or bookmark save ownership/mutations not yet durable, replacement is rejected with `ActiveProfileNotDurable` and returns the unchanged `PreparedProfile`; pending save ownership is never invalidated merely to switch profiles.',
+          )
+          replace_once(
+              'docs/ARCHITECTURE.md',
+              'Persistent bookmarks are profile-local product state with their own stable `BookmarkId` namespace, separate from tab history and Web-engine identities. `BookmarksStore` stores bounded title/location text in immutable versioned generations under the profile root, verifies the exact `ProfileLock` before write work and again immediately before no-overwrite publication, and rejects stale or concurrently-created generations. Loading scans bounded directory state newest-first, reports skipped corrupt generations explicitly, and fails closed on unsupported schemas; bookmark identifiers remain monotonic across edit, removal and clear. The storage primitive is synchronous and therefore belongs on profile/background workers. `PreparedProfile::load` now opens that store while the exact profile lock is held, preserves the exact `BookmarksSnapshot` plus optional `BookmarksRecovery`, and a successful exact selection commit transfers both unchanged into `ActiveProfile`; runtime bookmark mutation/dirty/save coordination and native bookmarks UX remain later Z3 work.',
+              'Persistent bookmarks are profile-local product state with their own stable `BookmarkId` namespace, separate from tab history and Web-engine identities. `BookmarksStore` stores bounded title/location text in immutable versioned generations under the profile root, verifies the exact `ProfileLock` before write work and again immediately before no-overwrite publication, and rejects stale or concurrently-created generations. Loading scans bounded directory state newest-first, reports skipped corrupt generations explicitly, and fails closed on unsupported schemas; bookmark identifiers remain monotonic across edit, removal and clear. The storage primitive is synchronous and therefore belongs on profile/background workers. `PreparedProfile::load` opens that store while the exact profile lock is held, preserves the exact `BookmarksSnapshot` plus optional `BookmarksRecovery`, and a successful exact selection commit transfers both into `ActiveProfile`. Bookmark mutations are accepted only for the exact active `ProfileId` and advance a monotonic process-local revision only after a real mutation succeeds. `ProfileBookmarksSaveId` binds one cloned snapshot, root, exact lock, base generation and captured mutation revision; exact successful completion advances only the durable generation/revision represented by that save, preserving newer in-memory mutations for a later save, while storage failure or exact cancellation leaves them dirty. Only one bookmark save may be in flight, stale completion/cancellation cannot clear a newer save, and profile replacement is blocked until bookmark persistence is fully durable. Save execution remains synchronous inside `ProfileBookmarksSaveIntent::execute` and is handed only to `ProfileWorker`; scheduler and native bookmarks UX remain later Z3 work.',
+          )
+          replace_once(
+              'docs/ARCHITECTURE.md',
+              'The named `zorya-profile` thread also consumes selection intents with `PreparedProfile::load`, settings-save intents with `ProfileSettingsSaveIntent::execute`, and history-save intents with `ProfileHistorySaveIntent::execute`, then invokes a caller-provided completion handler with exact typed work.',
+              'The named `zorya-profile` thread also consumes selection intents with `PreparedProfile::load`, settings-save intents with `ProfileSettingsSaveIntent::execute`, history-save intents with `ProfileHistorySaveIntent::execute`, and bookmark-save intents with `ProfileBookmarksSaveIntent::execute`, then invokes a caller-provided completion handler with exact typed work.',
+          )
+          replace_once(
+              'docs/ARCHITECTURE.md',
+              'Native profile creation/rename UX, profile deletion, private-browsing history policy, bookmark persistence/UX, session stores, broader settings wiring and migrations beyond schema v1 remain separate Z3 slices.',
+              'Native profile creation/rename UX, profile deletion, private-browsing history policy, bookmark scheduler/native UX, session stores, broader settings wiring and migrations beyond schema v1 remain separate Z3 slices.',
+          )
+
+          Path('.github/workflows/z3-bookmarks-persistence-docs-one-shot.yml').unlink()
+          PY
+          git diff --check
+      - name: Commit documentation
+        shell: bash
+        run: |
+          git config user.name "Stanley Lloyd"
+          git config user.email "131160519+StanleyLl0yd@users.noreply.github.com"
+          git add docs/ARCHITECTURE.md docs/ROADMAP.md .github/workflows/z3-bookmarks-persistence-docs-one-shot.yml
+          git diff --cached --stat
+          git commit -m "docs: record bookmarks persistence lifecycle"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
