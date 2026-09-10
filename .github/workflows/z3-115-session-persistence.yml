@@ -36,7 +36,21 @@ jobs:
           set -euo pipefail
           test "$(git merge-base HEAD 96bfc54ad6a27287985c3c177b28a0187fb42857)" = "96bfc54ad6a27287985c3c177b28a0187fb42857"
       - name: Apply session persistence lifecycle
-        run: python3 scripts/z3_115_session_persistence.py
+        shell: bash
+        run: |
+          set +e
+          python3 scripts/z3_115_session_persistence.py > /tmp/z3-115.out 2>&1
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            cp /tmp/z3-115.out scripts/z3_115_failure.txt
+            git add scripts/z3_115_failure.txt
+            git commit -m 'chore: capture Z3 #115 staging failure'
+            git push
+            exit "$status"
+          fi
       - name: Format
         run: |
           cargo fmt --all
