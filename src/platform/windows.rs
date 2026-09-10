@@ -3032,6 +3032,19 @@ impl NativeShell {
                             }
                         }
 
+                        if !completed_target
+                            && !self.profile_transition_in_progress()
+                            && self.presentation.pending_activation().is_none()
+                            && self.presentation.content()
+                                == WebContentPresentation::Tab(self.tab)
+                            && self.window.as_ref().and_then(|window| window.is_visible())
+                                == Some(false)
+                            && let Err(error) = self.leave_native_neutral()
+                        {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+
                         if self.run_mode == RunMode::ExitAfterRealHttpNavigation {
                             if self.http_smoke_frame == Some(target) {
                                 self.shutdown(event_loop);
