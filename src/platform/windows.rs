@@ -160,7 +160,12 @@ fn spawn_http_smoke_server() -> Result<String, std::io::Error> {
             let mut request = [0_u8; 4096];
             let _ = stream.read(&mut request);
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\
+Content-Type: text/html; charset=utf-8\r\
+Content-Length: {}\r\
+Connection: close\r\
+\r\
+{}",
                 HTTP_SMOKE_BODY.len(),
                 HTTP_SMOKE_BODY
             );
@@ -551,6 +556,7 @@ struct NativeShell {
     pending_profile_smoke_create: Option<PendingProfileSmokeCreate>,
     profile_cycle_smoke_start: Option<ProfileStorageId>,
     color_scheme_smoke_start: Option<ColorSchemePreference>,
+    applied_color_scheme_preference: Option<ColorSchemePreference>,
     pending_profile_selection_submission: Option<ProfileSelectionIntent>,
     pending_profile_replacement: Option<PreparedProfile>,
     pending_profile_session_reset: PendingRequest,
@@ -620,6 +626,7 @@ impl NativeShell {
             pending_profile_smoke_create: None,
             profile_cycle_smoke_start: None,
             color_scheme_smoke_start: None,
+            applied_color_scheme_preference: None,
             pending_profile_selection_submission: None,
             pending_profile_replacement: None,
             pending_profile_session_reset: PendingRequest::default(),
@@ -720,24 +727,20 @@ impl NativeShell {
 
     fn active_color_scheme_matches_window(&self) -> Result<bool, String> {
         let preference = self.active_color_scheme_preference()?;
-        let Some(expected) = native_window_theme(preference) else {
-            return Ok(true);
-        };
-        let actual = self
-            .window
-            .as_ref()
-            .ok_or_else(|| "native window is unavailable for color-scheme validation".to_string())?
-            .theme();
-        Ok(actual == Some(expected))
+        if self.window.is_none() {
+            return Err("native window is unavailable for color-scheme validation".to_string());
+        }
+        Ok(self.applied_color_scheme_preference == Some(preference))
     }
 
-    fn apply_active_color_scheme_preference(&self) -> Result<(), String> {
+    fn apply_active_color_scheme_preference(&mut self) -> Result<(), String> {
         let preference = self.active_color_scheme_preference()?;
         let window = self
             .window
             .as_ref()
             .ok_or_else(|| "native window is unavailable for color-scheme update".to_string())?;
         window.set_theme(native_window_theme(preference));
+        self.applied_color_scheme_preference = Some(preference);
         Ok(())
     }
 
@@ -869,6 +872,7 @@ impl NativeShell {
             }
             Err(error) if error.is_full() => {
                 let returned = error.into_work();
+                debug_assert_eq!(returned.id(), pending.intent.id());
                 self.pending_profile_catalog_discovery
                     .as_mut()
                     .expect("catalog discovery remains pending")
@@ -884,9 +888,7 @@ impl NativeShell {
                     .expect("catalog discovery remains pending")
                     .intent;
                 debug_assert_eq!(returned, expected);
-                Err(format!(
-                    "failed to submit profile catalog discovery: {message}"
-                ))
+                Err(format!("failed to submit profile catalog discovery: {message}"))
             }
         }
     }
@@ -1887,7 +1889,8 @@ impl NativeShell {
             application_icon.height,
         )
         .map_err(|error| format!("failed to build Zorya application icon: {error}"))?;
-        let theme = native_window_theme(self.active_color_scheme_preference()?);
+        let color_scheme_preference = self.active_color_scheme_preference()?;
+        let theme = native_window_theme(color_scheme_preference);
         let attributes = Window::default_attributes()
             .with_title("Zorya")
             .with_window_icon(Some(icon))
@@ -1916,6 +1919,7 @@ impl NativeShell {
             };
 
         self.window = Some(window);
+        self.applied_color_scheme_preference = Some(color_scheme_preference);
         self.worker = Some(worker);
         self.update_window_title();
         Ok(())
@@ -3429,6 +3433,7 @@ impl NativeShell {
         self.gpu = None;
         self.browser.close_window(self.browser_window);
         self.window = None;
+        self.applied_color_scheme_preference = None;
     }
 
     fn finish_shutdown(&mut self, event_loop: &ActiveEventLoop) {
