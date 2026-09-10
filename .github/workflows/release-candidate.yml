@@ -374,7 +374,7 @@ jobs:
           name: zorya-${{ env.ZORYA_RELEASE_VERSION }}-windows-x86_64
           path: |
             dist/zorya-${{ env.ZORYA_RELEASE_VERSION }}-windows-x86_64.zip
-            dist/zorya-${{ env:ZORYA_RELEASE_VERSION }}-windows-x86_64.zip.sha256
+            dist/zorya-${{ env.ZORYA_RELEASE_VERSION }}-windows-x86_64.zip.sha256
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
