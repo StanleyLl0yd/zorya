@@ -1,0 +1,57 @@
+name: Z3 bookmarks persistence one-shot
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.pull_request.head.ref == 'z3/bookmarks-persistence-lifecycle'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          persist-credentials: true
+      - name: Patch Windows exhaustive completion handling
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/platform/windows.rs')
+          text = path.read_text()
+          old = '''            ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
+                event_loop,
+                "unexpected profile rename completion arrived without native mutation UX",
+            ),
+'''
+          new = '''            ProfileWorkerCompletion::BookmarksSaved(_) => self.fail(
+                event_loop,
+                "unexpected bookmarks-save completion arrived without native bookmark persistence wiring",
+            ),
+            ProfileWorkerCompletion::ProfileRenamed { .. } => self.fail(
+                event_loop,
+                "unexpected profile rename completion arrived without native mutation UX",
+            ),
+'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one Windows completion anchor, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1))
+          Path('.github/workflows/z3-bookmarks-persistence-one-shot.yml').unlink()
+          PY
+          cargo fmt --all
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Commit Windows guard
+        shell: bash
+        run: |
+          git config user.name "Stanley Lloyd"
+          git config user.email "131160519+StanleyLl0yd@users.noreply.github.com"
+          git add src/platform/windows.rs .github/workflows/z3-bookmarks-persistence-one-shot.yml
+          git commit -m "fix: handle unexpected bookmark worker completion"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
