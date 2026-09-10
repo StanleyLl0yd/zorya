@@ -3035,8 +3035,7 @@ impl NativeShell {
                         if !completed_target
                             && !self.profile_transition_in_progress()
                             && self.presentation.pending_activation().is_none()
-                            && self.presentation.content()
-                                == WebContentPresentation::Tab(self.tab)
+                            && self.presentation.content() == WebContentPresentation::Tab(self.tab)
                             && self.window.as_ref().and_then(|window| window.is_visible())
                                 == Some(false)
                             && let Err(error) = self.leave_native_neutral()
