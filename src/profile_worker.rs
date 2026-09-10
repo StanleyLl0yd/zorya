@@ -6,9 +6,10 @@ use crate::profile_catalog::{
 use crate::profile_lock::{ProfileLock, ProfileLockError, ProfileLockOwner};
 use crate::profile_metadata::ProfileMetadata;
 use crate::profile_runtime::{
-    PreparedProfile, ProfileHistorySaveCompletion, ProfileHistorySaveIntent,
-    ProfilePreparationError, ProfileSelectionId, ProfileSelectionIntent,
-    ProfileSettingsSaveCompletion, ProfileSettingsSaveIntent,
+    PreparedProfile, ProfileBookmarksSaveCompletion, ProfileBookmarksSaveIntent,
+    ProfileHistorySaveCompletion, ProfileHistorySaveIntent, ProfilePreparationError,
+    ProfileSelectionId, ProfileSelectionIntent, ProfileSettingsSaveCompletion,
+    ProfileSettingsSaveIntent,
 };
 use std::fmt;
 use std::io;
@@ -21,6 +22,7 @@ enum ProfileWorkerCommand {
     Prepare(ProfileSelectionIntent),
     SaveSettings(ProfileSettingsSaveIntent),
     SaveHistory(ProfileHistorySaveIntent),
+    SaveBookmarks(ProfileBookmarksSaveIntent),
     DiscoverCatalog(ProfileCatalogDiscoverIntent),
     CreateProfile(ProfileCatalogCreateIntent),
     RenameProfile(ProfileCatalogRenameIntent),
@@ -35,6 +37,7 @@ pub enum ProfileWorkerCompletion {
     },
     SettingsSaved(ProfileSettingsSaveCompletion),
     HistorySaved(ProfileHistorySaveCompletion),
+    BookmarksSaved(ProfileBookmarksSaveCompletion),
     CatalogDiscovered {
         intent: ProfileCatalogDiscoverIntent,
         result: Result<Vec<ProfileCatalogEntry>, ProfileCatalogError>,
@@ -195,6 +198,27 @@ impl ProfileWorker {
         }
     }
 
+    pub fn save_bookmarks(
+        &self,
+        intent: ProfileBookmarksSaveIntent,
+    ) -> Result<(), ProfileWorkerSubmitError<ProfileBookmarksSaveIntent>> {
+        match self
+            .sender
+            .try_send(ProfileWorkerCommand::SaveBookmarks(intent))
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(ProfileWorkerCommand::SaveBookmarks(intent))) => {
+                Err(ProfileWorkerSubmitError::Full(Box::new(intent)))
+            }
+            Err(TrySendError::Disconnected(ProfileWorkerCommand::SaveBookmarks(intent))) => {
+                Err(ProfileWorkerSubmitError::Unavailable(Box::new(intent)))
+            }
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                unreachable!("bookmarks-save submission preserves its command variant")
+            }
+        }
+    }
+
     pub fn discover_profiles(
         &self,
         intent: ProfileCatalogDiscoverIntent,
@@ -300,6 +324,9 @@ fn profile_worker_main(
             }
             ProfileWorkerCommand::SaveHistory(intent) => {
                 ProfileWorkerCompletion::HistorySaved(intent.execute())
+            }
+            ProfileWorkerCommand::SaveBookmarks(intent) => {
+                ProfileWorkerCompletion::BookmarksSaved(intent.execute())
             }
             ProfileWorkerCommand::DiscoverCatalog(intent) => {
                 let result = intent.execute();
@@ -610,6 +637,36 @@ mod tests {
                 .generation(),
             1
         );
+    }
+
+    #[test]
+    fn bookmarks_save_executes_on_worker_and_reconciles_runtime() {
+        let root = TempRoot::new("bookmarks-save");
+        let mut runtime = ProfileRuntime::new();
+        let selection = runtime.begin_selection(root.path()).unwrap().into_intent();
+        let prepared = PreparedProfile::load(&selection).unwrap();
+        let profile = runtime.commit_selection(prepared).unwrap().active_profile();
+        runtime
+            .add_bookmark(profile, "Example", "https://example.test/")
+            .unwrap();
+        let intent = runtime
+            .begin_bookmarks_save_if_dirty(profile)
+            .unwrap()
+            .unwrap();
+        let save = intent.id();
+        let (worker, receiver) = worker_channel();
+
+        worker.save_bookmarks(intent).unwrap();
+        let (thread_name, completion) = receive(&receiver);
+        assert_eq!(thread_name, "zorya-profile");
+        let ProfileWorkerCompletion::BookmarksSaved(completion) = completion else {
+            panic!("expected bookmarks-save completion");
+        };
+        assert_eq!(completion.id(), save);
+        assert!(completion.result().is_ok());
+        runtime.complete_bookmarks_save(completion).unwrap();
+        assert!(!runtime.bookmarks_is_dirty(profile).unwrap());
+        assert_eq!(runtime.active_bookmarks(profile).unwrap().generation(), 1);
     }
 
     #[test]

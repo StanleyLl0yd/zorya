@@ -77,11 +77,12 @@ pub use profile_metadata::{
 };
 pub use profile_runtime::{
     ActiveProfile, ColorSchemePreference, PreparedProfile, ProductSettings,
-    ProfileHistorySaveCompletion, ProfileHistorySaveId, ProfileHistorySaveIntent, ProfileId,
-    ProfilePreparationError, ProfileRuntime, ProfileRuntimeError, ProfileSelectionCommit,
-    ProfileSelectionCommitError, ProfileSelectionId, ProfileSelectionIntent, ProfileSelectionStart,
-    ProfileSettingsError, ProfileSettingsSaveCompletion, ProfileSettingsSaveId,
-    ProfileSettingsSaveIntent,
+    ProfileBookmarksRuntimeError, ProfileBookmarksSaveCompletion, ProfileBookmarksSaveId,
+    ProfileBookmarksSaveIntent, ProfileHistorySaveCompletion, ProfileHistorySaveId,
+    ProfileHistorySaveIntent, ProfileId, ProfilePreparationError, ProfileRuntime,
+    ProfileRuntimeError, ProfileSelectionCommit, ProfileSelectionCommitError, ProfileSelectionId,
+    ProfileSelectionIntent, ProfileSelectionStart, ProfileSettingsError,
+    ProfileSettingsSaveCompletion, ProfileSettingsSaveId, ProfileSettingsSaveIntent,
 };
 pub use profile_settings_scheduler::{
     ProfileSettingsSavePolicy, ProfileSettingsSavePolicyError, ProfileSettingsSaveScheduler,

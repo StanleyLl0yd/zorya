@@ -374,7 +374,10 @@ impl ProfileRuntime {
             .checked_add(1)
             .ok_or(ProfileBookmarksRuntimeError::MutationRevisionExhausted)?;
         let removed = state.snapshot.remove_bookmark(bookmark);
-        debug_assert!(removed.is_some(), "bookmark existence was validated before removal");
+        debug_assert!(
+            removed.is_some(),
+            "bookmark existence was validated before removal"
+        );
         if removed.is_some() {
             state.mutation_revision = next_revision;
         }
@@ -575,7 +578,12 @@ mod tests {
 
         assert!(!runtime.bookmarks_is_dirty(profile).unwrap());
         assert_eq!(runtime.bookmarks_unsaved_mutations(profile).unwrap(), 0);
-        assert!(runtime.begin_bookmarks_save_if_dirty(profile).unwrap().is_none());
+        assert!(
+            runtime
+                .begin_bookmarks_save_if_dirty(profile)
+                .unwrap()
+                .is_none()
+        );
 
         let bookmark = runtime
             .add_bookmark(profile, "Example", "https://example.test/")
@@ -613,7 +621,10 @@ mod tests {
         runtime
             .add_bookmark(profile, "First", "https://example.test/first")
             .unwrap();
-        let first = runtime.begin_bookmarks_save_if_dirty(profile).unwrap().unwrap();
+        let first = runtime
+            .begin_bookmarks_save_if_dirty(profile)
+            .unwrap()
+            .unwrap();
         assert_eq!(first.mutation_revision(), 1);
 
         runtime
@@ -690,9 +701,7 @@ mod tests {
 
         assert_eq!(
             runtime.begin_bookmarks_save(profile),
-            Err(ProfileBookmarksRuntimeError::SaveAlreadyPending {
-                pending: first_id,
-            })
+            Err(ProfileBookmarksRuntimeError::SaveAlreadyPending { pending: first_id })
         );
         runtime.cancel_bookmarks_save(first_id).unwrap();
         assert!(runtime.bookmarks_is_dirty(profile).unwrap());
