@@ -47,7 +47,7 @@ pub(crate) fn verify_not_redirected_if_present(path: &Path) -> Result<(), Profil
     }
 }
 
-fn ensure_real_directory(path: &Path) -> Result<(), ProfilePathError> {
+pub(crate) fn ensure_real_directory(path: &Path) -> Result<(), ProfilePathError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => validate_directory(path, &metadata),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
