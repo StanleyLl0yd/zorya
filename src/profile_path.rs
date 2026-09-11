@@ -63,7 +63,8 @@ fn ensure_real_directory(path: &Path) -> Result<(), ProfilePathError> {
 fn verify_storage_children(root: &Path) -> Result<(), ProfilePathError> {
     for directory in PROFILE_STORAGE_DIRECTORIES {
         let path = root.join(directory);
-        let metadata = fs::symlink_metadata(&path).map_err(|error| path_error(&path, error.kind()))?;
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|error| path_error(&path, error.kind()))?;
         validate_directory(&path, &metadata)?;
     }
     Ok(())
