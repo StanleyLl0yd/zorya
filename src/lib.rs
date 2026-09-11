@@ -114,7 +114,8 @@ pub use session_restore::{
     SessionWindow, SessionWindowId,
 };
 pub use session_restore_sync::{
-    ProfileSessionRestoreSync, ProfileSessionRestoreSyncError, ProfileSessionRestoreSyncOutcome,
+    ProfileSessionRestoreStartup, ProfileSessionRestoreSync, ProfileSessionRestoreSyncError,
+    ProfileSessionRestoreSyncOutcome,
 };
 pub use tab_activation::{
     TabActivationId, TabActivationIntent, TabActivationStart, TabCycleDirection,

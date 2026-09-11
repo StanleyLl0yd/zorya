@@ -1,4 +1,4 @@
-use crate::app::{BrowserApp, BrowserWindowId, TabId};
+use crate::app::{BrowserApp, BrowserModelError, BrowserWindowId, TabId};
 use crate::profile_runtime::{ProfileId, ProfileRuntime, ProfileSessionRestoreRuntimeError};
 use crate::session_restore::{
     SessionRestoreError, SessionRestoreSnapshot, SessionTabId, SessionWindowId,
@@ -31,6 +31,7 @@ impl ProfileSessionRestoreSyncOutcome {
 pub enum ProfileSessionRestoreSyncError {
     Runtime(ProfileSessionRestoreRuntimeError),
     SessionRestore(SessionRestoreError),
+    BrowserModel(BrowserModelError),
     NonEmptySnapshot { windows: usize, tabs: usize },
     BindingsOutOfSync,
 }
@@ -40,6 +41,7 @@ impl fmt::Display for ProfileSessionRestoreSyncError {
         match self {
             Self::Runtime(error) => error.fmt(formatter),
             Self::SessionRestore(error) => error.fmt(formatter),
+            Self::BrowserModel(error) => error.fmt(formatter),
             Self::NonEmptySnapshot { windows, tabs } => write!(
                 formatter,
                 "cannot attach an empty browser-session binding set to a persisted session containing {windows} windows and {tabs} tabs"
@@ -56,6 +58,7 @@ impl std::error::Error for ProfileSessionRestoreSyncError {
         match self {
             Self::Runtime(error) => Some(error),
             Self::SessionRestore(error) => Some(error),
+            Self::BrowserModel(error) => Some(error),
             Self::NonEmptySnapshot { .. } | Self::BindingsOutOfSync => None,
         }
     }
@@ -73,11 +76,50 @@ impl From<SessionRestoreError> for ProfileSessionRestoreSyncError {
     }
 }
 
+impl From<BrowserModelError> for ProfileSessionRestoreSyncError {
+    fn from(error: BrowserModelError) -> Self {
+        Self::BrowserModel(error)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileSessionRestoreSync {
     profile: ProfileId,
     windows: BTreeMap<BrowserWindowId, SessionWindowId>,
     tabs: BTreeMap<(BrowserWindowId, TabId), SessionTabId>,
+}
+
+#[derive(Debug)]
+pub struct ProfileSessionRestoreStartup {
+    browser: BrowserApp,
+    sync: ProfileSessionRestoreSync,
+    restored: bool,
+}
+
+impl ProfileSessionRestoreStartup {
+    pub const fn browser(&self) -> &BrowserApp {
+        &self.browser
+    }
+
+    pub fn browser_mut(&mut self) -> &mut BrowserApp {
+        &mut self.browser
+    }
+
+    pub const fn sync(&self) -> &ProfileSessionRestoreSync {
+        &self.sync
+    }
+
+    pub fn sync_mut(&mut self) -> &mut ProfileSessionRestoreSync {
+        &mut self.sync
+    }
+
+    pub const fn restored(&self) -> bool {
+        self.restored
+    }
+
+    pub fn into_parts(self) -> (BrowserApp, ProfileSessionRestoreSync) {
+        (self.browser, self.sync)
+    }
 }
 
 impl ProfileSessionRestoreSync {
@@ -96,6 +138,71 @@ impl ProfileSessionRestoreSync {
             profile,
             windows: BTreeMap::new(),
             tabs: BTreeMap::new(),
+        })
+    }
+
+    pub fn restore_browser(
+        runtime: &ProfileRuntime,
+        profile: ProfileId,
+    ) -> Result<ProfileSessionRestoreStartup, ProfileSessionRestoreSyncError> {
+        let snapshot = runtime.active_session_restore(profile)?.clone();
+        if snapshot.is_empty() {
+            return Ok(ProfileSessionRestoreStartup {
+                browser: BrowserApp::bootstrap()?,
+                sync: Self {
+                    profile,
+                    windows: BTreeMap::new(),
+                    tabs: BTreeMap::new(),
+                },
+                restored: false,
+            });
+        }
+
+        let mut browser = BrowserApp::new();
+        let mut windows = BTreeMap::new();
+        let mut tabs = BTreeMap::new();
+
+        for session_window in snapshot.windows() {
+            let browser_window = browser.create_window()?;
+            windows.insert(browser_window, session_window.id());
+            let mut active_browser_tab = None;
+
+            for session_tab in session_window.tabs() {
+                let browser_tab = browser.create_tab(browser_window)?;
+                let navigation = browser
+                    .begin_navigation(browser_window, browser_tab, session_tab.location())?
+                    .intent()
+                    .id();
+                browser.commit_navigation(
+                    browser_window,
+                    browser_tab,
+                    navigation,
+                    session_tab.location(),
+                )?;
+                tabs.insert((browser_window, browser_tab), session_tab.id());
+                if session_window.active_tab() == Some(session_tab.id()) {
+                    active_browser_tab = Some(browser_tab);
+                }
+            }
+
+            if let Some(active_browser_tab) = active_browser_tab {
+                browser.set_active_tab(browser_window, active_browser_tab)?;
+            }
+        }
+
+        let sync = Self {
+            profile,
+            windows,
+            tabs,
+        };
+        debug_assert!(
+            sync.bindings_match_snapshot(&snapshot),
+            "fresh restore bindings must exactly cover the persisted snapshot"
+        );
+        Ok(ProfileSessionRestoreStartup {
+            browser,
+            sync,
+            restored: true,
         })
     }
 
@@ -340,6 +447,230 @@ mod tests {
         browser
             .commit_navigation(window, tab, navigation, location)
             .unwrap();
+    }
+
+    #[test]
+    fn empty_snapshot_bootstraps_without_mutating_runtime() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        let before_snapshot = runtime.active_session_restore(profile).unwrap().clone();
+        let before_revision = runtime.session_restore_mutation_revision(profile).unwrap();
+        let before_unsaved = runtime.session_restore_unsaved_mutations(profile).unwrap();
+
+        let startup = ProfileSessionRestoreSync::restore_browser(&runtime, profile).unwrap();
+
+        assert!(!startup.restored());
+        let windows = startup.browser().windows().collect::<Vec<_>>();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].tabs().len(), 1);
+        assert_eq!(windows[0].active_tab_id(), Some(windows[0].tabs()[0].id()));
+        assert!(windows[0].tabs()[0].navigation().current_entry().is_none());
+        assert!(windows[0].tabs()[0].navigation().pending().is_none());
+        assert!(windows[0].address_bar().edit().is_none());
+        assert_eq!(startup.sync().session_window(windows[0].id()), None);
+        assert_eq!(
+            startup
+                .sync()
+                .session_tab(windows[0].id(), windows[0].tabs()[0].id()),
+            None
+        );
+        assert_eq!(
+            runtime.active_session_restore(profile).unwrap(),
+            &before_snapshot
+        );
+        assert_eq!(
+            runtime.session_restore_mutation_revision(profile).unwrap(),
+            before_revision
+        );
+        assert_eq!(
+            runtime.session_restore_unsaved_mutations(profile).unwrap(),
+            before_unsaved
+        );
+    }
+
+    #[test]
+    fn restore_preserves_order_locations_active_tabs_empty_windows_and_exact_bindings() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        let first_window = runtime.add_session_window(profile).unwrap();
+        let first_tab = runtime
+            .add_session_tab(profile, first_window, "https://first.example/")
+            .unwrap();
+        let second_tab = runtime
+            .add_session_tab(profile, first_window, "https://second.example/")
+            .unwrap();
+        runtime
+            .set_active_session_tab(profile, first_window, second_tab)
+            .unwrap();
+        let empty_window = runtime.add_session_window(profile).unwrap();
+        let third_window = runtime.add_session_window(profile).unwrap();
+        let third_tab = runtime
+            .add_session_tab(profile, third_window, "https://third.example/path")
+            .unwrap();
+        let before_snapshot = runtime.active_session_restore(profile).unwrap().clone();
+        let before_revision = runtime.session_restore_mutation_revision(profile).unwrap();
+        let before_unsaved = runtime.session_restore_unsaved_mutations(profile).unwrap();
+
+        let startup = ProfileSessionRestoreSync::restore_browser(&runtime, profile).unwrap();
+
+        assert!(startup.restored());
+        let windows = startup.browser().windows().collect::<Vec<_>>();
+        assert_eq!(windows.len(), 3);
+        assert_eq!(
+            startup.sync().session_window(windows[0].id()),
+            Some(first_window)
+        );
+        assert_eq!(
+            startup.sync().session_window(windows[1].id()),
+            Some(empty_window)
+        );
+        assert_eq!(
+            startup.sync().session_window(windows[2].id()),
+            Some(third_window)
+        );
+
+        assert_eq!(windows[0].tabs().len(), 2);
+        assert_eq!(
+            startup
+                .sync()
+                .session_tab(windows[0].id(), windows[0].tabs()[0].id()),
+            Some(first_tab)
+        );
+        assert_eq!(
+            startup
+                .sync()
+                .session_tab(windows[0].id(), windows[0].tabs()[1].id()),
+            Some(second_tab)
+        );
+        assert_eq!(
+            windows[0].tabs()[0]
+                .navigation()
+                .current_entry()
+                .unwrap()
+                .location(),
+            "https://first.example/"
+        );
+        assert_eq!(
+            windows[0].tabs()[1]
+                .navigation()
+                .current_entry()
+                .unwrap()
+                .location(),
+            "https://second.example/"
+        );
+        assert_eq!(windows[0].active_tab_id(), Some(windows[0].tabs()[1].id()));
+        for tab in windows[0].tabs() {
+            assert!(tab.navigation().pending().is_none());
+        }
+        assert!(windows[0].address_bar().edit().is_none());
+
+        assert!(windows[1].tabs().is_empty());
+        assert_eq!(windows[1].active_tab_id(), None);
+        assert!(windows[1].address_bar().edit().is_none());
+
+        assert_eq!(windows[2].tabs().len(), 1);
+        assert_eq!(
+            startup
+                .sync()
+                .session_tab(windows[2].id(), windows[2].tabs()[0].id()),
+            Some(third_tab)
+        );
+        assert_eq!(
+            windows[2].tabs()[0]
+                .navigation()
+                .current_entry()
+                .unwrap()
+                .location(),
+            "https://third.example/path"
+        );
+        assert_eq!(windows[2].active_tab_id(), Some(windows[2].tabs()[0].id()));
+        assert!(windows[2].tabs()[0].navigation().pending().is_none());
+        assert!(windows[2].address_bar().edit().is_none());
+
+        assert_eq!(
+            runtime.active_session_restore(profile).unwrap(),
+            &before_snapshot
+        );
+        assert_eq!(
+            runtime.session_restore_mutation_revision(profile).unwrap(),
+            before_revision
+        );
+        assert_eq!(
+            runtime.session_restore_unsaved_mutations(profile).unwrap(),
+            before_unsaved
+        );
+    }
+
+    #[test]
+    fn first_sync_after_restore_is_no_op_and_later_navigation_keeps_session_tab_identity() {
+        let root = TempRoot::new();
+        let mut runtime = ProfileRuntime::new();
+        let profile = load_profile(&mut runtime, root.path());
+        let session_window = runtime.add_session_window(profile).unwrap();
+        let session_tab = runtime
+            .add_session_tab(profile, session_window, "https://stable.example/")
+            .unwrap();
+        let before_revision = runtime.session_restore_mutation_revision(profile).unwrap();
+        let startup = ProfileSessionRestoreSync::restore_browser(&runtime, profile).unwrap();
+        let (mut browser, mut sync) = startup.into_parts();
+        let browser_window = browser.windows().next().unwrap().id();
+        let browser_tab = browser.window(browser_window).unwrap().tabs()[0].id();
+
+        let first = sync.synchronize(&mut runtime, &browser).unwrap();
+        assert!(!first.changed());
+        assert_eq!(
+            runtime.session_restore_mutation_revision(profile).unwrap(),
+            before_revision
+        );
+        assert_eq!(sync.session_window(browser_window), Some(session_window));
+        assert_eq!(
+            sync.session_tab(browser_window, browser_tab),
+            Some(session_tab)
+        );
+
+        commit_location(
+            &mut browser,
+            browser_window,
+            browser_tab,
+            "https://changed.example/final",
+        );
+        let second = sync.synchronize(&mut runtime, &browser).unwrap();
+        assert!(second.changed());
+        assert_eq!(
+            sync.session_tab(browser_window, browser_tab),
+            Some(session_tab)
+        );
+        assert_eq!(
+            runtime.session_restore_mutation_revision(profile).unwrap(),
+            before_revision + 1
+        );
+        assert_eq!(
+            runtime
+                .active_session_restore(profile)
+                .unwrap()
+                .window(session_window)
+                .unwrap()
+                .tabs()[0]
+                .location(),
+            "https://changed.example/final"
+        );
+    }
+
+    #[test]
+    fn restore_rejects_stale_profile_before_exposing_startup() {
+        let root = TempRoot::new();
+        let mut source_runtime = ProfileRuntime::new();
+        let stale = load_profile(&mut source_runtime, root.path());
+        let runtime = ProfileRuntime::new();
+
+        assert!(matches!(
+            ProfileSessionRestoreSync::restore_browser(&runtime, stale),
+            Err(ProfileSessionRestoreSyncError::Runtime(
+                ProfileSessionRestoreRuntimeError::StaleProfile { expected: None, actual }
+            )) if actual == stale
+        ));
     }
 
     #[test]
