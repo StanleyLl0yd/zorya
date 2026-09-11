@@ -1,3 +1,7 @@
+use crate::profile_path::{
+    ProfilePathError, prepare_profile_storage_paths, verify_not_redirected_if_present,
+    verify_profile_storage_paths,
+};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -138,7 +142,8 @@ pub struct ProfileLock {
 impl ProfileLock {
     pub fn acquire(root: impl Into<PathBuf>) -> Result<Self, ProfileLockError> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(|error| io_error("create profile root", &root, error))?;
+        prepare_profile_storage_paths(&root)
+            .map_err(|error| profile_path_error("prepare profile storage paths", error))?;
         let path = root.join(PROFILE_LOCK_FILE_NAME);
         let owner = next_owner()?;
 
@@ -185,7 +190,8 @@ impl ProfileLock {
         expected: ProfileLockOwner,
     ) -> Result<Self, ProfileLockError> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(|error| io_error("create profile root", &root, error))?;
+        prepare_profile_storage_paths(&root)
+            .map_err(|error| profile_path_error("prepare profile storage paths", error))?;
         let path = root.join(PROFILE_LOCK_FILE_NAME);
 
         remove_exact_owner(&path, expected, true)?;
@@ -193,6 +199,8 @@ impl ProfileLock {
     }
 
     pub fn verify(&self) -> Result<(), ProfileLockError> {
+        verify_profile_storage_paths(&self.root)
+            .map_err(|error| profile_path_error("verify profile storage paths", error))?;
         match read_owner_if_present(&self.path)? {
             Some(actual) if actual == self.owner => Ok(()),
             actual => Err(ProfileLockError::OwnershipLost {
@@ -262,6 +270,8 @@ fn write_lock_record(file: &mut File, record: &[u8], path: &Path) -> Result<(), 
 }
 
 fn read_owner_if_present(path: &Path) -> Result<Option<ProfileLockOwner>, ProfileLockError> {
+    verify_not_redirected_if_present(path)
+        .map_err(|error| profile_path_error("verify profile lock path", error))?;
     let entries = match fs::read_dir(path) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -382,6 +392,14 @@ fn remove_exact_owner(
             Err(ProfileLockError::Corrupt { path }) => Err(ProfileLockError::Corrupt { path }),
             Err(_) => Err(io_error("remove profile lock directory", path, error)),
         },
+    }
+}
+
+fn profile_path_error(operation: &'static str, error: ProfilePathError) -> ProfileLockError {
+    ProfileLockError::Io {
+        operation,
+        path: error.path().to_owned(),
+        kind: error.kind(),
     }
 }
 

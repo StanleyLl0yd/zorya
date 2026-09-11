@@ -18,6 +18,7 @@ mod profile_catalog;
 mod profile_history_scheduler;
 mod profile_lock;
 mod profile_metadata;
+mod profile_path;
 mod profile_runtime;
 mod profile_session_restore_scheduler;
 mod profile_settings_scheduler;
