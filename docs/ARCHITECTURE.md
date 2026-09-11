@@ -121,7 +121,11 @@ The snapshot does not commit activation, create Views or authorize Web presentat
 
 Every hosted View receives a Zorya-owned monotonically increasing generation. Frame work is represented by `EngineFrameRequest`, which binds the product `TabId`, View generation and Rarog frame request number. A completion is accepted only while all three still identify the currently active request. Closing and recreating a View for the same tab therefore invalidates work from the previous View even when Rarog's per-View request numbering starts again from the same value.
 
-The adapter is responsible for View creation/destruction, deterministic local HTML loading, viewport conversion, Rarog frame-request lifecycle and the embedder side of Rarog navigation transport. Each remote navigation receives a separate Host-owned pending navigation context, context-scoped Network capability and operation. The previously committed context remains authoritative while the target is pending; only a successful Rarog document commit promotes the target and retires the old context. Failure, cancellation, supersession and View retirement close pending authority. Zorya never receives authoritative site-process identity and does not implement Web parsing, layout, paint, Fetch policy, navigation semantics or compositor behavior.
+The adapter is responsible for View creation/destruction, deterministic local HTML loading, viewport conversion, Rarog frame-request lifecycle and the embedder side of Rarog navigation transport. Each remote navigation receives a separate Host-owned pending navigation context, context-scoped Network capability and operation. The previously committed context remains authoritative while the target is pending; only a successful Rarog document commit promotes the target and retires the old context. Failure, cancellation, supersession and View retirement close pending authority.
+
+For a committed remote document, `EngineHost::committed_document_authority` resolves the stored committed context back through the live Rarog `HostControlPlane`, verifies that exact context still exists, resolves its Rarog-owned Site identity to the current Host-assigned Site process, and returns only Zorya wrapper tokens together with the stable product `TabId` and current View generation. Pending navigation never displaces that snapshot before commit; same-site commits can retain the Host-assigned Site-process token while receiving a new context token, and cross-site commits expose the replacement Host assignment. Local `about:blank`/HTML documents expose no remote Site-process authority. If Rarog has invalidated or retired the committed Host state, Zorya fails closed with an engine/Host consistency error instead of reconstructing authority from browser display strings. Context/process tokens are ephemeral Host-lifetime authority markers: they are never product identities and must not enter profile/session persistence.
+
+This authority snapshot makes Rarog process/site ownership observable to later Z4 crash-recovery and brokering work without pretending that Zorya owns Site identity. It does not launch Site children, move document execution out of process, implement Windows IPC/sandboxing, or claim complete process isolation; those remain gated by the pinned Rarog process/platform contracts. Zorya also does not implement Web parsing, layout, paint, Fetch policy, navigation semantics or compositor behavior.
 
 The Z1 start fixture is loaded by Rarog with `BaseUrl::about_blank()`. Zorya therefore represents the startup document with the browser-history display location `about:blank` rather than inventing a privileged or origin-bearing internal URL. The browser model starts that navigation before native initialization, commits it only after the Rarog View has loaded and the initial Web-content surface has attached successfully, records initialization failure against the pending navigation, and stops the pending navigation if the shell closes first. This product-history transition does not create or override Rarog URL/origin semantics.
 
@@ -143,6 +147,7 @@ Rarog is authoritative for:
 
 - Web document and script semantics;
 - URL/origin/site security primitives exposed by its public API;
+- Host-owned navigation-context, Site-process assignment and capability authority exposed by its public API;
 - style, layout, fragments, display lists and rendering;
 - engine scheduling/invalidation semantics;
 - Web resource and compatibility behavior;
@@ -156,7 +161,7 @@ Treat all Web-controlled input as untrusted, including titles, URLs, suggested f
 
 Browser chrome is privileged. Web content must not be able to impersonate, overlap, mutate, or directly own privileged browser controls.
 
-Future Rarog process/site isolation must remain visible in Zorya architecture. Do not design product state around the assumption that Web content permanently runs in the same process as browser chrome.
+Rarog process/site isolation and authority must remain visible in Zorya architecture. Host context/process tokens are ephemeral authority references, not browser identities; product state must not assume that Web content permanently runs in the same process as browser chrome or persist those tokens as durable identity.
 
 ## Navigation boundary
 
