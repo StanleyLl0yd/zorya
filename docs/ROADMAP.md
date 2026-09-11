@@ -60,7 +60,7 @@ The existing rarog-window binary remains a small engine reference host. Product 
 
 Tracks Rarog process/isolation maturity rather than replacing it.
 
-- host/site process integration;
+- host/site process integration starts with an `EngineHost`-owned committed-document authority snapshot derived only from the live Rarog Host navigation context and Site-process assignment, bound to stable product `TabId` plus current View generation; local documents expose no remote authority, pending/cancelled/failed navigation cannot displace committed authority, same-site commits reuse only Rarog-assigned process authority, cross-site commits expose replacement authority, and retired Host state fails closed rather than reconstructing or guessing a process identity; these process/context tokens are ephemeral authority markers, never product identities or persisted profile/session state. This foundation does not claim production Site execution, Windows IPC, sandboxing or complete process isolation while those remain active Rarog R4 work;
 - crash recovery;
 - capability brokering;
 - download/file/external-protocol hardening;
