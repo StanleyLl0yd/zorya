@@ -88,6 +88,54 @@ impl EngineNavigationRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EngineNavigationContextToken(u64);
+
+impl EngineNavigationContextToken {
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EngineSiteProcessToken(u64);
+
+impl EngineSiteProcessToken {
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Ephemeral Rarog Host authority for the currently committed remote document.
+///
+/// The contained tokens are Host-lifetime authority markers. They are not browser product
+/// identities and must not be persisted or substituted for `TabId` or other product-owned IDs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineCommittedDocumentAuthority {
+    tab: TabId,
+    view_generation: u64,
+    navigation_context: EngineNavigationContextToken,
+    site_process: EngineSiteProcessToken,
+}
+
+impl EngineCommittedDocumentAuthority {
+    pub const fn tab(self) -> TabId {
+        self.tab
+    }
+
+    pub const fn view_generation(self) -> u64 {
+        self.view_generation
+    }
+
+    pub const fn navigation_context(self) -> EngineNavigationContextToken {
+        self.navigation_context
+    }
+
+    pub const fn site_process(self) -> EngineSiteProcessToken {
+        self.site_process
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineNavigationPoll {
     Pending,
@@ -292,6 +340,38 @@ impl EngineHost {
 
     pub fn has_view(&self, tab: TabId) -> bool {
         self.views.contains_key(&tab)
+    }
+
+    pub fn committed_document_authority(
+        &self,
+        tab: TabId,
+    ) -> Result<Option<EngineCommittedDocumentAuthority>, EngineHostError> {
+        let hosted = self
+            .views
+            .get(&tab)
+            .ok_or(EngineHostError::UnknownTab(tab))?;
+        let Some(context) = hosted.committed_context else {
+            return Ok(None);
+        };
+
+        let snapshot = self
+            .host
+            .navigation_context(context)
+            .map_err(|_| EngineHostError::InconsistentNavigationState { tab })?;
+        if snapshot.context() != context {
+            return Err(EngineHostError::InconsistentNavigationState { tab });
+        }
+        let process = self
+            .host
+            .process_for_site(snapshot.site())
+            .ok_or(EngineHostError::InconsistentNavigationState { tab })?;
+
+        Ok(Some(EngineCommittedDocumentAuthority {
+            tab,
+            view_generation: hosted.generation,
+            navigation_context: EngineNavigationContextToken(context.get()),
+            site_process: EngineSiteProcessToken(process.get()),
+        }))
     }
 
     pub fn load_local_html(
@@ -733,6 +813,11 @@ mod tests {
         host.create_view(tab).expect("view");
         host.load_local_html(tab, "<main>Zorya</main>")
             .expect("local document");
+        assert_eq!(
+            host.committed_document_authority(tab)
+                .expect("local authority query"),
+            None
+        );
 
         let request = host
             .begin_frame(tab)
@@ -994,6 +1079,95 @@ mod tests {
     }
 
     #[test]
+    fn committed_authority_tracks_same_site_reuse_and_cross_site_replacement() {
+        let tab = initial_tab();
+        let (mut host, _) = engine_host_with_fixture(None);
+        host.create_view(tab).expect("view");
+        assert_eq!(
+            host.committed_document_authority(tab)
+                .expect("empty authority"),
+            None
+        );
+
+        let first = host
+            .begin_navigation(tab, "https://same.example/first")
+            .expect("begin first")
+            .expect("first forwarded");
+        assert!(matches!(
+            host.poll_navigation(first).expect("poll first"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let first_authority = host
+            .committed_document_authority(tab)
+            .expect("first authority query")
+            .expect("first authority");
+        assert_eq!(first_authority.tab(), tab);
+        assert!(first_authority.view_generation() > 0);
+        assert!(first_authority.navigation_context().get() > 0);
+        assert!(first_authority.site_process().get() > 0);
+
+        let same_site = host
+            .begin_navigation(tab, "https://same.example/second")
+            .expect("begin same-site")
+            .expect("same-site forwarded");
+        assert_eq!(
+            host.committed_document_authority(tab)
+                .expect("pending same-site authority"),
+            Some(first_authority)
+        );
+        assert!(matches!(
+            host.poll_navigation(same_site).expect("poll same-site"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let same_site_authority = host
+            .committed_document_authority(tab)
+            .expect("same-site authority query")
+            .expect("same-site authority");
+        assert_ne!(
+            same_site_authority.navigation_context(),
+            first_authority.navigation_context()
+        );
+        assert_eq!(
+            same_site_authority.site_process(),
+            first_authority.site_process()
+        );
+        assert_eq!(
+            same_site_authority.view_generation(),
+            first_authority.view_generation()
+        );
+
+        let cross_site = host
+            .begin_navigation(tab, "https://other.invalid/")
+            .expect("begin cross-site")
+            .expect("cross-site forwarded");
+        assert_eq!(
+            host.committed_document_authority(tab)
+                .expect("pending cross-site authority"),
+            Some(same_site_authority)
+        );
+        assert!(matches!(
+            host.poll_navigation(cross_site).expect("poll cross-site"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let cross_site_authority = host
+            .committed_document_authority(tab)
+            .expect("cross-site authority query")
+            .expect("cross-site authority");
+        assert_ne!(
+            cross_site_authority.navigation_context(),
+            same_site_authority.navigation_context()
+        );
+        assert_ne!(
+            cross_site_authority.site_process(),
+            same_site_authority.site_process()
+        );
+        assert_eq!(
+            cross_site_authority.view_generation(),
+            first_authority.view_generation()
+        );
+    }
+
+    #[test]
     fn successful_remote_navigation_promotes_target_before_retiring_committed_context() {
         let tab = initial_tab();
         let (mut host, _) = engine_host_with_fixture(None);
@@ -1060,12 +1234,21 @@ mod tests {
             .get(&tab)
             .and_then(|hosted| hosted.committed_context)
             .expect("committed context");
+        let committed_authority = host
+            .committed_document_authority(tab)
+            .expect("committed authority query")
+            .expect("committed authority");
 
         let failing = host
             .begin_navigation(tab, "https://failing.example/")
             .expect("begin failing")
             .expect("forwarded");
         assert_eq!(host.host.active_navigation_contexts(), 2);
+        assert_eq!(
+            host.committed_document_authority(tab)
+                .expect("pending failing authority"),
+            Some(committed_authority)
+        );
         assert!(matches!(
             host.poll_navigation(failing).expect("network failure"),
             EngineNavigationPoll::Failed { .. }
@@ -1078,6 +1261,11 @@ mod tests {
             Some(committed_context)
         );
         assert!(host.host.navigation_context(committed_context).is_ok());
+        assert_eq!(
+            host.committed_document_authority(tab)
+                .expect("authority after failure"),
+            Some(committed_authority)
+        );
     }
 
     #[test]
@@ -1209,16 +1397,118 @@ mod tests {
             .get(&tab)
             .and_then(|hosted| hosted.committed_context)
             .expect("committed context");
+        let committed_authority = host
+            .committed_document_authority(tab)
+            .expect("committed authority query")
+            .expect("committed authority");
 
         let pending = host
             .begin_navigation(tab, "https://pending.example/")
             .expect("begin pending")
             .expect("forwarded");
+        assert_eq!(
+            host.committed_document_authority(tab)
+                .expect("pending authority query"),
+            Some(committed_authority)
+        );
         assert!(host.cancel_navigation(pending).expect("cancel"));
         assert_eq!(host.host.active_navigation_contexts(), 1);
         assert_eq!(stats.lock().expect("stats").cancels, 1);
         assert!(host.host.navigation_context(committed_context).is_ok());
+        assert_eq!(
+            host.committed_document_authority(tab)
+                .expect("authority after cancel"),
+            Some(committed_authority)
+        );
         assert!(!host.cancel_navigation(pending).expect("stale cancel"));
+    }
+
+    #[test]
+    fn recreated_view_invalidates_committed_authority_by_generation() {
+        let tab = initial_tab();
+        let (mut host, _) = engine_host_with_fixture(None);
+        host.create_view(tab).expect("first view");
+
+        let first = host
+            .begin_navigation(tab, "https://same.example/first")
+            .expect("begin first")
+            .expect("first forwarded");
+        assert!(matches!(
+            host.poll_navigation(first).expect("commit first"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let stale_authority = host
+            .committed_document_authority(tab)
+            .expect("first authority query")
+            .expect("first authority");
+
+        assert!(host.close_view(tab).expect("close first view"));
+        host.create_view(tab).expect("replacement view");
+        assert_eq!(
+            host.committed_document_authority(tab)
+                .expect("replacement empty authority"),
+            None
+        );
+
+        let replacement = host
+            .begin_navigation(tab, "https://same.example/replacement")
+            .expect("begin replacement")
+            .expect("replacement forwarded");
+        assert!(matches!(
+            host.poll_navigation(replacement)
+                .expect("commit replacement"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let current_authority = host
+            .committed_document_authority(tab)
+            .expect("replacement authority query")
+            .expect("replacement authority");
+        assert_ne!(
+            current_authority.view_generation(),
+            stale_authority.view_generation()
+        );
+        assert_ne!(
+            current_authority.navigation_context(),
+            stale_authority.navigation_context()
+        );
+        assert_ne!(
+            current_authority.site_process(),
+            stale_authority.site_process()
+        );
+    }
+
+    #[test]
+    fn retired_host_authority_fails_closed_instead_of_guessing_process_identity() {
+        let tab = initial_tab();
+        let (mut host, _) = engine_host_with_fixture(None);
+        host.create_view(tab).expect("view");
+
+        let committed = host
+            .begin_navigation(tab, "https://lost.example/")
+            .expect("begin committed")
+            .expect("forwarded");
+        assert!(matches!(
+            host.poll_navigation(committed).expect("commit"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let context = host
+            .views
+            .get(&tab)
+            .and_then(|hosted| hosted.committed_context)
+            .expect("committed context");
+        let site = host
+            .host
+            .navigation_context(context)
+            .expect("live context")
+            .site()
+            .clone();
+        let process = host.host.process_for_site(&site).expect("live process");
+        host.host.process_lost(process).expect("process loss");
+
+        assert_eq!(
+            host.committed_document_authority(tab),
+            Err(EngineHostError::InconsistentNavigationState { tab })
+        );
     }
 
     #[test]
