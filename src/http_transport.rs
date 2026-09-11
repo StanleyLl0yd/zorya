@@ -4,8 +4,10 @@ use rarog_fetch::{
 };
 use reqwest::{Client, Method};
 use std::collections::BTreeMap;
+use std::future::{Future, poll_fn};
 use std::num::NonZeroU64;
 use std::sync::mpsc as std_mpsc;
+use std::task::Poll;
 use std::thread::{self, JoinHandle};
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch};
@@ -224,12 +226,24 @@ async fn run_request(
         return;
     }
 
-    let request = execute_request(client, request);
-    tokio::pin!(request);
+    let mut request = Box::pin(execute_request(client, request));
     let result = loop {
-        tokio::select! {
-            result = &mut request => break result,
-            changed = cancellation.changed() => {
+        let outcome = {
+            let mut changed = Box::pin(cancellation.changed());
+            poll_fn(|context| {
+                if let Poll::Ready(result) = request.as_mut().poll(context) {
+                    return Poll::Ready(Ok(result));
+                }
+                match changed.as_mut().poll(context) {
+                    Poll::Ready(changed) => Poll::Ready(Err(changed)),
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await
+        };
+        match outcome {
+            Ok(result) => break result,
+            Err(changed) => {
                 if changed.is_err() || *cancellation.borrow() {
                     return;
                 }
