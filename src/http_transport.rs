@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::sync::mpsc as std_mpsc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch};
 
@@ -216,31 +215,34 @@ async fn run_request(
     command: TransportCommand,
     completions: mpsc::Sender<TransportCompletion>,
 ) {
-    if *command.cancellation.borrow() {
+    let TransportCommand {
+        ticket,
+        request,
+        mut cancellation,
+    } = command;
+    if *cancellation.borrow() {
         return;
     }
 
-    let mut request = Box::pin(execute_request(client, command.request));
+    let request = execute_request(client, request);
+    tokio::pin!(request);
     let result = loop {
-        if *command.cancellation.borrow() {
-            return;
-        }
-
-        match tokio::time::timeout(Duration::from_millis(10), request.as_mut()).await {
-            Ok(result) => break result,
-            Err(_) => continue,
+        tokio::select! {
+            result = &mut request => break result,
+            changed = cancellation.changed() => {
+                if changed.is_err() || *cancellation.borrow() {
+                    return;
+                }
+            }
         }
     };
 
-    if *command.cancellation.borrow() {
+    if *cancellation.borrow() {
         return;
     }
 
     let _ = completions
-        .send(TransportCompletion {
-            ticket: command.ticket,
-            result,
-        })
+        .send(TransportCompletion { ticket, result })
         .await;
 }
 
