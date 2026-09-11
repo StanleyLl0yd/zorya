@@ -16,10 +16,10 @@ use crate::{
     ProfileHistorySavePolicy, ProfileHistorySaveScheduler, ProfileHistorySaveUrgency, ProfileId,
     ProfileLock, ProfileLockOwner, ProfileRuntime, ProfileRuntimeError, ProfileSelectionIntent,
     ProfileSessionRestoreSavePolicy, ProfileSessionRestoreSaveScheduler,
-    ProfileSessionRestoreSaveUrgency, ProfileSettingsSavePolicy, ProfileSettingsSaveScheduler,
-    ProfileSettingsSaveUrgency, ProfileStorageId, ProfileWorker, ProfileWorkerCompletion,
-    TabActivationStart, TabCloseStart, TabCycleDirection, TabId, TabPresentationHandoff,
-    TargetFramePermit, WebContentPresentation,
+    ProfileSessionRestoreSaveUrgency, ProfileSessionRestoreSync, ProfileSettingsSavePolicy,
+    ProfileSettingsSaveScheduler, ProfileSettingsSaveUrgency, ProfileStorageId, ProfileWorker,
+    ProfileWorkerCompletion, TabActivationStart, TabCloseStart, TabCycleDirection, TabId,
+    TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 use pollster::block_on;
 use rarog_compositor::{
@@ -27,7 +27,7 @@ use rarog_compositor::{
 };
 use rarog_compositor_wgpu::WgpuCompositorBackend;
 use rarog_platform_windows::{WindowsGpuDevice, WindowsGpuError, WindowsGpuSurface};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
@@ -578,6 +578,7 @@ struct NativeShell {
     history_scheduler: ProfileHistorySaveScheduler,
     bookmarks_scheduler: ProfileBookmarksSaveScheduler,
     session_restore_scheduler: ProfileSessionRestoreSaveScheduler,
+    session_restore_sync: Option<ProfileSessionRestoreSync>,
     profile_clock: NativeProfileClock,
     initial_profile_selection: Option<ProfileSelectionIntent>,
     profiles_root: PathBuf,
@@ -596,10 +597,12 @@ struct NativeShell {
     pending_tab_create: Option<PendingNativeTabCreate>,
     pending_view_close: Option<TabId>,
     pending_navigation_targets: BTreeMap<TabId, WorkerNavigationTarget>,
+    materialized_tabs: BTreeSet<TabId>,
     rapid_smoke_tabs: Vec<TabId>,
     restore_focus_after_activation: bool,
     modifiers: ModifiersState,
     initial_navigation: Option<NavigationId>,
+    restored_reload_pending: bool,
     pending_navigation_cancel: Option<WorkerNavigationTarget>,
     http_smoke_location: Option<String>,
     http_smoke_navigation: Option<NavigationId>,
@@ -652,6 +655,7 @@ impl NativeShell {
             session_restore_scheduler: ProfileSessionRestoreSaveScheduler::new(
                 native_session_restore_save_policy(),
             ),
+            session_restore_sync: None,
             profile_clock: NativeProfileClock::new(),
             initial_profile_selection: Some(initial_profile_selection),
             profiles_root,
@@ -670,10 +674,12 @@ impl NativeShell {
             pending_tab_create: None,
             pending_view_close: None,
             pending_navigation_targets: BTreeMap::new(),
+            materialized_tabs: BTreeSet::new(),
             rapid_smoke_tabs: Vec::new(),
             restore_focus_after_activation: false,
             modifiers: ModifiersState::empty(),
             initial_navigation: Some(initial_navigation),
+            restored_reload_pending: false,
             pending_navigation_cancel: None,
             http_smoke_location,
             http_smoke_navigation: None,
@@ -719,6 +725,129 @@ impl NativeShell {
             .active_profile()
             .map(|profile| profile.id())
             .ok_or_else(|| "native browser work requires an active profile".to_string())
+    }
+
+    fn install_active_profile_session_restore(&mut self) -> Result<(), String> {
+        let profile = self.active_profile_id()?;
+        let startup = ProfileSessionRestoreSync::restore_browser(&self.profile_runtime, profile)
+            .map_err(|error| format!("failed to restore active browser session: {error}"))?;
+        let restored = startup.restored();
+        let (mut browser, mut sync) = startup.into_parts();
+        let first_sync = sync
+            .synchronize(&mut self.profile_runtime, &browser)
+            .map_err(|error| format!("failed to validate restored browser session: {error}"))?;
+        if first_sync.changed() {
+            return Err(
+                "restored browser session changed persisted state during first synchronization"
+                    .into(),
+            );
+        }
+
+        let native_target = browser
+            .windows()
+            .find_map(|window| window.active_tab_id().map(|tab| (window.id(), tab)));
+        let (browser_window, tab) = match native_target {
+            Some(target) => target,
+            None if restored => {
+                let window = browser
+                    .create_window()
+                    .map_err(|error| format!("failed to append native restore window: {error}"))?;
+                let tab = browser
+                    .create_tab(window)
+                    .map_err(|error| format!("failed to append native restore tab: {error}"))?;
+                (window, tab)
+            }
+            None => {
+                return Err("empty session bootstrap did not provide an active native tab".into());
+            }
+        };
+
+        let has_committed_location = browser
+            .window(browser_window)
+            .and_then(|window| window.tab(tab))
+            .and_then(|tab| tab.navigation().current_entry())
+            .is_some();
+        let initial_navigation = if has_committed_location {
+            None
+        } else {
+            Some(
+                browser
+                    .begin_navigation(browser_window, tab, START_LOCATION)
+                    .map_err(|error| {
+                        format!("failed to begin native bootstrap navigation: {error}")
+                    })?
+                    .intent()
+                    .id(),
+            )
+        };
+
+        self.browser = browser;
+        self.browser_window = browser_window;
+        self.tab = tab;
+        self.presentation = TabPresentationHandoff::new(tab);
+        self.session_restore_sync = Some(sync);
+        self.materialized_tabs.clear();
+        self.materialized_tabs.insert(tab);
+        self.initial_navigation = initial_navigation;
+        self.restored_reload_pending = has_committed_location;
+        Ok(())
+    }
+
+    fn synchronize_session_restore(&mut self) -> Result<bool, String> {
+        if self.shutdown_requested {
+            return Ok(false);
+        }
+        let profile = self.active_profile_id()?;
+        let outcome = {
+            let sync = self.session_restore_sync.as_mut().ok_or_else(|| {
+                "native session restore synchronization is not installed".to_string()
+            })?;
+            if sync.profile() != profile {
+                return Err(format!(
+                    "native session restore synchronization belongs to profile {} instead of active profile {}",
+                    sync.profile().get(),
+                    profile.get()
+                ));
+            }
+            sync.synchronize(&mut self.profile_runtime, &self.browser)
+                .map_err(|error| format!("failed to synchronize native session restore: {error}"))?
+        };
+        if outcome.changed() {
+            self.drive_session_restore_save(ProfileSessionRestoreSaveUrgency::Normal)?;
+        }
+        Ok(outcome.changed())
+    }
+
+    fn start_restored_reload_if_ready(&mut self) -> Result<bool, String> {
+        if !self.restored_reload_pending
+            || !self.worker_ready
+            || self.profile_transition_in_progress()
+        {
+            return Ok(false);
+        }
+        if !self.materialized_tabs.contains(&self.tab) {
+            return Err(format!(
+                "restored native tab {} has no materialized Rarog View",
+                self.tab.get()
+            ));
+        }
+        let active = self
+            .browser
+            .window(self.browser_window)
+            .and_then(|window| window.active_tab_id());
+        if active != Some(self.tab) {
+            return Err(
+                "restored native presentation target is not the committed active tab".into(),
+            );
+        }
+        let start = self
+            .browser
+            .begin_reload(self.browser_window, self.tab)
+            .map_err(|error| format!("failed to begin restored page reload: {error}"))?
+            .ok_or_else(|| "restored active tab has no committed page to reload".to_string())?;
+        self.dispatch_navigation_start(self.tab, start)?;
+        self.restored_reload_pending = false;
+        Ok(true)
     }
 
     fn profile_transition_in_progress(&self) -> bool {
@@ -955,29 +1084,114 @@ impl NativeShell {
             return Err("session-restore persistence smoke started outside its run mode".into());
         }
         let profile = self.active_profile_id()?;
-        let marker_count = self
+        let persisted_markers = self
             .profile_runtime
             .active_session_restore(profile)
             .map_err(|error| format!("failed to inspect active session restore: {error}"))?
             .windows()
             .iter()
-            .flat_map(|window| window.tabs().iter())
-            .filter(|tab| tab.location() == SESSION_RESTORE_PERSISTENCE_SMOKE_LOCATION)
-            .count();
-        if marker_count > 1 {
-            return Err(
-                "session-restore persistence smoke found duplicate persisted markers".into(),
-            );
+            .flat_map(|window| {
+                window.tabs().iter().filter_map(move |tab| {
+                    (tab.location() == SESSION_RESTORE_PERSISTENCE_SMOKE_LOCATION)
+                        .then_some((window.id(), tab.id()))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        match persisted_markers.as_slice() {
+            [] => {
+                let browser_window = self.browser.create_window().map_err(|error| {
+                    format!("failed to create session smoke browser window: {error}")
+                })?;
+                let browser_tab = self.browser.create_tab(browser_window).map_err(|error| {
+                    format!("failed to create session smoke browser tab: {error}")
+                })?;
+                let navigation = self
+                    .browser
+                    .begin_navigation(
+                        browser_window,
+                        browser_tab,
+                        SESSION_RESTORE_PERSISTENCE_SMOKE_LOCATION,
+                    )
+                    .map_err(|error| {
+                        format!("failed to begin session smoke browser navigation: {error}")
+                    })?
+                    .intent()
+                    .id();
+                self.browser
+                    .commit_navigation(
+                        browser_window,
+                        browser_tab,
+                        navigation,
+                        SESSION_RESTORE_PERSISTENCE_SMOKE_LOCATION,
+                    )
+                    .map_err(|error| {
+                        format!("failed to commit session smoke browser navigation: {error}")
+                    })?;
+                if !self.synchronize_session_restore()? {
+                    return Err(
+                        "session-restore persistence smoke did not publish the BrowserApp marker"
+                            .into(),
+                    );
+                }
+                let sync = self.session_restore_sync.as_ref().ok_or_else(|| {
+                    "session-restore persistence smoke lost sync bindings".to_string()
+                })?;
+                if sync.session_window(browser_window).is_none()
+                    || sync.session_tab(browser_window, browser_tab).is_none()
+                {
+                    return Err(
+                        "session-restore persistence smoke did not bind the BrowserApp marker"
+                            .into(),
+                    );
+                }
+            }
+            [(persisted_window, persisted_tab)] => {
+                let restored_markers = self
+                    .browser
+                    .windows()
+                    .flat_map(|window| {
+                        window.tabs().iter().filter_map(move |tab| {
+                            tab.navigation()
+                                .current_entry()
+                                .is_some_and(|entry| {
+                                    entry.location() == SESSION_RESTORE_PERSISTENCE_SMOKE_LOCATION
+                                })
+                                .then_some((window.id(), tab.id()))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let [(browser_window, browser_tab)] = restored_markers.as_slice() else {
+                    return Err(format!(
+                        "session-restore persistence smoke expected one restored BrowserApp marker, found {}",
+                        restored_markers.len()
+                    ));
+                };
+                let sync = self.session_restore_sync.as_ref().ok_or_else(|| {
+                    "session-restore persistence smoke lost restored bindings".to_string()
+                })?;
+                if sync.session_window(*browser_window) != Some(*persisted_window)
+                    || sync.session_tab(*browser_window, *browser_tab) != Some(*persisted_tab)
+                {
+                    return Err(
+                        "session-restore persistence smoke restored the marker with incorrect persisted bindings"
+                            .into(),
+                    );
+                }
+                if self.synchronize_session_restore()? {
+                    return Err(
+                        "session-restore persistence smoke changed an exactly restored marker"
+                            .into(),
+                    );
+                }
+            }
+            _ => {
+                return Err(
+                    "session-restore persistence smoke found duplicate persisted markers".into(),
+                );
+            }
         }
-        if marker_count == 0 {
-            let window = self
-                .profile_runtime
-                .add_session_window(profile)
-                .map_err(|error| format!("failed to create session smoke window: {error}"))?;
-            self.profile_runtime
-                .add_session_tab(profile, window, SESSION_RESTORE_PERSISTENCE_SMOKE_LOCATION)
-                .map_err(|error| format!("failed to create session smoke tab: {error}"))?;
-        }
+
         self.shutdown(event_loop);
         Ok(())
     }
@@ -1177,17 +1391,18 @@ impl NativeShell {
         if self.pending_profile_session_reset.is_pending() {
             return Err("profile session reset is already pending".into());
         }
-        if !self.profile_replacement_browser_quiescent() {
-            return Err("profile session reset requires a quiescent browser".into());
+        let profile = self.active_profile_id()?;
+        let sync = self.session_restore_sync.as_ref().ok_or_else(|| {
+            "profile session reset requires installed restore bindings".to_string()
+        })?;
+        if sync.profile() != profile {
+            return Err("profile session reset restore bindings belong to another profile".into());
         }
-        let fresh_tab = self
-            .browser
-            .reset_window_for_profile_switch(self.browser_window)
-            .map_err(|error| {
-                format!("failed to reset browser session for profile switch: {error}")
-            })?;
-        self.tab = fresh_tab;
-        self.presentation = TabPresentationHandoff::new(fresh_tab);
+        if !self.materialized_tabs.contains(&self.tab) {
+            return Err("profile session reset target is not materialized".into());
+        }
+
+        self.presentation = TabPresentationHandoff::new(self.tab);
         self.pending_target_permit = None;
         self.surface_recovery_permit = None;
         self.pending_tab_create = None;
@@ -1199,16 +1414,9 @@ impl NativeShell {
         self.pending_frame.invalidate();
         self.pending_surface.invalidate();
 
-        let navigation = self
-            .browser
-            .begin_navigation(self.browser_window, fresh_tab, START_LOCATION)
-            .map_err(|error| format!("failed to begin fresh profile navigation: {error}"))?
-            .intent()
-            .id();
-        self.initial_navigation = Some(navigation);
         let target = self
             .requests
-            .allocate(self.browser_window, fresh_tab)
+            .allocate(self.browser_window, self.tab)
             .map_err(|error| error.to_string())?;
         self.pending_profile_session_reset
             .begin(target)
@@ -1660,10 +1868,18 @@ impl NativeShell {
 
         match self.profile_runtime.commit_selection(prepared) {
             Ok(commit) => {
-                if let Some(replaced) = commit.into_replaced_profile() {
-                    debug_assert!(self.pending_profile_replacement.is_none());
-                    self.replaced_profile_lock = Some(replaced.into_profile_lock());
-                    self.profile_cycle_smoke_trace("selection committed");
+                let replaced = commit
+                    .into_replaced_profile()
+                    .map(|profile| profile.into_profile_lock());
+                debug_assert!(self.pending_profile_replacement.is_none());
+                self.replaced_profile_lock = replaced;
+                self.profile_cycle_smoke_trace("selection committed");
+                if let Err(error) = self.install_active_profile_session_restore() {
+                    self.fail(event_loop, error);
+                    return;
+                }
+
+                if self.replaced_profile_lock.is_some() {
                     if let Err(error) = self.reset_native_session_for_profile_switch() {
                         self.fail(event_loop, error);
                         return;
@@ -2069,11 +2285,21 @@ impl NativeShell {
                                 Ok(false) => event_loop.set_control_flow(ControlFlow::Wait),
                                 Err(error) => self.fail(event_loop, error),
                             }
-                        } else if self.needs_redraw
-                            && !self.profile_transition_in_progress()
-                            && let Err(error) = self.start_frame()
-                        {
-                            self.fail(event_loop, error);
+                        } else {
+                            let replay_started = match self.start_restored_reload_if_ready() {
+                                Ok(started) => started,
+                                Err(error) => {
+                                    self.fail(event_loop, error);
+                                    return;
+                                }
+                            };
+                            if !replay_started
+                                && self.needs_redraw
+                                && !self.profile_transition_in_progress()
+                                && let Err(error) = self.start_frame()
+                            {
+                                self.fail(event_loop, error);
+                            }
                         }
                     }
                     ProfileLockReleasePurpose::ActiveShutdown => {
@@ -2663,6 +2889,19 @@ impl NativeShell {
 
     fn begin_native_tab_activation(&mut self, start: TabActivationStart) -> Result<(), String> {
         let intent = start.intent();
+        if !self.materialized_tabs.contains(&intent.to()) {
+            if start.superseded().is_some() {
+                return Err(
+                    "unmaterialized tab activation superseded an existing native handoff".into(),
+                );
+            }
+            self.browser
+                .cancel_tab_activation(self.browser_window, intent.id())
+                .map_err(|error| {
+                    format!("failed to cancel unmaterialized tab activation: {error}")
+                })?;
+            return Ok(());
+        }
         if intent.from() == intent.to() {
             self.browser
                 .cancel_tab_activation(self.browser_window, intent.id())
@@ -2699,6 +2938,7 @@ impl NativeShell {
             .map_err(|error| format!("failed to authorize target frame: {error}"))?;
 
         self.tab = committed;
+        self.synchronize_session_restore()?;
         self.pending_target_permit = Some(permit);
         self.dispatch_pending_target_frame()
     }
@@ -2878,6 +3118,7 @@ impl NativeShell {
                 if closed == self.tab {
                     return Err("active native tab closed without a presentation handoff".into());
                 }
+                self.synchronize_session_restore()?;
                 self.worker
                     .as_ref()
                     .ok_or_else(|| "render worker is unavailable".to_string())?
@@ -2885,6 +3126,14 @@ impl NativeShell {
             }
             TabCloseStart::ActiveWithFallback(close) => {
                 let intent = close.activation().intent();
+                if !self.materialized_tabs.contains(&close.fallback_tab()) {
+                    self.browser
+                        .cancel_tab_activation(self.browser_window, intent.id())
+                        .map_err(|error| {
+                            format!("failed to cancel close fallback without native View: {error}")
+                        })?;
+                    return Ok(());
+                }
                 self.presentation
                     .begin_activation(intent)
                     .map_err(|error| {
@@ -2913,6 +3162,7 @@ impl NativeShell {
                         close.fallback_tab().get()
                     ));
                 }
+                self.synchronize_session_restore()?;
 
                 self.presentation
                     .acknowledge_chrome_commit(intent.id(), committed)
@@ -2974,6 +3224,18 @@ impl NativeShell {
             BrowserCommand::ReloadOrStop => self.handle_reload_or_stop(),
             BrowserCommand::CycleTab(direction) => {
                 if self.pending_tab_create.is_some() {
+                    return Ok(());
+                }
+                if self
+                    .browser
+                    .window(self.browser_window)
+                    .is_some_and(|window| {
+                        window
+                            .tabs()
+                            .iter()
+                            .any(|tab| !self.materialized_tabs.contains(&tab.id()))
+                    })
+                {
                     return Ok(());
                 }
                 let effect = self
@@ -3206,6 +3468,8 @@ impl NativeShell {
             .map_err(|error| format!("failed to commit new-tab navigation: {error}"))?;
         let profile = self.active_profile_id()?;
         self.record_navigation_commit(profile, commit)?;
+        self.materialized_tabs.insert(target.tab());
+        self.synchronize_session_restore()?;
 
         if pending.activate_after_create {
             let start = self
@@ -3255,13 +3519,19 @@ impl NativeShell {
 
                 match result {
                     Ok(()) => {
-                        if let Err(error) = self.commit_initial_navigation() {
+                        if self.initial_navigation.is_some()
+                            && let Err(error) = self.commit_initial_navigation()
+                        {
                             self.fail(event_loop, error);
                             return;
                         }
                         self.worker_ready = true;
                         self.needs_redraw = true;
-                        self.request_redraw();
+                        match self.start_restored_reload_if_ready() {
+                            Ok(true) => {}
+                            Ok(false) => self.request_redraw(),
+                            Err(error) => self.fail(event_loop, error),
+                        }
                     }
                     Err(error) => self.fail(event_loop, error),
                 }
@@ -3279,6 +3549,7 @@ impl NativeShell {
                     Ok(()) => {
                         self.pending_view_close = None;
                         self.pending_navigation_targets.remove(&tab);
+                        self.materialized_tabs.remove(&tab);
                         if self.run_mode == RunMode::ExitAfterTabClose {
                             self.shutdown(event_loop);
                             return;
@@ -3347,6 +3618,10 @@ impl NativeShell {
                             self.fail(event_loop, error);
                             return;
                         }
+                        if let Err(error) = self.synchronize_session_restore() {
+                            self.fail(event_loop, error);
+                            return;
+                        }
                         self.clear_navigation_target_if_current(target);
                         if self.http_smoke_navigation == Some(target.navigation) {
                             self.http_smoke_committed = true;
@@ -3406,7 +3681,9 @@ impl NativeShell {
                 }
                 match result {
                     Ok(()) => {
-                        if let Err(error) = self.commit_initial_navigation() {
+                        if self.initial_navigation.is_some()
+                            && let Err(error) = self.commit_initial_navigation()
+                        {
                             self.fail(event_loop, error);
                             return;
                         }
@@ -3417,7 +3694,15 @@ impl NativeShell {
                             return;
                         }
                         self.update_window_title();
-                        if !self.profile_transition_in_progress()
+                        let replay_started = match self.start_restored_reload_if_ready() {
+                            Ok(started) => started,
+                            Err(error) => {
+                                self.fail(event_loop, error);
+                                return;
+                            }
+                        };
+                        if !replay_started
+                            && !self.profile_transition_in_progress()
                             && let Err(error) = self.start_frame()
                         {
                             self.fail(event_loop, error);
@@ -3824,6 +4109,7 @@ impl NativeShell {
         let profile = self.active_profile_id()?;
         self.record_navigation_commit(profile, commit)?;
         self.initial_navigation = None;
+        self.synchronize_session_restore()?;
         Ok(())
     }
 
@@ -4221,16 +4507,30 @@ fn render_worker_main(
                     }
                 }
                 WorkerCommand::BeginNavigation { target, location } => {
-                    if let Err(message) = worker.begin_navigation(target, location) {
+                    if location == START_LOCATION {
+                        let outcome = match worker.load_local_navigation(target) {
+                            Ok(()) => WorkerNavigationOutcome::Committed {
+                                location,
+                                status: 200,
+                                source_bytes: START_PAGE.len(),
+                            },
+                            Err(message) => WorkerNavigationOutcome::InternalFailure { message },
+                        };
                         if proxy
+                            .send_event(WorkerEvent::NavigationFinished { target, outcome })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    } else if let Err(message) = worker.begin_navigation(target, location)
+                        && proxy
                             .send_event(WorkerEvent::NavigationFinished {
                                 target,
                                 outcome: WorkerNavigationOutcome::InternalFailure { message },
                             })
                             .is_err()
-                        {
-                            return;
-                        }
+                    {
+                        return;
                     }
                 }
                 WorkerCommand::CancelNavigation { target } => {
@@ -4403,7 +4703,15 @@ impl RenderWorker {
         if self.has_pending_navigation() {
             return Err("cannot reset profile session while navigation is pending".into());
         }
-        self.validate_new_request(target)?;
+        if target.request().get() <= self.last_request_id {
+            return Err(format!(
+                "stale profile reset request {} targeted window {} tab {}",
+                target.request().get(),
+                target.window().get(),
+                target.tab().get()
+            ));
+        }
+        self.last_request_id = target.request().get();
 
         let mut engine =
             EngineHost::new().map_err(|error| format!("failed to reset Rarog: {error}"))?;
@@ -4416,6 +4724,7 @@ impl RenderWorker {
 
         self.engine = engine;
         self.pending_navigations.clear();
+        self.window = target.window();
         self.tab = target.tab();
         self.presentation_generation = generation;
         self.last_viewport = None;
@@ -4424,6 +4733,28 @@ impl RenderWorker {
             .ok_or_else(|| "Web content surface is not initialized".to_string())?
             .reset_for_view_switch(self.gpu.as_ref());
         Ok(())
+    }
+
+    fn load_local_navigation(&mut self, target: WorkerNavigationTarget) -> Result<(), String> {
+        self.ensure_active()?;
+        if target.window != self.window || !self.engine.has_view(target.tab) {
+            return Err(format!(
+                "local navigation {} targeted unavailable window {} tab {}",
+                target.navigation.get(),
+                target.window.get(),
+                target.tab.get()
+            ));
+        }
+        if self.pending_navigations.contains_key(&target.tab) {
+            return Err(format!(
+                "local navigation {} overlapped pending worker navigation for tab {}",
+                target.navigation.get(),
+                target.tab.get()
+            ));
+        }
+        self.engine
+            .load_local_html(target.tab, START_PAGE)
+            .map_err(|error| format!("failed to reload local start document: {error}"))
     }
 
     fn begin_navigation(

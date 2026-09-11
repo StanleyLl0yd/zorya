@@ -66,13 +66,23 @@ jobs:
       - name: Smoke test presentation-safe tab close
         shell: pwsh
         run: |
-          $process = Start-Process -FilePath ".\\target\\debug\\zorya.exe" -ArgumentList "--native-tab-close-smoke" -PassThru -NoNewWindow
-          if (-not $process.WaitForExit(60000)) {
-            $process.Kill()
-            throw "native tab close smoke test timed out"
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "zorya-tab-close-debug"
+          if (Test-Path -LiteralPath $smokeRoot) {
+            Remove-Item -LiteralPath $smokeRoot -Recurse -Force
           }
-          if ($process.ExitCode -ne 0) {
-            throw "native tab close smoke test failed with exit code $($process.ExitCode)"
+          $previousLocalAppData = $env:LOCALAPPDATA
+          $env:LOCALAPPDATA = $smokeRoot
+          try {
+            $process = Start-Process -FilePath ".\\target\\debug\\zorya.exe" -ArgumentList "--native-tab-close-smoke" -PassThru -NoNewWindow
+            if (-not $process.WaitForExit(60000)) {
+              $process.Kill()
+              throw "native tab close smoke test timed out"
+            }
+            if ($process.ExitCode -ne 0) {
+              throw "native tab close smoke test failed with exit code $($process.ExitCode)"
+            }
+          } finally {
+            $env:LOCALAPPDATA = $previousLocalAppData
           }
       - name: Smoke test rapid tab activation supersession
         shell: pwsh

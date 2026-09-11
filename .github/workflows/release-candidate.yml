@@ -135,13 +135,23 @@ jobs:
         shell: pwsh
         run: |
           $executable = Join-Path "target/release" "zorya.exe"
-          $process = Start-Process -FilePath $executable -ArgumentList "--native-tab-close-smoke" -PassThru -NoNewWindow
-          if (-not $process.WaitForExit(60000)) {
-            $process.Kill()
-            throw "release tab close smoke test timed out"
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "zorya-tab-close-release"
+          if (Test-Path -LiteralPath $smokeRoot) {
+            Remove-Item -LiteralPath $smokeRoot -Recurse -Force
           }
-          if ($process.ExitCode -ne 0) {
-            throw "release tab close smoke test failed with exit code $($process.ExitCode)"
+          $previousLocalAppData = $env:LOCALAPPDATA
+          $env:LOCALAPPDATA = $smokeRoot
+          try {
+            $process = Start-Process -FilePath $executable -ArgumentList "--native-tab-close-smoke" -PassThru -NoNewWindow
+            if (-not $process.WaitForExit(60000)) {
+              $process.Kill()
+              throw "release tab close smoke test timed out"
+            }
+            if ($process.ExitCode -ne 0) {
+              throw "release tab close smoke test failed with exit code $($process.ExitCode)"
+            }
+          } finally {
+            $env:LOCALAPPDATA = $previousLocalAppData
           }
       - name: Smoke test release rapid tab supersession
         shell: pwsh
@@ -309,13 +319,23 @@ jobs:
             throw "packaged tab activation smoke test failed with exit code $($process.ExitCode)"
           }
 
-          $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-tab-close-smoke" -PassThru -NoNewWindow
-          if (-not $process.WaitForExit(60000)) {
-            $process.Kill()
-            throw "packaged tab close smoke test timed out"
+          $tabCloseSmokeRoot = Join-Path $env:RUNNER_TEMP "zorya-tab-close-package"
+          if (Test-Path -LiteralPath $tabCloseSmokeRoot) {
+            Remove-Item -LiteralPath $tabCloseSmokeRoot -Recurse -Force
           }
-          if ($process.ExitCode -ne 0) {
-            throw "packaged tab close smoke test failed with exit code $($process.ExitCode)"
+          $previousLocalAppData = $env:LOCALAPPDATA
+          $env:LOCALAPPDATA = $tabCloseSmokeRoot
+          try {
+            $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-tab-close-smoke" -PassThru -NoNewWindow
+            if (-not $process.WaitForExit(60000)) {
+              $process.Kill()
+              throw "packaged tab close smoke test timed out"
+            }
+            if ($process.ExitCode -ne 0) {
+              throw "packaged tab close smoke test failed with exit code $($process.ExitCode)"
+            }
+          } finally {
+            $env:LOCALAPPDATA = $previousLocalAppData
           }
 
           $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-tab-supersession-smoke" -PassThru -NoNewWindow
@@ -336,13 +356,23 @@ jobs:
             throw "packaged HTTP navigation smoke test failed with exit code $($process.ExitCode)"
           }
 
-          $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-profile-cycle-smoke" -PassThru -NoNewWindow
-          if (-not $process.WaitForExit(60000)) {
-            $process.Kill()
-            throw "packaged native profile cycle smoke test timed out"
+          $profileCycleSmokeRoot = Join-Path $env:RUNNER_TEMP "zorya-profile-cycle-package"
+          if (Test-Path -LiteralPath $profileCycleSmokeRoot) {
+            Remove-Item -LiteralPath $profileCycleSmokeRoot -Recurse -Force
           }
-          if ($process.ExitCode -ne 0) {
-            throw "packaged native profile cycle smoke test failed with exit code $($process.ExitCode)"
+          $previousLocalAppData = $env:LOCALAPPDATA
+          $env:LOCALAPPDATA = $profileCycleSmokeRoot
+          try {
+            $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-profile-cycle-smoke" -PassThru -NoNewWindow
+            if (-not $process.WaitForExit(60000)) {
+              $process.Kill()
+              throw "packaged native profile cycle smoke test timed out"
+            }
+            if ($process.ExitCode -ne 0) {
+              throw "packaged native profile cycle smoke test failed with exit code $($process.ExitCode)"
+            }
+          } finally {
+            $env:LOCALAPPDATA = $previousLocalAppData
           }
 
           $process = Start-Process -FilePath $packagedExecutable -ArgumentList "--native-color-scheme-smoke" -PassThru -NoNewWindow
