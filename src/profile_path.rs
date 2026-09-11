@@ -21,18 +21,11 @@ impl ProfilePathError {
 }
 
 pub(crate) fn prepare_profile_storage_paths(root: &Path) -> Result<(), ProfilePathError> {
-    match fs::symlink_metadata(root) {
-        Ok(metadata) => validate_directory(root, &metadata)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(root).map_err(|error| path_error(root, error.kind()))?;
-            let metadata =
-                fs::symlink_metadata(root).map_err(|error| path_error(root, error.kind()))?;
-            validate_directory(root, &metadata)?;
-        }
-        Err(error) => return Err(path_error(root, error.kind())),
+    ensure_real_directory(root)?;
+    for directory in PROFILE_STORAGE_DIRECTORIES {
+        ensure_real_directory(&root.join(directory))?;
     }
-
-    verify_storage_children(root)
+    Ok(())
 }
 
 pub(crate) fn verify_profile_storage_paths(root: &Path) -> Result<(), ProfilePathError> {
@@ -54,14 +47,23 @@ pub(crate) fn verify_not_redirected_if_present(path: &Path) -> Result<(), Profil
     }
 }
 
+fn ensure_real_directory(path: &Path) -> Result<(), ProfilePathError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => validate_directory(path, &metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(|error| path_error(path, error.kind()))?;
+            let metadata =
+                fs::symlink_metadata(path).map_err(|error| path_error(path, error.kind()))?;
+            validate_directory(path, &metadata)
+        }
+        Err(error) => Err(path_error(path, error.kind())),
+    }
+}
+
 fn verify_storage_children(root: &Path) -> Result<(), ProfilePathError> {
     for directory in PROFILE_STORAGE_DIRECTORIES {
         let path = root.join(directory);
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(path_error(&path, error.kind())),
-        };
+        let metadata = fs::symlink_metadata(&path).map_err(|error| path_error(&path, error.kind()))?;
         validate_directory(&path, &metadata)?;
     }
     Ok(())
@@ -130,12 +132,15 @@ mod tests {
     }
 
     #[test]
-    fn preparation_creates_real_root_without_precreating_storage_children() {
+    fn preparation_materializes_real_storage_directories() {
         let root = TestRoot::new("real");
         prepare_profile_storage_paths(root.path()).unwrap();
         assert!(root.path().is_dir());
         for directory in PROFILE_STORAGE_DIRECTORIES {
-            assert!(!root.path().join(directory).exists());
+            let path = root.path().join(directory);
+            let metadata = fs::symlink_metadata(path).unwrap();
+            assert!(metadata.is_dir());
+            assert!(!is_redirect(&metadata));
         }
         verify_profile_storage_paths(root.path()).unwrap();
     }
