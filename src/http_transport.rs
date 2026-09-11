@@ -4,10 +4,11 @@ use rarog_fetch::{
 };
 use reqwest::{Client, Method};
 use std::collections::BTreeMap;
+use std::future::{Future, poll_fn};
 use std::num::NonZeroU64;
 use std::sync::mpsc as std_mpsc;
+use std::task::Poll;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch};
 
@@ -216,31 +217,46 @@ async fn run_request(
     command: TransportCommand,
     completions: mpsc::Sender<TransportCompletion>,
 ) {
-    if *command.cancellation.borrow() {
+    let TransportCommand {
+        ticket,
+        request,
+        mut cancellation,
+    } = command;
+    if *cancellation.borrow() {
         return;
     }
 
-    let mut request = Box::pin(execute_request(client, command.request));
+    let mut request = Box::pin(execute_request(client, request));
     let result = loop {
-        if *command.cancellation.borrow() {
-            return;
-        }
-
-        match tokio::time::timeout(Duration::from_millis(10), request.as_mut()).await {
+        let outcome = {
+            let mut changed = Box::pin(cancellation.changed());
+            poll_fn(|context| {
+                if let Poll::Ready(result) = request.as_mut().poll(context) {
+                    return Poll::Ready(Ok(result));
+                }
+                match changed.as_mut().poll(context) {
+                    Poll::Ready(changed) => Poll::Ready(Err(changed)),
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await
+        };
+        match outcome {
             Ok(result) => break result,
-            Err(_) => continue,
+            Err(changed) => {
+                if changed.is_err() || *cancellation.borrow() {
+                    return;
+                }
+            }
         }
     };
 
-    if *command.cancellation.borrow() {
+    if *cancellation.borrow() {
         return;
     }
 
     let _ = completions
-        .send(TransportCompletion {
-            ticket: command.ticket,
-            result,
-        })
+        .send(TransportCompletion { ticket, result })
         .await;
 }
 
