@@ -1,3 +1,5 @@
+const MAX_TAB_HISTORY_ENTRIES: usize = 256;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NavigationId(pub(crate) u64);
 
@@ -269,6 +271,7 @@ impl TabNavigation {
         let id = entry.id;
         self.history.push(entry);
         self.current = Some(id);
+        self.enforce_history_limit();
         self.last_failure = None;
         Some(id)
     }
@@ -310,6 +313,13 @@ impl TabNavigation {
             self.pending.take()
         } else {
             None
+        }
+    }
+
+    fn enforce_history_limit(&mut self) {
+        let overflow = self.history.len().saturating_sub(MAX_TAB_HISTORY_ENTRIES);
+        if overflow > 0 {
+            self.history.drain(..overflow);
         }
     }
 
@@ -416,5 +426,27 @@ mod control_tests {
         assert_eq!(controls.reload(), ReloadControl::Stop);
         assert!(!controls.can_go_back());
         assert!(!controls.can_go_forward());
+    }
+
+    #[test]
+    fn committed_history_evicts_oldest_entries_at_the_bound() {
+        let mut state = TabNavigation::default();
+        let total = MAX_TAB_HISTORY_ENTRIES as u64 + 2;
+
+        for id in 1..=total {
+            let location = format!("https://example.com/{id}");
+            state.start(intent(id, &location));
+            state
+                .commit_new(NavigationId(id), entry(id, &location))
+                .expect("commit bounded history entry");
+        }
+
+        assert_eq!(state.history().len(), MAX_TAB_HISTORY_ENTRIES);
+        assert_eq!(state.history().first().map(HistoryEntry::id), Some(HistoryEntryId(3)));
+        assert_eq!(state.current_entry_id(), Some(HistoryEntryId(total)));
+        assert!(state.can_go_back());
+        assert!(!state.can_go_forward());
+        assert!(!state.contains_history_entry(HistoryEntryId(1)));
+        assert!(!state.contains_history_entry(HistoryEntryId(2)));
     }
 }
