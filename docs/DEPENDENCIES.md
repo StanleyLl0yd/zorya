@@ -8,11 +8,11 @@ https://github.com/StanleyLl0yd/rarog
 
 The dependency is pinned to exact commit:
 
-b330f94fd43b6b809ec0d784f6d0d7f2cce44989
+`331689e7dff02a556d0b96530178def821056e20`
 
-`rarog-engine`, `rarog-compositor`, and `rarog-types` are portable integration dependencies. On Windows, Zorya additionally uses `rarog-compositor-wgpu` and `rarog-platform-windows` for the public GPU/presentation boundary. Every Rarog crate uses the same exact revision.
+`rarog-compositor`, `rarog-engine`, `rarog-fetch`, `rarog-host`, `rarog-types`, and `rarog-url` are portable integration dependencies. On Windows, Zorya additionally uses `rarog-compositor-wgpu` and `rarog-platform-windows` for the public GPU/presentation boundary. Every Rarog crate uses the same exact revision.
 
-The native Windows shell also uses exact `winit = 0.30.13` and `pollster = 0.4.0`, matching the pinned Rarog reference host. `winit` is restricted to the Windows platform adapter and does not become browser-model identity. Safe winit window-handle access is thread-affine on Windows, so Rarog native-surface creation/replacement is performed on the event-loop thread while GPU-device initialization stays on the worker. `pollster` is used only on the render worker, never to block the UI event loop.
+The native Windows shell also uses exact `winit = 0.30.13` and `pollster = 0.4.0`, matching the supported Rarog host boundary used by Zorya. `winit` is restricted to the Windows platform adapter and does not become browser-model identity. Safe winit window-handle access is thread-affine on Windows, so Rarog native-surface creation/replacement is performed on the event-loop thread while GPU-device initialization stays on the worker. `pollster` is used only on the render worker, never to block the UI event loop.
 
 Do not change any Rarog dependency to a floating main or branch dependency.
 
@@ -20,20 +20,21 @@ Do not change any Rarog dependency to a floating main or branch dependency.
 
 1. Review the Rarog changes between the current and proposed revisions.
 2. Confirm that the public embedder behavior used by Zorya remains compatible.
-3. Update the exact Git revision in Cargo.toml.
-4. Regenerate Cargo.lock.
+3. Update the exact Git revision for every Rarog crate in `Cargo.toml`.
+4. Regenerate `Cargo.lock` and review the complete lockfile delta.
 5. Run Windows-primary, Linux-portability and Rust 1.85 checks.
-6. Add focused integration coverage for any new or changed engine contract used by Zorya.
+6. Require Dependency Review and the repository security/supply-chain gates to pass for the dependency delta.
+7. Add focused integration coverage for any new or changed engine contract used by Zorya.
 
 Do not copy Rarog source into this repository to work around an API limitation. Add the missing supported boundary upstream.
 
 ## GitHub Actions
 
-Third-party actions must be pinned to immutable full commit SHAs. Do not use moving tags such as v4 in committed workflow files. Checkout credentials must not persist by default, workflow permissions must be explicit and least-privilege, and `scripts/verify_ci_supply_chain.py` must remain a merge gate for workflow changes.
+Third-party actions must be pinned to immutable full commit SHAs. Do not use moving tags such as `v4` in committed workflow files. Checkout credentials must not persist by default, workflow permissions must be explicit and least-privilege, and `scripts/verify_ci_supply_chain.py` must remain a merge gate for workflow changes.
 
 Windows CI uses GitHub's `actions/upload-artifact` at an immutable commit to retain the developer `zorya.exe` after the full Windows verification sequence and explicit binary build. The artifact is CI output only and is not a release, installer or signed distribution package.
 
-The release-candidate workflow reuses the same immutable checkout/toolchain/upload actions and adds no packaging dependency. It follows the non-development packages reachable from Cargo's Windows x86-64 filtered `resolve` graph after the locked fetch, rather than treating every entry in the unfiltered metadata `packages` array as a Windows dependency. It then collects declared license/notice files from the resolved package sources. Candidate packaging fails if a dependency lacks both license metadata and discoverable license text. When a registry archive declares a license but intentionally omits its license file, an exact source-controlled copy may be stored under `third_party/licenses/<name>-<version>/` only with `ORIGIN.txt` recording the upstream package/version/source revision; the packager uses such a copy only when normal package-source discovery found no license text.
+The release-candidate workflow reuses immutable checkout/toolchain/upload actions and adds no packaging dependency. It follows the non-development packages reachable from Cargo's Windows x86-64 filtered `resolve` graph after the locked fetch, rather than treating every entry in the unfiltered metadata `packages` array as a Windows dependency. It then collects declared license/notice files from the resolved package sources. Candidate packaging fails if a dependency lacks both license metadata and discoverable license text. When a registry archive declares a license but intentionally omits its license file, an exact source-controlled copy may be stored under `third_party/licenses/<name>-<version>/` only with `ORIGIN.txt` recording the upstream package/version/source revision; the packager uses such a copy only when normal package-source discovery found no license text.
 
 ## General dependency policy
 
@@ -41,11 +42,10 @@ Add a dependency only for a concrete product requirement. Prefer small adapters 
 
 Application lockfile changes are committed.
 
-
 ## Automated dependency security
 
-Dependabot covers both Cargo and GitHub Actions dependencies on a weekly schedule. Rarog crates and the exact `winit`/`pollster` platform-coupled versions remain manual-review dependencies, and `png` is kept on the reviewed 0.17 line until a deliberate compatibility update.
+Dependabot covers both Cargo and GitHub Actions dependencies on a weekly schedule. Rarog crates and the exact `winit`/`pollster` platform-coupled versions remain deliberate review points, and `png` is kept on the reviewed 0.17 line until a deliberate compatibility update.
 
-The Security workflow runs RustSec `cargo audit` against the committed `Cargo.lock`, so dependency vulnerability detection does not rely on Dependabot alone. GitHub Dependency Review is intentionally not a required gate while the repository Dependency Graph is unavailable.
+The Security workflow runs RustSec `cargo audit` against the committed `Cargo.lock`, so dependency vulnerability detection does not rely on Dependabot alone. GitHub Dependency Review is a required pull-request gate and rejects introduced vulnerabilities at high severity or above; its license check is intentionally disabled because release packaging performs separate source/license-evidence validation.
 
-Rust CodeQL and Gitleaks provide source and secret-scanning layers. These controls are intentionally stack-specific; Zorya does not add Android/Gradle or other unrelated scanners.
+Rust CodeQL and Gitleaks provide source and secret-scanning layers, while the CI supply-chain verifier enforces repository workflow policy. These controls are intentionally stack-specific; Zorya does not add Android/Gradle or other unrelated scanners.

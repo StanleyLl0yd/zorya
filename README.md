@@ -17,7 +17,7 @@ Zorya is an experimental desktop browser written in Rust. Its product goals are 
 The first release-quality target is **Windows 10/11**. Zorya uses Rarog for Web-platform semantics and rendering:
 https://github.com/StanleyLl0yd/rarog
 
-Zorya has a verified Z1 native-shell vertical and is now building the Z2 browser-product model. It is not yet a general-purpose or production-ready browser.
+The repository has implemented and verified the Z0 bootstrap, Z1 native-shell, Z2 navigation/tabs and Z3 browser-profile milestones. Z4 feature work is not part of the current post-Z3 state. Zorya is still experimental and is not yet a general-purpose or production-ready browser.
 
 ## Repository responsibility
 
@@ -42,33 +42,31 @@ If Zorya needs an engine capability that is not available through a supported Ra
 
 ## Current development state
 
-The current developer build has a real Windows native window, Zorya-owned browser state, natively presented Rarog Views, deterministic local loading, real HTTP(S) document navigation through Rarog's Fetch/navigation contract, off-UI rendering and DX12 presentation through Rarog's public platform/compositor boundary. Windows CI exercises both the native-window/GPU vertical and a deterministic localhost HTTP navigation through remote commit and subsequent presentation.
+The current developer build has a real Windows native window, a Zorya-owned multi-tab browser model, one Rarog View per materialized tab, deterministic `about:blank` startup for a fresh profile, real HTTP(S) document navigation through Rarog's Fetch/navigation contract, off-UI rendering and DX12 presentation through Rarog's public platform/compositor boundary. Native tab activation, close and rapid-supersession paths are generation/identity guarded and covered by Windows smokes.
 
-The platform-independent Z2 product model already includes stable window/tab identities, tab create/close/select/reorder state, monotonic navigation and history identities, stale-navigation rejection, committed `about:blank` startup history, back/forward/reload/stop state, and privileged address-bar edit/display state bound to stable `TabId` values.
+Z3 adds a bounded profile I/O worker and lock-owned, versioned persistence for typed settings, browsing history, bookmarks and session restore. Profile selection/replacement is stale-safe; storage writes are generation-safe and scheduler-driven; graceful shutdown coordinates dirty state without moving filesystem I/O onto the event loop. Windows consumes the persisted color-scheme setting, supports profile cycling, toggles bookmarks for the exact committed page, and restores persisted windows/tabs into fresh process-local browser identities while preserving stable persisted session identities.
 
-    Zorya browser state + native window
-                    |
-                    v
-          bounded render worker
-                    |
-                    v
-           Zorya EngineHost
-                    |
-                    v
-             Rarog View
-                    |
-                    v
-      Rarog compositor / DX12 surface
+    Zorya browser/profile state + native window
+                       |
+                       v
+              bounded workers
+              /             \
+             v               v
+      profile persistence   EngineHost
+                              |
+                              v
+                         Rarog View(s)
+                              |
+                              v
+                 Rarog compositor / DX12
 
-The current Windows presentation shell still presents only one active Web View at a time and does not yet render browser chrome or general multi-tab UX. HTTP(S) navigation is driven by a bounded transport thread while Fetch policy, redirects, response interpretation and navigation commit remain Rarog-owned. Native Web input and page-title observation remain explicit integration work. Web content does not own the top-level window or privileged browser state.
+The native shell still does not render the full browser chrome/tab-strip/address-bar UX. Browser accelerators and browser-owned navigation commands exist, but Web-content keyboard/pointer/IME input remains blocked on a supported Rarog View input contract. Page-title observation also remains blocked on a supported Rarog contract, so bookmarks currently persist an empty title. Downloads, broader bookmark/profile/settings UX, installer/updater and full GPU device-loss recovery remain future work.
 
-Current tracked boundaries include:
+Current tracked upstream boundaries include:
 
 - issue #6 — stable Rarog GPU device-loss recovery contract;
-- issue #13 — Rarog navigation completion / Fetch integration, resolved by the pinned Rarog contract used by Z2;
 - issue #16 — supported Rarog View input dispatch;
-- issue #18 — Rarog document-title observation;
-- issue #20 — presentation-safe native tab activation in Zorya.
+- issue #18 — Rarog document-title observation.
 
 ## Build
 
@@ -85,8 +83,10 @@ Requirements:
     cargo run --locked -- --version
     cargo run --locked -- --native-smoke
     cargo run --locked -- --native-http-navigation-smoke
+    cargo run --locked -- --native-profile-cycle-smoke
+    cargo run --locked -- --native-session-restore-persistence-smoke
 
-The `--version` path exits before native window or GPU initialization. On Windows, `--native-smoke` runs the real native-window, Rarog render and DX12 presentation path and exits after the first successful presentation. Windows CI executes both smoke paths before retaining the debug executable as an artifact named `zorya-windows-dev-<commit SHA>` for 14 days. Linux is kept as a portability compile/test target where practical, even though Windows is the first product platform.
+The `--version` path exits before native window or GPU initialization. On Windows, the native smokes exercise the real native-window/Rarog/DX12 path plus targeted navigation, tab lifecycle and profile-persistence scenarios. Windows CI runs the complete smoke matrix before retaining the debug executable as an artifact named `zorya-windows-dev-<commit SHA>` for 14 days. Linux remains a portability compile/test target where practical, even though Windows is the first product platform.
 
 ## Technical Preview release
 
@@ -94,27 +94,27 @@ The `--version` path exits before native window or GPU initialization. On Window
 
 Release: https://github.com/StanleyLl0yd/zorya/releases/tag/v0.1.0
 
-The release-candidate workflow builds `target/release/zorya.exe` from the locked dependency graph, verifies the exact Cargo/binary version, runs the real release-mode native smoke, generates a dependency license bundle, packages the executable with preview notes and licenses, records a SHA-256 digest, extracts the resulting ZIP, and repeats the packaged version/native smoke checks before retaining the candidate artifact.
+The release-candidate workflow builds `target/release/zorya.exe` from the locked dependency graph, verifies the exact Cargo/binary version, runs the release-mode native smoke matrix, generates a dependency license bundle, packages the executable with preview notes and licenses, records a SHA-256 digest, extracts the resulting ZIP, and repeats packaged verification before retaining the candidate artifact.
 
-The published Technical Preview remains unsigned and has no installer or updater. General HTTP(S) browsing, Web-content input and full native multi-tab presentation are not implied by the existence of a downloadable packaged executable.
+The published Technical Preview remains unsigned and has no installer or updater. The repository has advanced substantially since the original preview release; the package notes shipped by current release-candidate builds describe the current executable rather than preserving old pre-Z3 limitations. The historical release notes under `docs/releases/0.1.0.md` remain historical provenance for the published prerelease.
 
-See `README-TECHNICAL-PREVIEW.md` for the package-specific scope and known limitations.
+See `README-TECHNICAL-PREVIEW.md` for the package-specific current scope and known limitations.
 
 ## Rarog dependency
 
-Zorya pins Rarog to a specific Git commit in Cargo.toml for reproducible builds. Engine updates are intentional dependency changes: update the revision, review the upstream changes, regenerate Cargo.lock, and run the full Zorya verification matrix.
+Zorya pins every Rarog crate to the same specific Git commit in `Cargo.toml` for reproducible builds. Engine updates are intentional dependency changes: update the revision, review the upstream changes, regenerate `Cargo.lock`, and run the full Zorya verification matrix including dependency/security gates.
 
-See docs/DEPENDENCIES.md.
+See `docs/DEPENDENCIES.md`.
 
 ## Project documents
 
-- docs/ARCHITECTURE.md — ownership and trust boundaries;
-- docs/ROADMAP.md — product milestones;
-- docs/RELEASING.md — release-candidate and publication gates;
-- docs/BRANDING.md — project icon, palette and visual-language rules;
-- AGENTS.md — mandatory rules for automated coding agents;
-- CONTRIBUTING.md — contribution workflow;
-- SECURITY.md — vulnerability reporting guidance.
+- `docs/ARCHITECTURE.md` — ownership and trust boundaries;
+- `docs/ROADMAP.md` — product milestones;
+- `docs/RELEASING.md` — release-candidate and publication gates;
+- `docs/BRANDING.md` — project icon, palette and visual-language rules;
+- `AGENTS.md` — mandatory rules for automated coding agents;
+- `CONTRIBUTING.md` — contribution workflow;
+- `SECURITY.md` — vulnerability reporting guidance.
 
 ## License
 
