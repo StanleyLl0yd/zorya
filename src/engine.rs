@@ -1083,7 +1083,11 @@ mod tests {
         let tab = initial_tab();
         let (mut host, _) = engine_host_with_fixture(None);
         host.create_view(tab).expect("view");
-        assert_eq!(host.committed_document_authority(tab).expect("empty authority"), None);
+        assert_eq!(
+            host.committed_document_authority(tab)
+                .expect("empty authority"),
+            None
+        );
 
         let first = host
             .begin_navigation(tab, "https://same.example/first")
@@ -1451,7 +1455,8 @@ mod tests {
             .expect("begin replacement")
             .expect("replacement forwarded");
         assert!(matches!(
-            host.poll_navigation(replacement).expect("commit replacement"),
+            host.poll_navigation(replacement)
+                .expect("commit replacement"),
             EngineNavigationPoll::Committed { .. }
         ));
         let current_authority = host
