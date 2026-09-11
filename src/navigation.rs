@@ -442,7 +442,10 @@ mod control_tests {
         }
 
         assert_eq!(state.history().len(), MAX_TAB_HISTORY_ENTRIES);
-        assert_eq!(state.history().first().map(HistoryEntry::id), Some(HistoryEntryId(3)));
+        assert_eq!(
+            state.history().first().map(HistoryEntry::id),
+            Some(HistoryEntryId(3))
+        );
         assert_eq!(state.current_entry_id(), Some(HistoryEntryId(total)));
         assert!(state.can_go_back());
         assert!(!state.can_go_forward());

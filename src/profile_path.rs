@@ -25,8 +25,8 @@ pub(crate) fn prepare_profile_storage_paths(root: &Path) -> Result<(), ProfilePa
         Ok(metadata) => validate_directory(root, &metadata)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             fs::create_dir_all(root).map_err(|error| path_error(root, error.kind()))?;
-            let metadata = fs::symlink_metadata(root)
-                .map_err(|error| path_error(root, error.kind()))?;
+            let metadata =
+                fs::symlink_metadata(root).map_err(|error| path_error(root, error.kind()))?;
             validate_directory(root, &metadata)?;
         }
         Err(error) => return Err(path_error(root, error.kind())),
@@ -36,8 +36,7 @@ pub(crate) fn prepare_profile_storage_paths(root: &Path) -> Result<(), ProfilePa
 }
 
 pub(crate) fn verify_profile_storage_paths(root: &Path) -> Result<(), ProfilePathError> {
-    let metadata =
-        fs::symlink_metadata(root).map_err(|error| path_error(root, error.kind()))?;
+    let metadata = fs::symlink_metadata(root).map_err(|error| path_error(root, error.kind()))?;
     validate_directory(root, &metadata)?;
     verify_storage_children(root)
 }
