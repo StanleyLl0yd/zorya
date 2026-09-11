@@ -2,9 +2,9 @@ use crate::TabId;
 use crate::http_transport::HttpTransport;
 use rarog_compositor::FrameCause;
 use rarog_engine::{
-    BaseUrl, Engine, EngineError, FrameStatus, NavigationCompletion,
-    NavigationId as RarogNavigationId, NavigationRequest, NavigationStartOutcome, View,
-    ViewOptions,
+    BaseUrl, Engine, EngineError, FrameStatus, HostPolicy, NavigationCompletion,
+    NavigationId as RarogNavigationId, NavigationRequest, NavigationStartOutcome, ResourceRequest,
+    View, ViewId, ViewOptions,
 };
 use rarog_fetch::{NetworkCapability, NetworkPoll};
 use rarog_host::{
@@ -12,6 +12,7 @@ use rarog_host::{
     NetworkOperationId,
 };
 use rarog_types::Size;
+use rarog_url::WebUrl;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -273,6 +274,19 @@ struct HostedView {
     pending_navigation: Option<PendingHostedNavigation>,
 }
 
+struct ZoryaHostPolicy;
+
+impl HostPolicy for ZoryaHostPolicy {
+    fn allow_navigation(&self, _view: ViewId, request: &NavigationRequest) -> bool {
+        WebUrl::parse(request.url.as_str())
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+    }
+
+    fn allow_resource_request(&self, _view: ViewId, _request: &ResourceRequest) -> bool {
+        false
+    }
+}
+
 pub struct EngineHost {
     engine: Engine,
     host: HostControlPlane,
@@ -288,7 +302,7 @@ impl EngineHost {
 
     fn with_network(network: Option<Box<dyn NetworkCapability>>) -> Result<Self, EngineHostError> {
         Ok(Self {
-            engine: Engine::builder().build()?,
+            engine: Engine::builder().host_policy(ZoryaHostPolicy).build()?,
             host: HostControlPlane::with_default_limits()
                 .map_err(|error| EngineHostError::Host(error.to_string()))?,
             network,
@@ -792,6 +806,35 @@ mod tests {
     }
 
     #[test]
+    fn product_host_policy_allows_only_http_https_and_denies_resources() {
+        let policy = ZoryaHostPolicy;
+        let view = ViewId(1);
+
+        for location in ["http://example.com/", "https://example.com/path"] {
+            let request = NavigationRequest::new(BaseUrl::new(location));
+            assert!(policy.allow_navigation(view, &request), "{location}");
+        }
+
+        for location in [
+            "../relative",
+            "http://",
+            "file:///tmp/zorya",
+            "data:text/plain,zorya",
+            "mailto:zorya@example.com",
+            "zorya-external:payload",
+        ] {
+            let request = NavigationRequest::new(BaseUrl::new(location));
+            assert!(!policy.allow_navigation(view, &request), "{location}");
+        }
+
+        let resource = ResourceRequest::new(
+            BaseUrl::new("https://example.com/style.css"),
+            rarog_engine::RequestDestination::Style,
+        );
+        assert!(!policy.allow_resource_request(view, &resource));
+    }
+
+    #[test]
     fn one_engine_view_is_owned_per_tab() {
         let tab = initial_tab();
         let mut host = EngineHost::new().expect("engine host");
@@ -1076,6 +1119,65 @@ mod tests {
         let network = FixtureNetwork::new(fail_on_poll, false, Arc::clone(&stats));
         let host = EngineHost::with_network(Some(Box::new(network))).expect("engine host");
         (host, stats)
+    }
+
+    #[test]
+    fn blocked_navigation_mints_no_authority_and_preserves_committed_authority() {
+        let tab = initial_tab();
+        let (mut host, stats) = engine_host_with_fixture(None);
+        host.create_view(tab).expect("view");
+
+        for location in [
+            "../relative",
+            "file:///tmp/zorya",
+            "data:text/plain,zorya",
+            "mailto:zorya@example.com",
+            "zorya-external:payload",
+        ] {
+            assert_eq!(
+                host.begin_navigation(tab, location)
+                    .expect("blocked navigation result"),
+                None,
+                "{location}"
+            );
+        }
+        assert_eq!(stats.lock().expect("stats").starts, 0);
+        assert_eq!(host.host.active_navigation_contexts(), 0);
+        assert_eq!(host.host.active_capabilities(), 0);
+        assert_eq!(host.host.active_network_operations(), 0);
+        assert_eq!(
+            host.committed_document_authority(tab)
+                .expect("empty committed authority"),
+            None
+        );
+
+        let committed = host
+            .begin_navigation(tab, "https://committed.example/")
+            .expect("begin committed")
+            .expect("forwarded");
+        assert!(matches!(
+            host.poll_navigation(committed).expect("commit"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let authority = host
+            .committed_document_authority(tab)
+            .expect("committed authority query")
+            .expect("committed authority");
+
+        assert_eq!(
+            host.begin_navigation(tab, "file:///tmp/replacement")
+                .expect("blocked replacement result"),
+            None
+        );
+        assert_eq!(stats.lock().expect("stats").starts, 1);
+        assert_eq!(host.host.active_navigation_contexts(), 1);
+        assert_eq!(host.host.active_capabilities(), 0);
+        assert_eq!(host.host.active_network_operations(), 0);
+        assert_eq!(
+            host.committed_document_authority(tab)
+                .expect("authority after blocked replacement"),
+            Some(authority)
+        );
     }
 
     #[test]
