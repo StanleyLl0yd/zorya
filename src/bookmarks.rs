@@ -622,7 +622,11 @@ impl BookmarksStore {
 }
 
 fn create_directory(path: &Path) -> Result<(), BookmarksError> {
-    fs::create_dir_all(path).map_err(|error| io_error("create profile directory", path, error))
+    crate::profile_path::ensure_real_directory(path).map_err(|error| BookmarksError::Io {
+        operation: "prepare profile directory",
+        path: error.path().to_path_buf(),
+        kind: error.kind(),
+    })
 }
 
 fn validate_title(title: &str) -> Result<(), BookmarksError> {
