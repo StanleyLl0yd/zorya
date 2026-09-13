@@ -1263,7 +1263,10 @@ mod tests {
             .committed_document_authority(tab)
             .expect("same-site authority query")
             .expect("same-site authority");
-        assert_eq!(same_site_authority.host_instance(), first_authority.host_instance());
+        assert_eq!(
+            same_site_authority.host_instance(),
+            first_authority.host_instance()
+        );
         assert_ne!(
             same_site_authority.navigation_context(),
             first_authority.navigation_context()
@@ -1294,7 +1297,10 @@ mod tests {
             .committed_document_authority(tab)
             .expect("cross-site authority query")
             .expect("cross-site authority");
-        assert_eq!(cross_site_authority.host_instance(), first_authority.host_instance());
+        assert_eq!(
+            cross_site_authority.host_instance(),
+            first_authority.host_instance()
+        );
         assert_ne!(
             cross_site_authority.navigation_context(),
             same_site_authority.navigation_context()
