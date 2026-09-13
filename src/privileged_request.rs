@@ -62,7 +62,9 @@ mod tests {
         let listener = TcpListener::bind((bind_host, 0)).expect("bind privileged fixture server");
         let port = listener.local_addr().expect("fixture address").port();
         thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept privileged fixture request");
+            let (mut stream, _) = listener
+                .accept()
+                .expect("accept privileged fixture request");
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("fixture read timeout");
