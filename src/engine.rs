@@ -15,6 +15,9 @@ use rarog_types::Size;
 use rarog_url::WebUrl;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_ENGINE_HOST_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Viewport {
@@ -90,6 +93,15 @@ impl EngineNavigationRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EngineHostInstanceToken(u64);
+
+impl EngineHostInstanceToken {
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EngineNavigationContextToken(u64);
 
 impl EngineNavigationContextToken {
@@ -113,6 +125,7 @@ impl EngineSiteProcessToken {
 /// identities and must not be persisted or substituted for `TabId` or other product-owned IDs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EngineCommittedDocumentAuthority {
+    host_instance: EngineHostInstanceToken,
     tab: TabId,
     view_generation: u64,
     navigation_context: EngineNavigationContextToken,
@@ -120,6 +133,10 @@ pub struct EngineCommittedDocumentAuthority {
 }
 
 impl EngineCommittedDocumentAuthority {
+    pub const fn host_instance(self) -> EngineHostInstanceToken {
+        self.host_instance
+    }
+
     pub const fn tab(self) -> TabId {
         self.tab
     }
@@ -205,6 +222,7 @@ pub enum EngineHostError {
     Engine(EngineError),
     DuplicateView(TabId),
     UnknownTab(TabId),
+    HostInstanceIdentitySpaceExhausted,
     ViewGenerationExhausted,
     Host(String),
     Navigation(String),
@@ -227,6 +245,9 @@ impl fmt::Display for EngineHostError {
             }
             Self::UnknownTab(tab) => {
                 write!(formatter, "tab {} has no engine view", tab.get())
+            }
+            Self::HostInstanceIdentitySpaceExhausted => {
+                formatter.write_str("engine Host instance identity space is exhausted")
             }
             Self::ViewGenerationExhausted => {
                 formatter.write_str("engine view generation space is exhausted")
@@ -259,6 +280,18 @@ impl From<EngineError> for EngineHostError {
     }
 }
 
+fn allocate_engine_host_instance() -> Result<EngineHostInstanceToken, EngineHostError> {
+    let raw = NEXT_ENGINE_HOST_INSTANCE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| EngineHostError::HostInstanceIdentitySpaceExhausted)?;
+    if raw == 0 {
+        return Err(EngineHostError::HostInstanceIdentitySpaceExhausted);
+    }
+    Ok(EngineHostInstanceToken(raw))
+}
+
 #[derive(Clone, Copy)]
 struct PendingHostedNavigation {
     navigation: RarogNavigationId,
@@ -288,6 +321,7 @@ impl HostPolicy for ZoryaHostPolicy {
 }
 
 pub struct EngineHost {
+    instance: EngineHostInstanceToken,
     engine: Engine,
     host: HostControlPlane,
     network: Option<Box<dyn NetworkCapability>>,
@@ -301,7 +335,9 @@ impl EngineHost {
     }
 
     fn with_network(network: Option<Box<dyn NetworkCapability>>) -> Result<Self, EngineHostError> {
+        let instance = allocate_engine_host_instance()?;
         Ok(Self {
+            instance,
             engine: Engine::builder().host_policy(ZoryaHostPolicy).build()?,
             host: HostControlPlane::with_default_limits()
                 .map_err(|error| EngineHostError::Host(error.to_string()))?,
@@ -381,6 +417,7 @@ impl EngineHost {
             .ok_or(EngineHostError::InconsistentNavigationState { tab })?;
 
         Ok(Some(EngineCommittedDocumentAuthority {
+            host_instance: self.instance,
             tab,
             view_generation: hosted.generation,
             navigation_context: EngineNavigationContextToken(context.get()),
@@ -1204,6 +1241,7 @@ mod tests {
             .expect("first authority query")
             .expect("first authority");
         assert_eq!(first_authority.tab(), tab);
+        assert!(first_authority.host_instance().get() > 0);
         assert!(first_authority.view_generation() > 0);
         assert!(first_authority.navigation_context().get() > 0);
         assert!(first_authority.site_process().get() > 0);
@@ -1225,6 +1263,7 @@ mod tests {
             .committed_document_authority(tab)
             .expect("same-site authority query")
             .expect("same-site authority");
+        assert_eq!(same_site_authority.host_instance(), first_authority.host_instance());
         assert_ne!(
             same_site_authority.navigation_context(),
             first_authority.navigation_context()
@@ -1255,6 +1294,7 @@ mod tests {
             .committed_document_authority(tab)
             .expect("cross-site authority query")
             .expect("cross-site authority");
+        assert_eq!(cross_site_authority.host_instance(), first_authority.host_instance());
         assert_ne!(
             cross_site_authority.navigation_context(),
             same_site_authority.navigation_context()
