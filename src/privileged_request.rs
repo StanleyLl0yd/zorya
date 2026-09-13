@@ -2,8 +2,11 @@ use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostErro
 use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const DEFAULT_MAX_PENDING_PRIVILEGED_REQUESTS: usize = 4096;
+
+static NEXT_ENGINE_PRIVILEGED_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Browser-product taxonomy for future privileged capability requests.
 ///
@@ -116,15 +119,27 @@ impl From<EngineHostError> for EnginePrivilegedRequestError {
     }
 }
 
+fn allocate_privileged_request_id(
+) -> Result<EnginePrivilegedRequestId, EnginePrivilegedRequestError> {
+    let raw = NEXT_ENGINE_PRIVILEGED_REQUEST_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| EnginePrivilegedRequestError::IdentitySpaceExhausted)?;
+    let raw = NonZeroU64::new(raw).ok_or(EnginePrivilegedRequestError::IdentitySpaceExhausted)?;
+    Ok(EnginePrivilegedRequestId(raw))
+}
+
 /// Bounded process-local lifecycle for future privileged request attempts.
 ///
 /// Registration allocates only a one-shot correlation identity. It does not validate or grant
-/// authority. `preflight_once` consumes the exact registered request first and then revalidates
-/// its committed-document source through `EngineHost`.
+/// authority. Request IDs are process-global and monotonic so rebuilding a tracker cannot make an
+/// old copied handle collide with a newly registered request. `preflight_once` consumes the exact
+/// registered request first and then revalidates its committed-document source through
+/// `EngineHost`.
 #[derive(Debug)]
 pub struct EnginePrivilegedRequestTracker {
     max_pending: usize,
-    next_id: Option<NonZeroU64>,
     pending: BTreeMap<EnginePrivilegedRequestId, EnginePrivilegedRequest>,
 }
 
@@ -136,7 +151,6 @@ impl EnginePrivilegedRequestTracker {
 
         Ok(Self {
             max_pending,
-            next_id: NonZeroU64::new(1),
             pending: BTreeMap::new(),
         })
     }
@@ -162,19 +176,14 @@ impl EnginePrivilegedRequestTracker {
             return Err(EnginePrivilegedRequestError::CapacityExceeded);
         }
 
-        let next = self
-            .next_id
-            .ok_or(EnginePrivilegedRequestError::IdentitySpaceExhausted)?;
-        let id = EnginePrivilegedRequestId(next);
-        self.next_id = NonZeroU64::new(next.get().wrapping_add(1));
-
+        let id = allocate_privileged_request_id()?;
         let request = EnginePrivilegedRequest {
             id,
             authority,
             kind,
         };
         let previous = self.pending.insert(id, request);
-        debug_assert!(previous.is_none(), "monotonic request IDs cannot collide");
+        debug_assert!(previous.is_none(), "process-global request IDs cannot collide");
         Ok(request)
     }
 
@@ -496,6 +505,43 @@ mod tests {
             Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
         );
         assert_eq!(tracker.pending_requests(), 0);
+    }
+
+    #[test]
+    fn copied_handle_cannot_replay_across_tracker_replacement() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/tracker-replacement"),
+        );
+
+        let mut first_tracker = EnginePrivilegedRequestTracker::try_new(1).expect("first tracker");
+        let stale = first_tracker
+            .register(current, EnginePrivilegedRequestKind::Network)
+            .expect("first request");
+        assert_eq!(
+            first_tracker.preflight_once(&host, stale),
+            Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
+        );
+
+        let mut replacement_tracker =
+            EnginePrivilegedRequestTracker::try_new(1).expect("replacement tracker");
+        let current_request = replacement_tracker
+            .register(current, EnginePrivilegedRequestKind::Network)
+            .expect("replacement request");
+        assert_ne!(current_request.id(), stale.id());
+        assert_eq!(
+            replacement_tracker.preflight_once(&host, stale),
+            Err(EnginePrivilegedRequestError::UnknownRequest(stale.id()))
+        );
+        assert_eq!(replacement_tracker.pending_requests(), 1);
+        assert_eq!(
+            replacement_tracker.preflight_once(&host, current_request),
+            Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
+        );
     }
 
     #[test]
