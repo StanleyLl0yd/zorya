@@ -66,7 +66,10 @@ mod tests {
             .expect("remote navigation forwarded");
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            match host.poll_navigation(request).expect("poll remote navigation") {
+            match host
+                .poll_navigation(request)
+                .expect("poll remote navigation")
+            {
                 EngineNavigationPoll::Pending if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(5));
                 }
@@ -122,7 +125,10 @@ mod tests {
             tab,
             serve_once("127.0.0.1", "localhost", "/cross-site"),
         );
-        assert_ne!(cross_site.navigation_context(), same_site.navigation_context());
+        assert_ne!(
+            cross_site.navigation_context(),
+            same_site.navigation_context()
+        );
         assert_ne!(cross_site.site_process(), same_site.site_process());
         assert_eq!(
             host.validate_committed_document_authority(same_site),
@@ -165,6 +171,9 @@ mod tests {
         );
         assert_ne!(current.view_generation(), stale.view_generation());
         assert_eq!(host.validate_committed_document_authority(stale), Ok(false));
-        assert_eq!(host.validate_committed_document_authority(current), Ok(true));
+        assert_eq!(
+            host.validate_committed_document_authority(current),
+            Ok(true)
+        );
     }
 }
