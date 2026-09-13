@@ -13,6 +13,7 @@ mod http_transport;
 mod navigation;
 mod platform;
 mod presentation_handoff;
+mod privileged_request;
 mod profile;
 mod profile_bookmarks_scheduler;
 mod profile_catalog;
@@ -56,6 +57,7 @@ pub use presentation_handoff::{
     CurrentFramePermit, PresentationFramePermit, PresentationGeneration, PresentationHandoffError,
     PresentationTransitionStart, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
+pub use privileged_request::{EnginePrivilegedRequestDecision, EnginePrivilegedRequestKind};
 pub use profile::{
     MAX_SETTING_KEY_BYTES, MAX_SETTING_VALUE_BYTES, MAX_SETTINGS_ENTRIES,
     MAX_SETTINGS_RECORD_BYTES, ProfileStorageError, ProfileStore, SETTINGS_SCHEMA_VERSION,
