@@ -93,7 +93,10 @@ impl fmt::Display for EnginePrivilegedRequestError {
                 "privileged request {} does not match its registered source and kind",
                 id.get()
             ),
-            Self::Host(error) => write!(formatter, "privileged request source preflight failed: {error}"),
+            Self::Host(error) => write!(
+                formatter,
+                "privileged request source preflight failed: {error}"
+            ),
         }
     }
 }
@@ -333,6 +336,7 @@ mod tests {
             serve_once("127.0.0.1", "127.0.0.1", "/second"),
         );
 
+        assert_eq!(same_site.host_instance(), first.host_instance());
         assert_eq!(same_site.site_process(), first.site_process());
         assert_ne!(same_site.navigation_context(), first.navigation_context());
         assert_eq!(
@@ -345,6 +349,7 @@ mod tests {
             tab,
             serve_once("127.0.0.1", "localhost", "/cross-site"),
         );
+        assert_eq!(cross_site.host_instance(), first.host_instance());
         assert_ne!(cross_site.site_process(), same_site.site_process());
         assert_eq!(
             host.preflight_privileged_request(same_site, EnginePrivilegedRequestKind::Clipboard),
@@ -382,6 +387,7 @@ mod tests {
             tab,
             serve_once("127.0.0.1", "127.0.0.1", "/replacement-view"),
         );
+        assert_eq!(current.host_instance(), stale.host_instance());
         assert_ne!(current.view_generation(), stale.view_generation());
         assert_eq!(
             host.preflight_privileged_request(stale, EnginePrivilegedRequestKind::Network),
@@ -443,6 +449,7 @@ mod tests {
             tab,
             serve_once("127.0.0.1", "127.0.0.1", "/registered-replacement"),
         );
+        assert_eq!(replacement.host_instance(), first.host_instance());
         assert_eq!(replacement.site_process(), first.site_process());
         assert_ne!(replacement.navigation_context(), first.navigation_context());
         assert_eq!(
@@ -454,6 +461,41 @@ mod tests {
             tracker.preflight_once(&host, request),
             Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
         );
+    }
+
+    #[test]
+    fn registered_request_cannot_cross_engine_host_replacement() {
+        let tab = initial_tab();
+        let mut first_host = EngineHost::new().expect("first engine host");
+        first_host.create_view(tab).expect("first view");
+        let first = commit_remote(
+            &mut first_host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/tracker-first-host"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+        let request = tracker
+            .register(first, EnginePrivilegedRequestKind::Network)
+            .expect("register request");
+
+        let mut replacement_host = EngineHost::new().expect("replacement engine host");
+        replacement_host.create_view(tab).expect("replacement view");
+        let replacement = commit_remote(
+            &mut replacement_host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/tracker-replacement-host"),
+        );
+        assert_eq!(replacement.tab(), first.tab());
+        assert_eq!(replacement.view_generation(), first.view_generation());
+        assert_eq!(replacement.navigation_context(), first.navigation_context());
+        assert_eq!(replacement.site_process(), first.site_process());
+        assert_ne!(replacement.host_instance(), first.host_instance());
+
+        assert_eq!(
+            tracker.preflight_once(&replacement_host, request),
+            Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
+        );
+        assert_eq!(tracker.pending_requests(), 0);
     }
 
     #[test]
