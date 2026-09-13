@@ -1,4 +1,9 @@
 use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostError};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::num::NonZeroU64;
+
+pub const DEFAULT_MAX_PENDING_PRIVILEGED_REQUESTS: usize = 4096;
 
 /// Browser-product taxonomy for future privileged capability requests.
 ///
@@ -18,6 +23,178 @@ pub enum EnginePrivilegedRequestKind {
 pub enum EnginePrivilegedRequestDecision {
     DeniedStaleAuthority,
     DeniedUnsupported,
+}
+
+/// Process-local identity for one pending privileged request attempt.
+///
+/// This is a product correlation identity only. It is not a Rarog capability ID and conveys no
+/// authority on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EnginePrivilegedRequestId(NonZeroU64);
+
+impl EnginePrivilegedRequestId {
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// One-shot request handle bound to the exact source authority snapshot and request kind.
+///
+/// Handles are process-local and must not be persisted. Copying a handle does not make it
+/// reusable: the tracker consumes its identity before source preflight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnginePrivilegedRequest {
+    id: EnginePrivilegedRequestId,
+    authority: EngineCommittedDocumentAuthority,
+    kind: EnginePrivilegedRequestKind,
+}
+
+impl EnginePrivilegedRequest {
+    pub const fn id(self) -> EnginePrivilegedRequestId {
+        self.id
+    }
+
+    pub const fn authority(self) -> EngineCommittedDocumentAuthority {
+        self.authority
+    }
+
+    pub const fn kind(self) -> EnginePrivilegedRequestKind {
+        self.kind
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnginePrivilegedRequestError {
+    InvalidLimit,
+    CapacityExceeded,
+    IdentitySpaceExhausted,
+    UnknownRequest(EnginePrivilegedRequestId),
+    MismatchedRequest(EnginePrivilegedRequestId),
+    Host(EngineHostError),
+}
+
+impl fmt::Display for EnginePrivilegedRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidLimit => {
+                formatter.write_str("privileged request limit must be non-zero")
+            }
+            Self::CapacityExceeded => formatter.write_str("privileged request limit reached"),
+            Self::IdentitySpaceExhausted => {
+                formatter.write_str("privileged request identity space is exhausted")
+            }
+            Self::UnknownRequest(id) => write!(
+                formatter,
+                "unknown or already consumed privileged request {}",
+                id.get()
+            ),
+            Self::MismatchedRequest(id) => write!(
+                formatter,
+                "privileged request {} does not match its registered source and kind",
+                id.get()
+            ),
+            Self::Host(error) => write!(formatter, "privileged request source preflight failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for EnginePrivilegedRequestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Host(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<EngineHostError> for EnginePrivilegedRequestError {
+    fn from(error: EngineHostError) -> Self {
+        Self::Host(error)
+    }
+}
+
+/// Bounded process-local lifecycle for future privileged request attempts.
+///
+/// Registration allocates only a one-shot correlation identity. It does not validate or grant
+/// authority. `preflight_once` consumes the exact registered request first and then revalidates
+/// its committed-document source through `EngineHost`.
+#[derive(Debug)]
+pub struct EnginePrivilegedRequestTracker {
+    max_pending: usize,
+    next_id: Option<NonZeroU64>,
+    pending: BTreeMap<EnginePrivilegedRequestId, EnginePrivilegedRequest>,
+}
+
+impl EnginePrivilegedRequestTracker {
+    pub fn try_new(max_pending: usize) -> Result<Self, EnginePrivilegedRequestError> {
+        if max_pending == 0 {
+            return Err(EnginePrivilegedRequestError::InvalidLimit);
+        }
+
+        Ok(Self {
+            max_pending,
+            next_id: NonZeroU64::new(1),
+            pending: BTreeMap::new(),
+        })
+    }
+
+    pub fn with_default_limit() -> Result<Self, EnginePrivilegedRequestError> {
+        Self::try_new(DEFAULT_MAX_PENDING_PRIVILEGED_REQUESTS)
+    }
+
+    pub const fn max_pending(&self) -> usize {
+        self.max_pending
+    }
+
+    pub fn pending_requests(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn register(
+        &mut self,
+        authority: EngineCommittedDocumentAuthority,
+        kind: EnginePrivilegedRequestKind,
+    ) -> Result<EnginePrivilegedRequest, EnginePrivilegedRequestError> {
+        if self.pending.len() >= self.max_pending {
+            return Err(EnginePrivilegedRequestError::CapacityExceeded);
+        }
+
+        let next = self
+            .next_id
+            .ok_or(EnginePrivilegedRequestError::IdentitySpaceExhausted)?;
+        let id = EnginePrivilegedRequestId(next);
+        self.next_id = NonZeroU64::new(next.get().wrapping_add(1));
+
+        let request = EnginePrivilegedRequest {
+            id,
+            authority,
+            kind,
+        };
+        let previous = self.pending.insert(id, request);
+        debug_assert!(previous.is_none(), "monotonic request IDs cannot collide");
+        Ok(request)
+    }
+
+    /// Consumes the exact registered request before checking its source authority.
+    ///
+    /// Replays are therefore rejected even when the source document is still current. A handle
+    /// with the right ID but mismatched source/kind also burns that slot and fails closed.
+    pub fn preflight_once(
+        &mut self,
+        host: &EngineHost,
+        request: EnginePrivilegedRequest,
+    ) -> Result<EnginePrivilegedRequestDecision, EnginePrivilegedRequestError> {
+        let stored = self
+            .pending
+            .remove(&request.id)
+            .ok_or(EnginePrivilegedRequestError::UnknownRequest(request.id))?;
+        if stored != request {
+            return Err(EnginePrivilegedRequestError::MismatchedRequest(request.id));
+        }
+
+        host.preflight_privileged_request(stored.authority, stored.kind)
+            .map_err(EnginePrivilegedRequestError::from)
+    }
 }
 
 impl EngineHost {
@@ -212,6 +389,133 @@ mod tests {
         );
         assert_eq!(
             host.preflight_privileged_request(current, EnginePrivilegedRequestKind::Network),
+            Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
+        );
+    }
+
+    #[test]
+    fn registered_current_request_is_consumed_once_and_remains_unsupported() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/one-shot"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(2).expect("tracker");
+        let request = tracker
+            .register(current, EnginePrivilegedRequestKind::Network)
+            .expect("register request");
+
+        assert!(request.id().get() > 0);
+        assert_eq!(request.authority(), current);
+        assert_eq!(request.kind(), EnginePrivilegedRequestKind::Network);
+        assert_eq!(tracker.pending_requests(), 1);
+        assert_eq!(
+            tracker.preflight_once(&host, request),
+            Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
+        );
+        assert_eq!(tracker.pending_requests(), 0);
+        assert_eq!(
+            tracker.preflight_once(&host, request),
+            Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
+        );
+    }
+
+    #[test]
+    fn registered_request_revalidates_authority_at_consume_time() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let first = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/registered-first"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(2).expect("tracker");
+        let request = tracker
+            .register(first, EnginePrivilegedRequestKind::Clipboard)
+            .expect("register request");
+
+        let replacement = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/registered-replacement"),
+        );
+        assert_eq!(replacement.site_process(), first.site_process());
+        assert_ne!(replacement.navigation_context(), first.navigation_context());
+        assert_eq!(
+            tracker.preflight_once(&host, request),
+            Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
+        );
+        assert_eq!(tracker.pending_requests(), 0);
+        assert_eq!(
+            tracker.preflight_once(&host, request),
+            Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
+        );
+    }
+
+    #[test]
+    fn mismatched_request_burns_the_registered_slot() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/mismatch"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+        let request = tracker
+            .register(current, EnginePrivilegedRequestKind::Network)
+            .expect("register request");
+        let forged = EnginePrivilegedRequest {
+            id: request.id,
+            authority: request.authority,
+            kind: EnginePrivilegedRequestKind::Clipboard,
+        };
+
+        assert_eq!(
+            tracker.preflight_once(&host, forged),
+            Err(EnginePrivilegedRequestError::MismatchedRequest(request.id()))
+        );
+        assert_eq!(tracker.pending_requests(), 0);
+        assert_eq!(
+            tracker.preflight_once(&host, request),
+            Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
+        );
+    }
+
+    #[test]
+    fn tracker_enforces_nonzero_limit_and_bounded_capacity() {
+        assert!(matches!(
+            EnginePrivilegedRequestTracker::try_new(0),
+            Err(EnginePrivilegedRequestError::InvalidLimit)
+        ));
+
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/capacity"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+        let first = tracker
+            .register(current, EnginePrivilegedRequestKind::Network)
+            .expect("first request");
+
+        assert_eq!(tracker.max_pending(), 1);
+        assert_eq!(tracker.pending_requests(), 1);
+        assert_eq!(
+            tracker.register(current, EnginePrivilegedRequestKind::Clipboard),
+            Err(EnginePrivilegedRequestError::CapacityExceeded)
+        );
+        assert_eq!(tracker.pending_requests(), 1);
+        assert_eq!(
+            tracker.preflight_once(&host, first),
             Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
         );
     }
