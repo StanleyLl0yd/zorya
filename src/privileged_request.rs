@@ -119,8 +119,7 @@ impl From<EngineHostError> for EnginePrivilegedRequestError {
     }
 }
 
-fn allocate_privileged_request_id(
-) -> Result<EnginePrivilegedRequestId, EnginePrivilegedRequestError> {
+fn allocate_privileged_request_id() -> Result<EnginePrivilegedRequestId, EnginePrivilegedRequestError> {
     let raw = NEXT_ENGINE_PRIVILEGED_REQUEST_ID
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
