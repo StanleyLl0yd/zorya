@@ -32,6 +32,14 @@ These context/process tokens are not product identities and are never persisted 
 
 The request labels are Zorya product taxonomy only. They are not Rarog `CapabilityClass` values, capability IDs, grants or IPC authority. This preflight does not add a `rarog-broker` dependency, grant a capability, start a Host network operation, call a clipboard service or make possession of a current snapshot sufficient authorization. A future brokering slice must define a separately reviewed allow policy and must revalidate immediately before any actual grant.
 
+## One-shot privileged request lifecycle
+
+`EnginePrivilegedRequestTracker` adds a bounded process-local lifecycle around future privileged request attempts. Registration captures the exact committed-document authority snapshot plus the product request kind under a monotonic non-zero `EnginePrivilegedRequestId`. The default tracker retains at most 4096 pending attempts and rejects a zero configured limit, capacity overflow and identity-space exhaustion.
+
+A request identity is a correlation token only. It is not a Rarog capability ID, grant, Site identity or persisted browser identity, and registration performs no authorization. `preflight_once` removes the exact registered request before checking it, rejects unknown/already-consumed identities, rejects a handle whose authority or kind no longer matches the registered tuple, and leaves a mismatched slot consumed rather than reusable. For an exact request it then invokes the deny-by-default Host preflight, which revalidates live committed-document authority at consumption time. Consequently a copied handle cannot be replayed, and a request staged before a replacement commit becomes `DeniedStaleAuthority` when consumed.
+
+Even a current exact one-shot request still ends at `DeniedUnsupported`. The lifecycle does not add an allow result, Rarog broker dependency, capability grant, Host network operation, clipboard action or IPC authority. A later actual brokering path must preserve consume-once semantics and perform the separately reviewed policy/revalidation immediately before any grant.
+
 ## Explicitly not provided yet
 
 This boundary does not provide or claim:
@@ -44,7 +52,8 @@ This boundary does not provide or claim:
 - download mediation;
 - permission or clipboard mediation;
 - privileged internal-page authorization;
+- target-aware Network capability policy;
 - a capability-routed subresource pipeline;
 - any successful Network or Clipboard capability brokering.
 
-Those remain separate reviewed Z4/Rarog work. Browser policy, authority revalidation and privileged-request preflight must not be presented as substitutes for missing process isolation or capability mediation.
+Those remain separate reviewed Z4/Rarog work. Browser policy, authority revalidation, privileged-request preflight and one-shot request tracking must not be presented as substitutes for missing process isolation or capability mediation.
