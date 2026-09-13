@@ -8,6 +8,7 @@ mod browsing_history;
 mod chrome;
 mod commands;
 pub mod engine;
+mod engine_authority;
 mod http_transport;
 mod navigation;
 mod platform;
