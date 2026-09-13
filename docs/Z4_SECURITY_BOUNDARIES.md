@@ -20,6 +20,10 @@ Rarog's own navigation and Fetch checks remain independently authoritative after
 
 For a successfully committed remote document, `EngineHost::committed_document_authority` exposes only ephemeral wrapper tokens derived from the live Rarog Host navigation context and current Host-assigned Site process. The snapshot is bound to stable product `TabId` plus the current View generation. Pending, cancelled, failed or policy-blocked navigation cannot replace it; retired or lost Host state fails closed.
 
+`EngineHost::validate_committed_document_authority` is the replay-safety gate for a previously captured snapshot before any future privileged brokering. Validation resolves the current committed authority again through the live Host and accepts only an exact match of `TabId`, View generation, navigation-context token and Site-process token. A replaced context, local document, closed View or recreated View is stale and returns `false`; unexpected missing or divergent live Host authority remains `InconsistentNavigationState`. Possession of an old snapshot is never authorization by itself.
+
+Revalidation is read-only: it mints no Network or Clipboard capability, starts no network operation, grants no IPC authority and does not persist any Host token.
+
 These context/process tokens are not product identities and are never persisted in profile or session state.
 
 ## Explicitly not provided yet
@@ -32,8 +36,8 @@ This boundary does not provide or claim:
 - OS external-protocol dispatch;
 - local-file navigation or file chooser policy;
 - download mediation;
-- permission mediation;
+- permission or clipboard mediation;
 - privileged internal-page authorization;
 - a capability-routed subresource pipeline.
 
-Those remain separate reviewed Z4/Rarog work. Browser policy must not be presented as a substitute for missing process isolation.
+Those remain separate reviewed Z4/Rarog work. Browser policy and authority revalidation must not be presented as substitutes for missing process isolation or capability mediation.
