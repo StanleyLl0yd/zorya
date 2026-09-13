@@ -26,6 +26,12 @@ Revalidation is read-only: it mints no Network or Clipboard capability, starts n
 
 These context/process tokens are not product identities and are never persisted in profile or session state.
 
+## Privileged request admission
+
+`EngineHost::preflight_privileged_request` is a deny-by-default browser-product gate for future privileged requests. It first reuses committed-document authority revalidation so a replaced, local, closed or recreated document is rejected as stale before any later capability policy could run. A still-current remote document reaches only `DeniedUnsupported` for both current request labels (`Network` and `Clipboard`). There is deliberately no allow/authorized result in this slice.
+
+The request labels are Zorya product taxonomy only. They are not Rarog `CapabilityClass` values, capability IDs, grants or IPC authority. This preflight does not add a `rarog-broker` dependency, grant a capability, start a Host network operation, call a clipboard service or make possession of a current snapshot sufficient authorization. A future brokering slice must define a separately reviewed allow policy and must revalidate immediately before any actual grant.
+
 ## Explicitly not provided yet
 
 This boundary does not provide or claim:
@@ -38,6 +44,7 @@ This boundary does not provide or claim:
 - download mediation;
 - permission or clipboard mediation;
 - privileged internal-page authorization;
-- a capability-routed subresource pipeline.
+- a capability-routed subresource pipeline;
+- any successful Network or Clipboard capability brokering.
 
-Those remain separate reviewed Z4/Rarog work. Browser policy and authority revalidation must not be presented as substitutes for missing process isolation or capability mediation.
+Those remain separate reviewed Z4/Rarog work. Browser policy, authority revalidation and privileged-request preflight must not be presented as substitutes for missing process isolation or capability mediation.
