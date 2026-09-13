@@ -79,9 +79,7 @@ pub enum EnginePrivilegedRequestError {
 impl fmt::Display for EnginePrivilegedRequestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidLimit => {
-                formatter.write_str("privileged request limit must be non-zero")
-            }
+            Self::InvalidLimit => formatter.write_str("privileged request limit must be non-zero"),
             Self::CapacityExceeded => formatter.write_str("privileged request limit reached"),
             Self::IdentitySpaceExhausted => {
                 formatter.write_str("privileged request identity space is exhausted")
@@ -119,7 +117,8 @@ impl From<EngineHostError> for EnginePrivilegedRequestError {
     }
 }
 
-fn allocate_privileged_request_id() -> Result<EnginePrivilegedRequestId, EnginePrivilegedRequestError> {
+fn allocate_privileged_request_id()
+-> Result<EnginePrivilegedRequestId, EnginePrivilegedRequestError> {
     let raw = NEXT_ENGINE_PRIVILEGED_REQUEST_ID
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
@@ -182,7 +181,10 @@ impl EnginePrivilegedRequestTracker {
             kind,
         };
         let previous = self.pending.insert(id, request);
-        debug_assert!(previous.is_none(), "process-global request IDs cannot collide");
+        debug_assert!(
+            previous.is_none(),
+            "process-global request IDs cannot collide"
+        );
         Ok(request)
     }
 
@@ -565,7 +567,9 @@ mod tests {
 
         assert_eq!(
             tracker.preflight_once(&host, forged),
-            Err(EnginePrivilegedRequestError::MismatchedRequest(request.id()))
+            Err(EnginePrivilegedRequestError::MismatchedRequest(
+                request.id()
+            ))
         );
         assert_eq!(tracker.pending_requests(), 0);
         assert_eq!(
