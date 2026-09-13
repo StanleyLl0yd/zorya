@@ -57,7 +57,11 @@ pub use presentation_handoff::{
     CurrentFramePermit, PresentationFramePermit, PresentationGeneration, PresentationHandoffError,
     PresentationTransitionStart, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
-pub use privileged_request::{EnginePrivilegedRequestDecision, EnginePrivilegedRequestKind};
+pub use privileged_request::{
+    DEFAULT_MAX_PENDING_PRIVILEGED_REQUESTS, EnginePrivilegedRequest,
+    EnginePrivilegedRequestDecision, EnginePrivilegedRequestError, EnginePrivilegedRequestId,
+    EnginePrivilegedRequestKind, EnginePrivilegedRequestTracker,
+};
 pub use profile::{
     MAX_SETTING_KEY_BYTES, MAX_SETTING_VALUE_BYTES, MAX_SETTINGS_ENTRIES,
     MAX_SETTINGS_RECORD_BYTES, ProfileStorageError, ProfileStore, SETTINGS_SCHEMA_VERSION,
