@@ -407,10 +407,10 @@ fn stale_source_still_precedes_target_classification_for_body_request() {
 
 #[test]
 fn body_budget_constructor_and_checked_add_fail_closed() {
-    assert_eq!(
+    assert!(matches!(
         EnginePrivilegedRequestTracker::try_new_with_body_budget(1, 0),
         Err(EnginePrivilegedRequestError::InvalidNetworkBodyBudget)
-    );
+    ));
 
     let (_tab, _host, current) = current_authority("/body-overflow");
     let mut tracker =
