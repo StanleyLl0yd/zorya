@@ -4,12 +4,15 @@ use rarog_fetch::{FetchMethod, HeaderList};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const DEFAULT_MAX_PENDING_PRIVILEGED_REQUESTS: usize = 4096;
+pub const DEFAULT_MAX_PENDING_PRIVILEGED_NETWORK_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PRIVILEGED_NETWORK_TARGET_BYTES: usize = 4 * 1024;
 pub const MAX_PRIVILEGED_NETWORK_HEADERS: usize = 64;
 pub const MAX_PRIVILEGED_NETWORK_HEADER_BYTES: usize = 16 * 1024;
+pub const MAX_PRIVILEGED_NETWORK_BODY_BYTES: usize = 1024 * 1024;
 
 static NEXT_ENGINE_PRIVILEGED_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -73,11 +76,12 @@ impl EnginePrivilegedRequest {
 }
 
 /// One-shot Network request bound to the exact source authority, canonical method, bounded
-/// canonical headers and raw target.
+/// canonical headers, exact optional bounded body and raw target.
 ///
-/// The target and header contents are retained only in process memory and are deliberately not
-/// included in `Debug` output because URLs and headers can contain sensitive data. The HTTP method
-/// and headers use the canonical Rarog Fetch types; Zorya does not parse or normalize them
+/// Target, header and body contents are retained only in process memory and are deliberately not
+/// included in `Debug` output because they can contain sensitive data. Body bytes use immutable
+/// shared storage so cloning a request handle does not duplicate the body allocation. The HTTP
+/// method and headers use canonical Rarog Fetch types; Zorya does not parse or normalize them
 /// independently. Registration does not parse or authorize the target; canonical target policy
 /// runs only when the request is consumed.
 #[derive(Clone, PartialEq, Eq)]
@@ -86,6 +90,7 @@ pub struct EngineNetworkPrivilegedRequest {
     authority: EngineCommittedDocumentAuthority,
     method: FetchMethod,
     headers: HeaderList,
+    body: Option<Arc<[u8]>>,
     target: String,
 }
 
@@ -106,8 +111,16 @@ impl EngineNetworkPrivilegedRequest {
         &self.headers
     }
 
+    pub fn body(&self) -> Option<&[u8]> {
+        self.body.as_deref()
+    }
+
     pub fn target(&self) -> &str {
         &self.target
+    }
+
+    fn body_bytes(&self) -> usize {
+        self.body.as_ref().map_or(0, |body| body.len())
     }
 }
 
@@ -121,6 +134,8 @@ impl fmt::Debug for EngineNetworkPrivilegedRequest {
             .field("target_bytes", &self.target.len())
             .field("header_count", &self.headers.len())
             .field("header_bytes", &self.headers.byte_len())
+            .field("body_present", &self.body.is_some())
+            .field("body_bytes", &self.body_bytes())
             .finish()
     }
 }
@@ -134,13 +149,36 @@ enum PendingPrivilegedRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnginePrivilegedRequestError {
     InvalidLimit,
+    InvalidNetworkBodyBudget,
     CapacityExceeded,
     IdentitySpaceExhausted,
     NetworkTargetRequired,
-    NetworkTargetTooLong { bytes: usize, max: usize },
-    NetworkHeaderCountExceeded { count: usize, max: usize },
-    NetworkHeaderBytesExceeded { bytes: usize, max: usize },
+    NetworkTargetTooLong {
+        bytes: usize,
+        max: usize,
+    },
+    NetworkHeaderCountExceeded {
+        count: usize,
+        max: usize,
+    },
+    NetworkHeaderBytesExceeded {
+        bytes: usize,
+        max: usize,
+    },
     NetworkHeaderRebindFailed,
+    NetworkBodyNotPermitted {
+        method: FetchMethod,
+    },
+    NetworkBodyTooLong {
+        bytes: usize,
+        max: usize,
+    },
+    NetworkBodyBudgetExceeded {
+        pending: usize,
+        requested: usize,
+        max: usize,
+    },
+    NetworkBodyAccountingInvariant,
     UnknownRequest(EnginePrivilegedRequestId),
     MismatchedRequest(EnginePrivilegedRequestId),
     Host(EngineHostError),
@@ -150,6 +188,9 @@ impl fmt::Display for EnginePrivilegedRequestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidLimit => formatter.write_str("privileged request limit must be non-zero"),
+            Self::InvalidNetworkBodyBudget => {
+                formatter.write_str("privileged Network body budget must be non-zero")
+            }
             Self::CapacityExceeded => formatter.write_str("privileged request limit reached"),
             Self::IdentitySpaceExhausted => {
                 formatter.write_str("privileged request identity space is exhausted")
@@ -171,6 +212,25 @@ impl fmt::Display for EnginePrivilegedRequestError {
             ),
             Self::NetworkHeaderRebindFailed => formatter
                 .write_str("canonical Network headers could not be rebound to product limits"),
+            Self::NetworkBodyNotPermitted { method } => write!(
+                formatter,
+                "Network privileged request method {method} does not permit a request body"
+            ),
+            Self::NetworkBodyTooLong { bytes, max } => write!(
+                formatter,
+                "Network privileged request body is {bytes} bytes; maximum is {max} bytes"
+            ),
+            Self::NetworkBodyBudgetExceeded {
+                pending,
+                requested,
+                max,
+            } => write!(
+                formatter,
+                "Network privileged request body budget exceeded: {pending} pending bytes + {requested} requested bytes; maximum is {max} bytes"
+            ),
+            Self::NetworkBodyAccountingInvariant => {
+                formatter.write_str("privileged Network body accounting invariant was violated")
+            }
             Self::UnknownRequest(id) => write!(
                 formatter,
                 "unknown or already consumed privileged request {}",
@@ -242,28 +302,65 @@ fn bind_network_headers(headers: &HeaderList) -> Result<HeaderList, EnginePrivil
     Ok(bounded)
 }
 
+fn bind_network_body(
+    method: &FetchMethod,
+    body: Option<Vec<u8>>,
+) -> Result<Option<Arc<[u8]>>, EnginePrivilegedRequestError> {
+    if body.is_some() && !method.permits_body() {
+        return Err(EnginePrivilegedRequestError::NetworkBodyNotPermitted {
+            method: method.clone(),
+        });
+    }
+    if let Some(body) = &body
+        && body.len() > MAX_PRIVILEGED_NETWORK_BODY_BYTES
+    {
+        return Err(EnginePrivilegedRequestError::NetworkBodyTooLong {
+            bytes: body.len(),
+            max: MAX_PRIVILEGED_NETWORK_BODY_BYTES,
+        });
+    }
+    Ok(body.map(Arc::<[u8]>::from))
+}
+
 /// Bounded process-local lifecycle for future privileged request attempts.
 ///
 /// Registration allocates only a one-shot correlation identity. It does not validate or grant
 /// authority. Request IDs are process-global and monotonic so rebuilding a tracker cannot make an
 /// old copied handle collide with a newly registered request. Generic registration cannot create a
-/// Network request: Network attempts must retain an exact bounded target, canonical Rarog method
-/// and bounded canonical Rarog headers. Consumption removes the exact stored request before
-/// source/target policy.
+/// Network request: Network attempts must retain an exact bounded target, canonical Rarog method,
+/// bounded canonical Rarog headers and exact optional bounded body. Consumption removes the exact
+/// stored request and releases its tracker-accounted body bytes before source/target policy.
 #[derive(Debug)]
 pub struct EnginePrivilegedRequestTracker {
     max_pending: usize,
+    max_pending_network_body_bytes: usize,
+    pending_network_body_bytes: usize,
     pending: BTreeMap<EnginePrivilegedRequestId, PendingPrivilegedRequest>,
 }
 
 impl EnginePrivilegedRequestTracker {
     pub fn try_new(max_pending: usize) -> Result<Self, EnginePrivilegedRequestError> {
+        Self::try_new_with_body_budget(
+            max_pending,
+            DEFAULT_MAX_PENDING_PRIVILEGED_NETWORK_BODY_BYTES,
+        )
+    }
+
+    pub fn try_new_with_body_budget(
+        max_pending: usize,
+        max_pending_network_body_bytes: usize,
+    ) -> Result<Self, EnginePrivilegedRequestError> {
         if max_pending == 0 {
             return Err(EnginePrivilegedRequestError::InvalidLimit);
+        }
+        if max_pending_network_body_bytes == 0 {
+            return Err(EnginePrivilegedRequestError::InvalidNetworkBodyBudget);
         }
 
         Ok(Self {
             max_pending,
+            max_pending_network_body_bytes,
+            pending_network_body_bytes: 0,
             pending: BTreeMap::new(),
         })
     }
@@ -274,6 +371,14 @@ impl EnginePrivilegedRequestTracker {
 
     pub const fn max_pending(&self) -> usize {
         self.max_pending
+    }
+
+    pub const fn max_pending_network_body_bytes(&self) -> usize {
+        self.max_pending_network_body_bytes
+    }
+
+    pub const fn pending_network_body_bytes(&self) -> usize {
+        self.pending_network_body_bytes
     }
 
     pub fn pending_requests(&self) -> usize {
@@ -300,7 +405,7 @@ impl EnginePrivilegedRequestTracker {
         Ok(request)
     }
 
-    /// Registers a bounded raw Network target with canonical GET semantics and no headers.
+    /// Registers a bounded raw Network target with canonical GET semantics, no headers and no body.
     ///
     /// Target parsing, source revalidation and authorization remain deferred to consumption.
     pub fn register_network(
@@ -308,30 +413,32 @@ impl EnginePrivilegedRequestTracker {
         authority: EngineCommittedDocumentAuthority,
         target: impl Into<String>,
     ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
-        self.register_network_with_method_and_headers(
+        self.register_network_with_method_headers_and_body(
             authority,
             FetchMethod::get(),
             target,
             HeaderList::default(),
+            None,
         )
     }
 
-    /// Registers a bounded raw Network target plus canonical GET headers.
+    /// Registers a bounded raw Network target plus canonical GET headers and no body.
     pub fn register_network_with_headers(
         &mut self,
         authority: EngineCommittedDocumentAuthority,
         target: impl Into<String>,
         headers: HeaderList,
     ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
-        self.register_network_with_method_and_headers(
+        self.register_network_with_method_headers_and_body(
             authority,
             FetchMethod::get(),
             target,
             headers,
+            None,
         )
     }
 
-    /// Registers a bounded raw Network target plus canonical Rarog Fetch method and no headers.
+    /// Registers a bounded raw Network target plus canonical Rarog Fetch method and no headers/body.
     ///
     /// HTTP method syntax, canonicalization and forbidden-method policy belong to
     /// `rarog_fetch::FetchMethod`; this function accepts that already-validated type rather than
@@ -342,28 +449,41 @@ impl EnginePrivilegedRequestTracker {
         method: FetchMethod,
         target: impl Into<String>,
     ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
-        self.register_network_with_method_and_headers(
+        self.register_network_with_method_headers_and_body(
             authority,
             method,
             target,
             HeaderList::default(),
+            None,
         )
     }
 
-    /// Registers a bounded raw Network target, canonical Rarog Fetch method and canonical Rarog
-    /// headers without target parsing, source revalidation or authorization.
-    ///
-    /// Incoming headers are rebound through Rarog `HeaderList::append` into fixed product limits;
-    /// Zorya does not parse or normalize header names or values independently. Header/target bounds
-    /// are checked before tracker capacity or request-ID allocation. Deferring target parsing until
-    /// consumption preserves the fail-closed order where stale source authority is rejected before
-    /// target classification.
+    /// Registers a bounded raw Network target plus canonical method/headers and no body.
     pub fn register_network_with_method_and_headers(
         &mut self,
         authority: EngineCommittedDocumentAuthority,
         method: FetchMethod,
         target: impl Into<String>,
         headers: HeaderList,
+    ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
+        self.register_network_with_method_headers_and_body(authority, method, target, headers, None)
+    }
+
+    /// Registers a bounded raw Network target, canonical method/headers and exact optional body
+    /// without target parsing, source revalidation or authorization.
+    ///
+    /// Incoming headers are rebound through Rarog `HeaderList::append` into fixed product limits.
+    /// Body/method compatibility reuses Rarog `FetchMethod::permits_body`; Zorya does not add a
+    /// second HTTP method table. Target/header/body and aggregate body-memory bounds are checked
+    /// before request-ID allocation. Deferring target parsing until consumption preserves the
+    /// fail-closed order where stale source authority is rejected before target classification.
+    pub fn register_network_with_method_headers_and_body(
+        &mut self,
+        authority: EngineCommittedDocumentAuthority,
+        method: FetchMethod,
+        target: impl Into<String>,
+        headers: HeaderList,
+        body: Option<Vec<u8>>,
     ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
         let target = target.into();
         if target.len() > MAX_PRIVILEGED_NETWORK_TARGET_BYTES {
@@ -373,6 +493,23 @@ impl EnginePrivilegedRequestTracker {
             });
         }
         let headers = bind_network_headers(&headers)?;
+        let body = bind_network_body(&method, body)?;
+        let body_bytes = body.as_ref().map_or(0, |body| body.len());
+        let next_body_bytes = self
+            .pending_network_body_bytes
+            .checked_add(body_bytes)
+            .ok_or(EnginePrivilegedRequestError::NetworkBodyBudgetExceeded {
+                pending: self.pending_network_body_bytes,
+                requested: body_bytes,
+                max: self.max_pending_network_body_bytes,
+            })?;
+        if next_body_bytes > self.max_pending_network_body_bytes {
+            return Err(EnginePrivilegedRequestError::NetworkBodyBudgetExceeded {
+                pending: self.pending_network_body_bytes,
+                requested: body_bytes,
+                max: self.max_pending_network_body_bytes,
+            });
+        }
         self.ensure_capacity()?;
 
         let id = allocate_privileged_request_id()?;
@@ -381,25 +518,26 @@ impl EnginePrivilegedRequestTracker {
             authority,
             method,
             headers,
+            body,
             target,
         };
         self.insert_pending(id, PendingPrivilegedRequest::Network(request.clone()));
+        self.pending_network_body_bytes = next_body_bytes;
         Ok(request)
     }
 
     /// Consumes an exact generic request before checking its source authority.
     ///
     /// Replays are therefore rejected even when the source document is still current. A handle
-    /// with the right ID but mismatched source/kind also burns that slot and fails closed.
+    /// with the right ID but mismatched source/kind also burns that slot and fails closed. If the
+    /// ID actually belongs to a Network request, its tracker-accounted body bytes are released
+    /// before returning the mismatch.
     pub fn preflight_once(
         &mut self,
         host: &EngineHost,
         request: EnginePrivilegedRequest,
     ) -> Result<EnginePrivilegedRequestDecision, EnginePrivilegedRequestError> {
-        let stored = self
-            .pending
-            .remove(&request.id)
-            .ok_or(EnginePrivilegedRequestError::UnknownRequest(request.id))?;
+        let stored = self.remove_pending(request.id)?;
         let PendingPrivilegedRequest::Generic(stored) = stored else {
             return Err(EnginePrivilegedRequestError::MismatchedRequest(request.id));
         };
@@ -411,12 +549,13 @@ impl EnginePrivilegedRequestTracker {
             .map_err(EnginePrivilegedRequestError::from)
     }
 
-    /// Consumes the exact target/method/header-bound Network request before applying canonical
+    /// Consumes the exact target/method/header/body-bound Network request before applying canonical
     /// target policy.
     ///
-    /// Same-ID source, method, headers or target mismatches burn the stored slot. For an exact
-    /// handle, `preflight_network_target` revalidates source authority before parsing/classifying
-    /// the raw target. The current policy remains non-authorizing; retained method/headers are
+    /// Same-ID source, method, headers, body or target mismatches burn the stored slot. Stored body
+    /// bytes are released from tracker accounting before equality or policy. For an exact handle,
+    /// `preflight_network_target` revalidates source authority before parsing/classifying the raw
+    /// target. The current policy remains non-authorizing; retained method/headers/body are
     /// correlation data for a later reviewed Fetch/broker path and are not executed here.
     pub fn preflight_network_once(
         &mut self,
@@ -424,10 +563,7 @@ impl EnginePrivilegedRequestTracker {
         request: EngineNetworkPrivilegedRequest,
     ) -> Result<EngineNetworkTargetDecision, EnginePrivilegedRequestError> {
         let id = request.id;
-        let stored = self
-            .pending
-            .remove(&id)
-            .ok_or(EnginePrivilegedRequestError::UnknownRequest(id))?;
+        let stored = self.remove_pending(id)?;
         let PendingPrivilegedRequest::Network(stored) = stored else {
             return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
         };
@@ -445,6 +581,25 @@ impl EnginePrivilegedRequestTracker {
         } else {
             Ok(())
         }
+    }
+
+    fn remove_pending(
+        &mut self,
+        id: EnginePrivilegedRequestId,
+    ) -> Result<PendingPrivilegedRequest, EnginePrivilegedRequestError> {
+        let request = self
+            .pending
+            .remove(&id)
+            .ok_or(EnginePrivilegedRequestError::UnknownRequest(id))?;
+        let body_bytes = match &request {
+            PendingPrivilegedRequest::Generic(_) => 0,
+            PendingPrivilegedRequest::Network(request) => request.body_bytes(),
+        };
+        self.pending_network_body_bytes =
+            self.pending_network_body_bytes
+                .checked_sub(body_bytes)
+                .ok_or(EnginePrivilegedRequestError::NetworkBodyAccountingInvariant)?;
+        Ok(request)
     }
 
     fn insert_pending(&mut self, id: EnginePrivilegedRequestId, request: PendingPrivilegedRequest) {
@@ -476,6 +631,10 @@ impl EngineHost {
         Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
     }
 }
+
+#[cfg(test)]
+#[path = "privileged_request_network_body_tests.rs"]
+mod network_body_tests;
 
 #[cfg(test)]
 mod tests {
@@ -762,6 +921,7 @@ mod tests {
         assert_eq!(request.authority(), current);
         assert_eq!(request.method().as_str(), "GET");
         assert!(request.headers().is_empty());
+        assert_eq!(request.body(), None);
         assert_eq!(request.target(), "http://127.0.0.1:1/resource");
         assert_eq!(tracker.pending_requests(), 1);
         assert_eq!(
@@ -794,6 +954,7 @@ mod tests {
             .expect("register method-bound request");
         assert_eq!(request.method().as_str(), "POST");
         assert!(request.headers().is_empty());
+        assert_eq!(request.body(), None);
         assert_eq!(
             tracker.preflight_network_once(&host, request.clone()),
             Ok(EngineNetworkTargetDecision::DeniedUnsupported)
@@ -836,6 +997,7 @@ mod tests {
         assert_eq!(request.method().as_str(), "POST");
         assert_eq!(request.headers(), &expected);
         assert_eq!(request.headers().len(), 1);
+        assert_eq!(request.body(), None);
         assert_eq!(
             tracker.preflight_network_once(&host, request),
             Ok(EngineNetworkTargetDecision::DeniedUnsupported)
@@ -963,6 +1125,7 @@ mod tests {
             authority: request.authority,
             method: request.method.clone(),
             headers: request.headers.clone(),
+            body: request.body.clone(),
             target: "http://127.0.0.1:1/forged".into(),
         };
 
@@ -998,6 +1161,7 @@ mod tests {
             authority: request.authority,
             method: FetchMethod::post(),
             headers: request.headers.clone(),
+            body: request.body.clone(),
             target: request.target.clone(),
         };
 
@@ -1038,6 +1202,7 @@ mod tests {
             method: request.method.clone(),
             headers: bind_network_headers(&one_header_list("X-Zorya", "forged"))
                 .expect("forged bounded headers"),
+            body: request.body.clone(),
             target: request.target.clone(),
         };
 
@@ -1171,6 +1336,8 @@ mod tests {
         assert!(debug.contains("target_bytes"));
         assert!(debug.contains("header_count"));
         assert!(debug.contains("header_bytes"));
+        assert!(debug.contains("body_present"));
+        assert!(debug.contains("body_bytes"));
     }
 
     #[test]
@@ -1299,6 +1466,11 @@ mod tests {
             .expect("first request");
 
         assert_eq!(tracker.max_pending(), 1);
+        assert_eq!(
+            tracker.max_pending_network_body_bytes(),
+            DEFAULT_MAX_PENDING_PRIVILEGED_NETWORK_BODY_BYTES
+        );
+        assert_eq!(tracker.pending_network_body_bytes(), 0);
         assert_eq!(tracker.pending_requests(), 1);
         assert_eq!(
             tracker.register_network_with_headers(
