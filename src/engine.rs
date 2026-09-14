@@ -154,6 +154,56 @@ impl EngineCommittedDocumentAuthority {
     }
 }
 
+/// Ephemeral committed remote-document Network source identity.
+///
+/// The authority remains Host-lifetime state while `origin` is the exact canonical Rarog
+/// Origin of the currently committed remote document. The Origin is shared across clones
+/// and deliberately omitted from `Debug` so host/port data cannot leak through diagnostics.
+#[derive(Clone, PartialEq, Eq)]
+pub struct EngineCommittedDocumentSource {
+    authority: EngineCommittedDocumentAuthority,
+    origin: std::sync::Arc<rarog_url::Origin>,
+}
+
+impl EngineCommittedDocumentSource {
+    pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
+        self.authority
+    }
+
+    pub fn origin(&self) -> &rarog_url::Origin {
+        self.origin.as_ref()
+    }
+
+    pub const fn host_instance(&self) -> EngineHostInstanceToken {
+        self.authority.host_instance()
+    }
+
+    pub const fn tab(&self) -> TabId {
+        self.authority.tab()
+    }
+
+    pub const fn view_generation(&self) -> u64 {
+        self.authority.view_generation()
+    }
+
+    pub const fn navigation_context(&self) -> EngineNavigationContextToken {
+        self.authority.navigation_context()
+    }
+
+    pub const fn site_process(&self) -> EngineSiteProcessToken {
+        self.authority.site_process()
+    }
+}
+
+impl fmt::Debug for EngineCommittedDocumentSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EngineCommittedDocumentSource")
+            .field("authority", &self.authority)
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineNavigationPoll {
     Pending,
@@ -453,6 +503,49 @@ impl EngineHost {
         }
 
         Ok(Some(snapshot.site().clone()))
+    }
+
+    /// Mints the exact committed remote-document source for future Network correlation.
+    ///
+    /// Origin identity comes only from Rarog's canonical live View URL. Its Site must agree
+    /// with the still-live Host navigation context and Site-process assignment; browser
+    /// display/history strings are never consulted. Local/non-HTTP(S) or divergent state
+    /// fails closed instead of fabricating source identity.
+    pub fn committed_document_source(
+        &self,
+        tab: TabId,
+    ) -> Result<Option<EngineCommittedDocumentSource>, EngineHostError> {
+        let Some(authority) = self.committed_document_authority(tab)? else {
+            return Ok(None);
+        };
+        let hosted = self
+            .views
+            .get(&tab)
+            .ok_or(EngineHostError::UnknownTab(tab))?;
+        let url = hosted
+            .view
+            .document_url()
+            .ok_or(EngineHostError::InconsistentNavigationState { tab })?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(EngineHostError::InconsistentNavigationState { tab });
+        }
+        let origin = url
+            .origin()
+            .map_err(|_| EngineHostError::InconsistentNavigationState { tab })?;
+        if origin.is_opaque() {
+            return Err(EngineHostError::InconsistentNavigationState { tab });
+        }
+        let Some(site) = self.committed_document_site_identity(tab)? else {
+            return Err(EngineHostError::InconsistentNavigationState { tab });
+        };
+        if !origin.site().same_site(&site) {
+            return Err(EngineHostError::InconsistentNavigationState { tab });
+        }
+
+        Ok(Some(EngineCommittedDocumentSource {
+            authority,
+            origin: std::sync::Arc::new(origin),
+        }))
     }
 
     pub fn load_local_html(
@@ -1673,6 +1766,11 @@ mod tests {
             .committed_document_authority(tab)
             .expect("authority before process loss")
             .expect("remote authority before process loss");
+        let source = host
+            .committed_document_source(tab)
+            .expect("source before process loss")
+            .expect("remote source before process loss");
+        assert_eq!(source.authority(), authority);
         let context = host
             .views
             .get(&tab)
@@ -1692,7 +1790,7 @@ mod tests {
             Err(EngineHostError::InconsistentNavigationState { tab })
         );
         assert_eq!(
-            host.preflight_network_target(authority, "https://lost.example/resource"),
+            host.preflight_network_target(&source, "https://lost.example/resource"),
             Err(EngineHostError::InconsistentNavigationState { tab })
         );
     }

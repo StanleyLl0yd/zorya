@@ -37,7 +37,7 @@ fn commit_remote(
     host: &mut EngineHost,
     tab: TabId,
     location: String,
-) -> EngineCommittedDocumentAuthority {
+) -> EngineCommittedDocumentSource {
     let request = host
         .begin_navigation(tab, location)
         .expect("begin remote navigation")
@@ -60,12 +60,12 @@ fn commit_remote(
         }
     }
 
-    host.committed_document_authority(tab)
+    host.committed_document_source(tab)
         .expect("committed authority query")
         .expect("committed remote authority")
 }
 
-fn current_authority(path: &str) -> (TabId, EngineHost, EngineCommittedDocumentAuthority) {
+fn current_authority(path: &str) -> (TabId, EngineHost, EngineCommittedDocumentSource) {
     let tab = initial_tab();
     let mut host = EngineHost::new().expect("engine host");
     host.create_view(tab).expect("view");
@@ -80,7 +80,7 @@ fn exact_network_body_is_shared_consumed_once_and_remains_unsupported() {
     let body = b"exact-request-body".to_vec();
     let request = tracker
         .register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/body-bound",
             HeaderList::default(),
@@ -113,7 +113,7 @@ fn absent_and_present_empty_bodies_are_distinct_and_mismatch_burns_slot() {
     let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
     let request = tracker
         .register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/empty-body",
             HeaderList::default(),
@@ -125,7 +125,7 @@ fn absent_and_present_empty_bodies_are_distinct_and_mismatch_burns_slot() {
 
     let forged = EngineNetworkPrivilegedRequest {
         id: request.id,
-        authority: request.authority,
+        source: request.source.clone(),
         method: request.method.clone(),
         headers: request.headers.clone(),
         body: None,
@@ -150,7 +150,7 @@ fn rarog_method_body_semantics_reject_get_and_head_before_registration() {
         let expected = method.clone();
         assert_eq!(
             tracker.register_network_with_method_headers_and_body(
-                current,
+                &current,
                 method,
                 "http://127.0.0.1:1/body-method",
                 HeaderList::default(),
@@ -166,7 +166,7 @@ fn rarog_method_body_semantics_reject_get_and_head_before_registration() {
     assert!(custom.permits_body());
     let request = tracker
         .register_network_with_method_headers_and_body(
-            current,
+            &current,
             custom,
             "http://127.0.0.1:1/custom-body-method",
             HeaderList::default(),
@@ -189,7 +189,7 @@ fn per_request_body_bound_is_enforced_without_consuming_slot_or_budget() {
 
     assert_eq!(
         tracker.register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/oversized-body",
             HeaderList::default(),
@@ -205,7 +205,7 @@ fn per_request_body_bound_is_enforced_without_consuming_slot_or_budget() {
 
     let request = tracker
         .register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/max-body",
             HeaderList::default(),
@@ -230,7 +230,7 @@ fn aggregate_body_budget_is_bounded_and_released_after_consume() {
         EnginePrivilegedRequestTracker::try_new_with_body_budget(4, 4).expect("tracker");
     let first = tracker
         .register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/body-one",
             HeaderList::default(),
@@ -239,7 +239,7 @@ fn aggregate_body_budget_is_bounded_and_released_after_consume() {
         .expect("first body");
     let second = tracker
         .register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/body-two",
             HeaderList::default(),
@@ -250,7 +250,7 @@ fn aggregate_body_budget_is_bounded_and_released_after_consume() {
 
     assert_eq!(
         tracker.register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/body-over-budget",
             HeaderList::default(),
@@ -272,7 +272,7 @@ fn aggregate_body_budget_is_bounded_and_released_after_consume() {
     assert_eq!(tracker.pending_network_body_bytes(), 2);
     let third = tracker
         .register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/body-after-release",
             HeaderList::default(),
@@ -299,7 +299,7 @@ fn body_mismatch_burns_slot_and_releases_aggregate_budget() {
         EnginePrivilegedRequestTracker::try_new_with_body_budget(1, 8).expect("tracker");
     let request = tracker
         .register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/body-mismatch",
             HeaderList::default(),
@@ -309,7 +309,7 @@ fn body_mismatch_burns_slot_and_releases_aggregate_budget() {
     assert_eq!(tracker.pending_network_body_bytes(), 8);
     let forged = EngineNetworkPrivilegedRequest {
         id: request.id,
-        authority: request.authority,
+        source: request.source.clone(),
         method: request.method.clone(),
         headers: request.headers.clone(),
         body: Some(Arc::<[u8]>::from(b"forged!!".to_vec())),
@@ -333,7 +333,7 @@ fn cross_kind_mismatch_burns_network_slot_and_releases_body_budget() {
         EnginePrivilegedRequestTracker::try_new_with_body_budget(1, 4).expect("tracker");
     let request = tracker
         .register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/cross-kind-body",
             HeaderList::default(),
@@ -342,7 +342,7 @@ fn cross_kind_mismatch_burns_network_slot_and_releases_body_budget() {
         .expect("register body request");
     let forged = EnginePrivilegedRequest {
         id: request.id,
-        authority: request.authority,
+        authority: request.authority(),
         kind: EnginePrivilegedRequestKind::Clipboard,
     };
 
@@ -363,7 +363,7 @@ fn body_debug_is_redacted_but_safe_body_metadata_is_visible() {
     let secret = b"body-secret-do-not-log".to_vec();
     let request = tracker
         .register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/body-debug",
             HeaderList::default(),
@@ -385,7 +385,7 @@ fn stale_source_still_precedes_target_classification_for_body_request() {
     let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
     let request = tracker
         .register_network_with_method_headers_and_body(
-            first,
+            &first,
             FetchMethod::post(),
             "../relative",
             HeaderList::default(),
@@ -420,7 +420,7 @@ fn body_budget_constructor_and_checked_add_fail_closed() {
     tracker.pending_network_body_bytes = usize::MAX;
     assert_eq!(
         tracker.register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/body-overflow",
             HeaderList::default(),
@@ -442,7 +442,7 @@ fn body_accounting_underflow_fails_closed_after_burning_slot() {
         EnginePrivilegedRequestTracker::try_new_with_body_budget(1, 4).expect("tracker");
     let request = tracker
         .register_network_with_method_headers_and_body(
-            current,
+            &current,
             FetchMethod::post(),
             "http://127.0.0.1:1/body-accounting-underflow",
             HeaderList::default(),

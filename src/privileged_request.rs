@@ -1,4 +1,6 @@
-use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostError};
+use crate::engine::{
+    EngineCommittedDocumentAuthority, EngineCommittedDocumentSource, EngineHost, EngineHostError,
+};
 use crate::network_target_policy::EngineNetworkTargetDecision;
 use rarog_fetch::{FetchMethod, HeaderList};
 use std::collections::BTreeMap;
@@ -87,7 +89,7 @@ impl EnginePrivilegedRequest {
 #[derive(Clone, PartialEq, Eq)]
 pub struct EngineNetworkPrivilegedRequest {
     id: EnginePrivilegedRequestId,
-    authority: EngineCommittedDocumentAuthority,
+    source: EngineCommittedDocumentSource,
     method: FetchMethod,
     headers: HeaderList,
     body: Option<Arc<[u8]>>,
@@ -99,8 +101,16 @@ impl EngineNetworkPrivilegedRequest {
         self.id
     }
 
+    pub fn source(&self) -> &EngineCommittedDocumentSource {
+        &self.source
+    }
+
     pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
-        self.authority
+        self.source.authority()
+    }
+
+    pub fn source_origin(&self) -> &rarog_url::Origin {
+        self.source.origin()
     }
 
     pub fn method(&self) -> &FetchMethod {
@@ -129,7 +139,7 @@ impl fmt::Debug for EngineNetworkPrivilegedRequest {
         formatter
             .debug_struct("EngineNetworkPrivilegedRequest")
             .field("id", &self.id)
-            .field("authority", &self.authority)
+            .field("authority", &self.source.authority())
             .field("method", &self.method)
             .field("target_bytes", &self.target.len())
             .field("header_count", &self.headers.len())
@@ -410,11 +420,11 @@ impl EnginePrivilegedRequestTracker {
     /// Target parsing, source revalidation and authorization remain deferred to consumption.
     pub fn register_network(
         &mut self,
-        authority: EngineCommittedDocumentAuthority,
+        source: &EngineCommittedDocumentSource,
         target: impl Into<String>,
     ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
         self.register_network_with_method_headers_and_body(
-            authority,
+            source,
             FetchMethod::get(),
             target,
             HeaderList::default(),
@@ -425,12 +435,12 @@ impl EnginePrivilegedRequestTracker {
     /// Registers a bounded raw Network target plus canonical GET headers and no body.
     pub fn register_network_with_headers(
         &mut self,
-        authority: EngineCommittedDocumentAuthority,
+        source: &EngineCommittedDocumentSource,
         target: impl Into<String>,
         headers: HeaderList,
     ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
         self.register_network_with_method_headers_and_body(
-            authority,
+            source,
             FetchMethod::get(),
             target,
             headers,
@@ -445,12 +455,12 @@ impl EnginePrivilegedRequestTracker {
     /// implementing another parser.
     pub fn register_network_with_method(
         &mut self,
-        authority: EngineCommittedDocumentAuthority,
+        source: &EngineCommittedDocumentSource,
         method: FetchMethod,
         target: impl Into<String>,
     ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
         self.register_network_with_method_headers_and_body(
-            authority,
+            source,
             method,
             target,
             HeaderList::default(),
@@ -461,12 +471,12 @@ impl EnginePrivilegedRequestTracker {
     /// Registers a bounded raw Network target plus canonical method/headers and no body.
     pub fn register_network_with_method_and_headers(
         &mut self,
-        authority: EngineCommittedDocumentAuthority,
+        source: &EngineCommittedDocumentSource,
         method: FetchMethod,
         target: impl Into<String>,
         headers: HeaderList,
     ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
-        self.register_network_with_method_headers_and_body(authority, method, target, headers, None)
+        self.register_network_with_method_headers_and_body(source, method, target, headers, None)
     }
 
     /// Registers a bounded raw Network target, canonical method/headers and exact optional body
@@ -479,7 +489,7 @@ impl EnginePrivilegedRequestTracker {
     /// fail-closed order where stale source authority is rejected before target classification.
     pub fn register_network_with_method_headers_and_body(
         &mut self,
-        authority: EngineCommittedDocumentAuthority,
+        source: &EngineCommittedDocumentSource,
         method: FetchMethod,
         target: impl Into<String>,
         headers: HeaderList,
@@ -515,7 +525,7 @@ impl EnginePrivilegedRequestTracker {
         let id = allocate_privileged_request_id()?;
         let request = EngineNetworkPrivilegedRequest {
             id,
-            authority,
+            source: source.clone(),
             method,
             headers,
             body,
@@ -571,7 +581,7 @@ impl EnginePrivilegedRequestTracker {
             return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
         }
 
-        host.preflight_network_target(stored.authority, stored.target())
+        host.preflight_network_target(&stored.source, stored.target())
             .map_err(EnginePrivilegedRequestError::from)
     }
 
@@ -637,6 +647,10 @@ impl EngineHost {
 mod network_body_tests;
 
 #[cfg(test)]
+#[path = "privileged_request_network_origin_tests.rs"]
+mod network_origin_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::EngineNavigationPoll;
@@ -677,7 +691,7 @@ mod tests {
         host: &mut EngineHost,
         tab: TabId,
         location: String,
-    ) -> EngineCommittedDocumentAuthority {
+    ) -> EngineCommittedDocumentSource {
         let request = host
             .begin_navigation(tab, location)
             .expect("begin remote navigation")
@@ -700,7 +714,7 @@ mod tests {
             }
         }
 
-        host.committed_document_authority(tab)
+        host.committed_document_source(tab)
             .expect("committed authority query")
             .expect("committed remote authority")
     }
@@ -725,11 +739,17 @@ mod tests {
         );
 
         assert_eq!(
-            host.preflight_privileged_request(current, EnginePrivilegedRequestKind::Network),
+            host.preflight_privileged_request(
+                current.authority(),
+                EnginePrivilegedRequestKind::Network
+            ),
             Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
         );
         assert_eq!(
-            host.preflight_privileged_request(current, EnginePrivilegedRequestKind::Clipboard),
+            host.preflight_privileged_request(
+                current.authority(),
+                EnginePrivilegedRequestKind::Clipboard
+            ),
             Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
         );
 
@@ -739,7 +759,10 @@ mod tests {
             None
         );
         assert_eq!(
-            host.preflight_privileged_request(current, EnginePrivilegedRequestKind::Clipboard),
+            host.preflight_privileged_request(
+                current.authority(),
+                EnginePrivilegedRequestKind::Clipboard
+            ),
             Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
         );
     }
@@ -764,7 +787,10 @@ mod tests {
         assert_eq!(same_site.site_process(), first.site_process());
         assert_ne!(same_site.navigation_context(), first.navigation_context());
         assert_eq!(
-            host.preflight_privileged_request(first, EnginePrivilegedRequestKind::Network),
+            host.preflight_privileged_request(
+                first.authority(),
+                EnginePrivilegedRequestKind::Network
+            ),
             Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
         );
 
@@ -776,14 +802,20 @@ mod tests {
         assert_eq!(cross_site.host_instance(), first.host_instance());
         assert_ne!(cross_site.site_process(), same_site.site_process());
         assert_eq!(
-            host.preflight_privileged_request(same_site, EnginePrivilegedRequestKind::Clipboard),
+            host.preflight_privileged_request(
+                same_site.authority(),
+                EnginePrivilegedRequestKind::Clipboard
+            ),
             Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
         );
 
         host.load_local_html(tab, "<main>local</main>")
             .expect("replace with local document");
         assert_eq!(
-            host.preflight_privileged_request(cross_site, EnginePrivilegedRequestKind::Network),
+            host.preflight_privileged_request(
+                cross_site.authority(),
+                EnginePrivilegedRequestKind::Network
+            ),
             Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
         );
     }
@@ -801,7 +833,10 @@ mod tests {
 
         assert!(host.close_view(tab).expect("close first view"));
         assert_eq!(
-            host.preflight_privileged_request(stale, EnginePrivilegedRequestKind::Clipboard),
+            host.preflight_privileged_request(
+                stale.authority(),
+                EnginePrivilegedRequestKind::Clipboard
+            ),
             Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
         );
 
@@ -814,11 +849,17 @@ mod tests {
         assert_eq!(current.host_instance(), stale.host_instance());
         assert_ne!(current.view_generation(), stale.view_generation());
         assert_eq!(
-            host.preflight_privileged_request(stale, EnginePrivilegedRequestKind::Network),
+            host.preflight_privileged_request(
+                stale.authority(),
+                EnginePrivilegedRequestKind::Network
+            ),
             Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
         );
         assert_eq!(
-            host.preflight_privileged_request(current, EnginePrivilegedRequestKind::Network),
+            host.preflight_privileged_request(
+                current.authority(),
+                EnginePrivilegedRequestKind::Network
+            ),
             Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
         );
     }
@@ -836,7 +877,7 @@ mod tests {
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
 
         assert_eq!(
-            tracker.register(current, EnginePrivilegedRequestKind::Network),
+            tracker.register(current.authority(), EnginePrivilegedRequestKind::Network),
             Err(EnginePrivilegedRequestError::NetworkTargetRequired)
         );
         assert_eq!(tracker.pending_requests(), 0);
@@ -854,11 +895,11 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(2).expect("tracker");
         let request = tracker
-            .register(current, EnginePrivilegedRequestKind::Clipboard)
+            .register(current.authority(), EnginePrivilegedRequestKind::Clipboard)
             .expect("register request");
 
         assert!(request.id().get() > 0);
-        assert_eq!(request.authority(), current);
+        assert_eq!(request.authority(), current.authority());
         assert_eq!(request.kind(), EnginePrivilegedRequestKind::Clipboard);
         assert_eq!(tracker.pending_requests(), 1);
         assert_eq!(
@@ -884,7 +925,7 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
-            .register(first, EnginePrivilegedRequestKind::Clipboard)
+            .register(first.authority(), EnginePrivilegedRequestKind::Clipboard)
             .expect("register request");
 
         let replacement = commit_remote(
@@ -914,11 +955,11 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(2).expect("tracker");
         let request = tracker
-            .register_network(current, "http://127.0.0.1:1/resource")
+            .register_network(&current, "http://127.0.0.1:1/resource")
             .expect("register Network request");
 
         assert!(request.id().get() > 0);
-        assert_eq!(request.authority(), current);
+        assert_eq!(request.authority(), current.authority());
         assert_eq!(request.method().as_str(), "GET");
         assert!(request.headers().is_empty());
         assert_eq!(request.body(), None);
@@ -950,7 +991,7 @@ mod tests {
         assert_eq!(method.as_str(), "POST");
 
         let request = tracker
-            .register_network_with_method(current, method, "http://127.0.0.1:1/method-bound")
+            .register_network_with_method(&current, method, "http://127.0.0.1:1/method-bound")
             .expect("register method-bound request");
         assert_eq!(request.method().as_str(), "POST");
         assert!(request.headers().is_empty());
@@ -988,7 +1029,7 @@ mod tests {
 
         let request = tracker
             .register_network_with_method_and_headers(
-                current,
+                &current,
                 FetchMethod::post(),
                 "http://127.0.0.1:1/header-bound",
                 headers,
@@ -1024,7 +1065,7 @@ mod tests {
 
         tracker
             .register_network_with_method(
-                current,
+                &current,
                 FetchMethod::head(),
                 "http://127.0.0.1:1/capacity-remains",
             )
@@ -1045,7 +1086,7 @@ mod tests {
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
             .register_network_with_headers(
-                first,
+                &first,
                 "../relative",
                 one_header_list("X-Zorya-Stale", "still-bound"),
             )
@@ -1091,7 +1132,7 @@ mod tests {
             ),
         ] {
             let request = tracker
-                .register_network(current, target)
+                .register_network(&current, target)
                 .expect("register target-bound request");
             assert_eq!(
                 tracker.preflight_network_once(&host, request.clone()),
@@ -1118,11 +1159,11 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
-            .register_network(current, "http://127.0.0.1:1/original")
+            .register_network(&current, "http://127.0.0.1:1/original")
             .expect("register request");
         let forged = EngineNetworkPrivilegedRequest {
             id: request.id,
-            authority: request.authority,
+            source: request.source.clone(),
             method: request.method.clone(),
             headers: request.headers.clone(),
             body: request.body.clone(),
@@ -1154,11 +1195,11 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
-            .register_network(current, "http://127.0.0.1:1/original")
+            .register_network(&current, "http://127.0.0.1:1/original")
             .expect("register request");
         let forged = EngineNetworkPrivilegedRequest {
             id: request.id,
-            authority: request.authority,
+            source: request.source.clone(),
             method: FetchMethod::post(),
             headers: request.headers.clone(),
             body: request.body.clone(),
@@ -1191,14 +1232,14 @@ mod tests {
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
             .register_network_with_headers(
-                current,
+                &current,
                 "http://127.0.0.1:1/original",
                 one_header_list("X-Zorya", "original"),
             )
             .expect("register request");
         let forged = EngineNetworkPrivilegedRequest {
             id: request.id,
-            authority: request.authority,
+            source: request.source.clone(),
             method: request.method.clone(),
             headers: bind_network_headers(&one_header_list("X-Zorya", "forged"))
                 .expect("forged bounded headers"),
@@ -1233,7 +1274,7 @@ mod tests {
         let oversized = "x".repeat(MAX_PRIVILEGED_NETWORK_TARGET_BYTES + 1);
 
         assert_eq!(
-            tracker.register_network(current, oversized),
+            tracker.register_network(&current, oversized),
             Err(EnginePrivilegedRequestError::NetworkTargetTooLong {
                 bytes: MAX_PRIVILEGED_NETWORK_TARGET_BYTES + 1,
                 max: MAX_PRIVILEGED_NETWORK_TARGET_BYTES,
@@ -1242,7 +1283,7 @@ mod tests {
         assert_eq!(tracker.pending_requests(), 0);
 
         tracker
-            .register(current, EnginePrivilegedRequestKind::Clipboard)
+            .register(current.authority(), EnginePrivilegedRequestKind::Clipboard)
             .expect("capacity remains available");
         assert_eq!(tracker.pending_requests(), 1);
     }
@@ -1265,7 +1306,8 @@ mod tests {
         }
 
         assert_eq!(
-            tracker.register_network_with_headers(current, "http://127.0.0.1:1/resource", headers,),
+            tracker
+                .register_network_with_headers(&current, "http://127.0.0.1:1/resource", headers,),
             Err(EnginePrivilegedRequestError::NetworkHeaderCountExceeded {
                 count: MAX_PRIVILEGED_NETWORK_HEADERS + 1,
                 max: MAX_PRIVILEGED_NETWORK_HEADERS,
@@ -1273,7 +1315,7 @@ mod tests {
         );
         assert_eq!(tracker.pending_requests(), 0);
         tracker
-            .register(current, EnginePrivilegedRequestKind::Clipboard)
+            .register(current.authority(), EnginePrivilegedRequestKind::Clipboard)
             .expect("capacity remains available");
     }
 
@@ -1292,7 +1334,8 @@ mod tests {
         let headers = one_header_list("x", &value);
 
         assert_eq!(
-            tracker.register_network_with_headers(current, "http://127.0.0.1:1/resource", headers,),
+            tracker
+                .register_network_with_headers(&current, "http://127.0.0.1:1/resource", headers,),
             Err(EnginePrivilegedRequestError::NetworkHeaderBytesExceeded {
                 bytes: MAX_PRIVILEGED_NETWORK_HEADER_BYTES + 1,
                 max: MAX_PRIVILEGED_NETWORK_HEADER_BYTES,
@@ -1300,7 +1343,7 @@ mod tests {
         );
         assert_eq!(tracker.pending_requests(), 0);
         tracker
-            .register(current, EnginePrivilegedRequestKind::Clipboard)
+            .register(current.authority(), EnginePrivilegedRequestKind::Clipboard)
             .expect("capacity remains available");
     }
 
@@ -1320,7 +1363,7 @@ mod tests {
         let secret_header_value = "do-not-log-header-value";
         let request = tracker
             .register_network_with_method_and_headers(
-                current,
+                &current,
                 FetchMethod::post(),
                 secret,
                 one_header_list(secret_header_name, secret_header_value),
@@ -1352,7 +1395,7 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
-            .register_network(first, "http://127.0.0.1:1/resource")
+            .register_network(&first, "http://127.0.0.1:1/resource")
             .expect("register request");
 
         let mut replacement_host = EngineHost::new().expect("replacement engine host");
@@ -1388,7 +1431,7 @@ mod tests {
 
         let mut first_tracker = EnginePrivilegedRequestTracker::try_new(1).expect("first tracker");
         let stale = first_tracker
-            .register_network(current, "http://127.0.0.1:1/stale")
+            .register_network(&current, "http://127.0.0.1:1/stale")
             .expect("first request");
         assert_eq!(
             first_tracker.preflight_network_once(&host, stale.clone()),
@@ -1398,7 +1441,7 @@ mod tests {
         let mut replacement_tracker =
             EnginePrivilegedRequestTracker::try_new(1).expect("replacement tracker");
         let current_request = replacement_tracker
-            .register_network(current, "http://127.0.0.1:1/current")
+            .register_network(&current, "http://127.0.0.1:1/current")
             .expect("replacement request");
         assert_ne!(current_request.id(), stale.id());
         assert_eq!(
@@ -1424,7 +1467,7 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
-            .register(current, EnginePrivilegedRequestKind::Clipboard)
+            .register(current.authority(), EnginePrivilegedRequestKind::Clipboard)
             .expect("register request");
         let forged = EnginePrivilegedRequest {
             id: request.id,
@@ -1462,7 +1505,7 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let first = tracker
-            .register(current, EnginePrivilegedRequestKind::Clipboard)
+            .register(current.authority(), EnginePrivilegedRequestKind::Clipboard)
             .expect("first request");
 
         assert_eq!(tracker.max_pending(), 1);
@@ -1474,7 +1517,7 @@ mod tests {
         assert_eq!(tracker.pending_requests(), 1);
         assert_eq!(
             tracker.register_network_with_headers(
-                current,
+                &current,
                 "http://127.0.0.1:1/resource",
                 one_header_list("X-Zorya", "capacity"),
             ),

@@ -1,4 +1,4 @@
-use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostError};
+use crate::engine::{EngineCommittedDocumentSource, EngineHost, EngineHostError};
 use rarog_url::WebUrl;
 
 /// Fail-closed result of the browser-product Network target policy.
@@ -23,16 +23,20 @@ impl EngineHost {
     /// Rarog URL contract. This method grants no capability and starts no network operation.
     pub fn preflight_network_target(
         &self,
-        authority: EngineCommittedDocumentAuthority,
+        source: &EngineCommittedDocumentSource,
         target: &str,
     ) -> Result<EngineNetworkTargetDecision, EngineHostError> {
+        let authority = source.authority();
         if !self.validate_committed_document_authority(authority)? {
             return Ok(EngineNetworkTargetDecision::DeniedStaleAuthority);
         }
-
-        let Some(source_site) = self.committed_document_site_identity(authority.tab())? else {
+        let Some(current_source) = self.committed_document_source(source.tab())? else {
             return Ok(EngineNetworkTargetDecision::DeniedStaleAuthority);
         };
+        if &current_source != source {
+            return Ok(EngineNetworkTargetDecision::DeniedStaleAuthority);
+        }
+        let source_site = source.origin().site();
 
         let target = match WebUrl::parse(target) {
             Ok(target) => target,
@@ -95,7 +99,7 @@ mod tests {
         host: &mut EngineHost,
         tab: TabId,
         location: String,
-    ) -> EngineCommittedDocumentAuthority {
+    ) -> EngineCommittedDocumentSource {
         let request = host
             .begin_navigation(tab, location)
             .expect("begin remote navigation")
@@ -120,7 +124,7 @@ mod tests {
             }
         }
 
-        host.committed_document_authority(tab)
+        host.committed_document_source(tab)
             .expect("committed authority query")
             .expect("committed remote authority")
     }
@@ -137,15 +141,15 @@ mod tests {
         );
 
         assert_eq!(
-            host.preflight_network_target(current, "http://127.0.0.1:1/resource"),
+            host.preflight_network_target(&current, "http://127.0.0.1:1/resource"),
             Ok(EngineNetworkTargetDecision::DeniedUnsupported)
         );
         assert_eq!(
-            host.preflight_network_target(current, "https://127.0.0.1/resource"),
+            host.preflight_network_target(&current, "https://127.0.0.1/resource"),
             Ok(EngineNetworkTargetDecision::DeniedCrossSite)
         );
         assert_eq!(
-            host.preflight_network_target(current, "http://localhost/resource"),
+            host.preflight_network_target(&current, "http://localhost/resource"),
             Ok(EngineNetworkTargetDecision::DeniedCrossSite)
         );
     }
@@ -163,7 +167,7 @@ mod tests {
 
         for target in ["../relative", "http://"] {
             assert_eq!(
-                host.preflight_network_target(current, target),
+                host.preflight_network_target(&current, target),
                 Ok(EngineNetworkTargetDecision::DeniedInvalidTarget),
                 "{target}"
             );
@@ -175,7 +179,7 @@ mod tests {
             "zorya-external:payload",
         ] {
             assert_eq!(
-                host.preflight_network_target(current, target),
+                host.preflight_network_target(&current, target),
                 Ok(EngineNetworkTargetDecision::DeniedUnsupportedScheme),
                 "{target}"
             );
@@ -200,14 +204,14 @@ mod tests {
         assert_ne!(replacement.navigation_context(), first.navigation_context());
 
         assert_eq!(
-            host.preflight_network_target(first, "../relative"),
+            host.preflight_network_target(&first, "../relative"),
             Ok(EngineNetworkTargetDecision::DeniedStaleAuthority)
         );
 
         host.load_local_html(tab, "<main>local</main>")
             .expect("replace with local document");
         assert_eq!(
-            host.preflight_network_target(replacement, "http://127.0.0.1/"),
+            host.preflight_network_target(&replacement, "http://127.0.0.1/"),
             Ok(EngineNetworkTargetDecision::DeniedStaleAuthority)
         );
     }
@@ -225,12 +229,12 @@ mod tests {
 
         assert!(first_host.close_view(tab).expect("close first view"));
         assert_eq!(
-            first_host.preflight_network_target(stale, "http://127.0.0.1/"),
+            first_host.preflight_network_target(&stale, "http://127.0.0.1/"),
             Ok(EngineNetworkTargetDecision::DeniedStaleAuthority)
         );
         first_host.create_view(tab).expect("recreated view");
         assert_eq!(
-            first_host.preflight_network_target(stale, "http://127.0.0.1/"),
+            first_host.preflight_network_target(&stale, "http://127.0.0.1/"),
             Ok(EngineNetworkTargetDecision::DeniedStaleAuthority)
         );
 
@@ -247,11 +251,11 @@ mod tests {
         assert_eq!(replacement.site_process(), stale.site_process());
         assert_ne!(replacement.host_instance(), stale.host_instance());
         assert_eq!(
-            replacement_host.preflight_network_target(stale, "http://127.0.0.1/"),
+            replacement_host.preflight_network_target(&stale, "http://127.0.0.1/"),
             Ok(EngineNetworkTargetDecision::DeniedStaleAuthority)
         );
         assert_eq!(
-            replacement_host.preflight_network_target(replacement, "http://127.0.0.1:1/"),
+            replacement_host.preflight_network_target(&replacement, "http://127.0.0.1:1/"),
             Ok(EngineNetworkTargetDecision::DeniedUnsupported)
         );
     }
