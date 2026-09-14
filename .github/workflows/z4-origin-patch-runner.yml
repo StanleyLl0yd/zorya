@@ -23,49 +23,20 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import textwrap
-
           workflow = Path('.github/workflows/z4-origin-patch.yml').read_text()
           start = workflow.index("          python - <<'PY'\n") + len("          python - <<'PY'\n")
           end = workflow.index("\n          PY\n", start)
           script = textwrap.dedent(workflow[start:end])
-          old = """old_ctor = '''        let request = EngineNetworkPrivilegedRequest {
-          id,
-          authority,
-          method,
-          headers,
-          body,
-          target,
-      };'''"""
-          new = """old_ctor = '''        let request = EngineNetworkPrivilegedRequest {
-              id,
-              authority,
-              method,
-              headers,
-              body,
-              target,
-          };'''"""
+          old = "old_ctor = '''        let request = EngineNetworkPrivilegedRequest {\n        id,\n        authority,\n        method,\n        headers,\n        body,\n        target,\n    };'''"
+          new = "old_ctor = '''        let request = EngineNetworkPrivilegedRequest {\n            id,\n            authority,\n            method,\n            headers,\n            body,\n            target,\n        };'''"
           if script.count(old) != 1:
               raise SystemExit(f'expected one malformed old_ctor block, got {script.count(old)}')
           script = script.replace(old, new, 1)
-          malformed_new = """new_ctor = '''        let request = EngineNetworkPrivilegedRequest {
-          id,
-          source: source.clone(),
-          method,
-          headers,
-          body,
-          target,
-      };'''"""
-          corrected_new = """new_ctor = '''        let request = EngineNetworkPrivilegedRequest {
-              id,
-              source: source.clone(),
-              method,
-              headers,
-              body,
-              target,
-          };'''"""
-          if script.count(malformed_new) != 1:
-              raise SystemExit(f'expected one malformed new_ctor block, got {script.count(malformed_new)}')
-          script = script.replace(malformed_new, corrected_new, 1)
+          old = "new_ctor = '''        let request = EngineNetworkPrivilegedRequest {\n        id,\n        source: source.clone(),\n        method,\n        headers,\n        body,\n        target,\n    };'''"
+          new = "new_ctor = '''        let request = EngineNetworkPrivilegedRequest {\n            id,\n            source: source.clone(),\n            method,\n            headers,\n            body,\n            target,\n        };'''"
+          if script.count(old) != 1:
+              raise SystemExit(f'expected one malformed new_ctor block, got {script.count(old)}')
+          script = script.replace(old, new, 1)
           exec(compile(script, 'z4-origin-patch', 'exec'))
           PY
       - name: Format
