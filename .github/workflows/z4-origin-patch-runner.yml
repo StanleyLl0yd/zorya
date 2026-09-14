@@ -28,7 +28,7 @@ jobs:
           end = workflow.index("\n          PY\n", start)
           script = textwrap.dedent(workflow[start:end])
           old = "old_ctor = '''        let request = EngineNetworkPrivilegedRequest {\n        id,\n        authority,\n        method,\n        headers,\n        body,\n        target,\n    };'''"
-          new = "old_ctor = '''        let request = EngineNetworkPrivilegedRequest {\n            id,\n            authority,\n            method,\n            headers,\n            body,\n            target,\n        };'''"
+          new = "old_ctor = '''        let request = EngineNetworkPrivilegedRequest {\n            id,\n            source,\n            method,\n            headers,\n            body,\n            target,\n        };'''"
           if script.count(old) != 1:
               raise SystemExit(f'expected one malformed old_ctor block, got {script.count(old)}')
           script = script.replace(old, new, 1)
