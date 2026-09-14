@@ -1,0 +1,48 @@
+name: Fix Z4 envelope staging marker
+
+on:
+  push:
+    branches: [z4/network-request-envelope]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - name: Replace brittle Display matcher and self-remove
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/z4-envelope-patch.yml')
+          text = path.read_text()
+          start = text.find("          old_display = '''")
+          end_marker = "          text = text.replace(old_display, new_display, 1)\n"
+          end = text.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit('Display matcher block not found')
+          end += len(end_marker)
+          replacement = '''          display_marker = ''' + "'''            Self::NetworkBodyBudgetExceeded {'''" + '''
+          display_insert = ''' + "'''            Self::NetworkDestinationTooLong { bytes, max } => write!(\n                formatter,\n                \"Network privileged request destination is {bytes} bytes; maximum is {max} bytes\"\n            ),\n'''" + '''
+          if text.count(display_marker) != 1:
+              raise SystemExit(f"error Display insertion marker changed: {text.count(display_marker)} matches")
+          text = text.replace(display_marker, display_insert + display_marker, 1)
+'''
+          path.write_text(text[:start] + replacement + text[end:])
+          PY
+          rm .github/workflows/z4-envelope-fix-marker.yml
+          git diff --check
+          git config user.name "Stanley Lloyd"
+          git config user.email "131160519+StanleyLl0yd@users.noreply.github.com"
+          git add .github/workflows/z4-envelope-patch.yml .github/workflows/z4-envelope-fix-marker.yml
+          git commit -m "ci: make Z4 envelope Display patch resilient"
+          git push origin HEAD:z4/network-request-envelope
