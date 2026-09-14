@@ -425,6 +425,36 @@ impl EngineHost {
         }))
     }
 
+    pub(crate) fn committed_document_site_identity(
+        &self,
+        tab: TabId,
+    ) -> Result<Option<rarog_url::SiteIdentity>, EngineHostError> {
+        let hosted = self
+            .views
+            .get(&tab)
+            .ok_or(EngineHostError::UnknownTab(tab))?;
+        let Some(context) = hosted.committed_context else {
+            return Ok(None);
+        };
+
+        let snapshot = self
+            .host
+            .navigation_context(context)
+            .map_err(|_| EngineHostError::InconsistentNavigationState { tab })?;
+        if snapshot.context() != context {
+            return Err(EngineHostError::InconsistentNavigationState { tab });
+        }
+        let process = self
+            .host
+            .process_for_site(snapshot.site())
+            .ok_or(EngineHostError::InconsistentNavigationState { tab })?;
+        if self.host.site_for_process(process) != Some(snapshot.site()) {
+            return Err(EngineHostError::InconsistentNavigationState { tab });
+        }
+
+        Ok(Some(snapshot.site().clone()))
+    }
+
     pub fn load_local_html(
         &mut self,
         tab: TabId,
@@ -1639,6 +1669,10 @@ mod tests {
             host.poll_navigation(committed).expect("commit"),
             EngineNavigationPoll::Committed { .. }
         ));
+        let authority = host
+            .committed_document_authority(tab)
+            .expect("authority before process loss")
+            .expect("remote authority before process loss");
         let context = host
             .views
             .get(&tab)
@@ -1655,6 +1689,10 @@ mod tests {
 
         assert_eq!(
             host.committed_document_authority(tab),
+            Err(EngineHostError::InconsistentNavigationState { tab })
+        );
+        assert_eq!(
+            host.preflight_network_target(authority, "https://lost.example/resource"),
             Err(EngineHostError::InconsistentNavigationState { tab })
         );
     }

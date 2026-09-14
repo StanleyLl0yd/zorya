@@ -34,6 +34,14 @@ These Host/context/process tokens are not product identities and are never persi
 
 The request labels are Zorya product taxonomy only. They are not Rarog `CapabilityClass` values, capability IDs, grants or IPC authority. This preflight does not add a `rarog-broker` dependency, grant a capability, start a Host network operation, call a clipboard service or make possession of a current snapshot sufficient authorization. A future brokering slice must define a separately reviewed allow policy and must revalidate immediately before any actual grant.
 
+## Canonical Network target policy
+
+`EngineHost::preflight_network_target` adds a target-aware, still-non-authorizing policy gate for future privileged Network requests. It revalidates the committed-document authority before parsing or classifying the requested target. If the source is stale, replaced, local, closed, recreated or belongs to a retired EngineHost, target text is not allowed to upgrade that stale source into an eligible request.
+
+For a current source, Zorya obtains the source `SiteIdentity` only from the live Rarog Host navigation context. The target is parsed only with the pinned `rarog_url::WebUrl` contract and its canonical `site_identity()` result. Browser display/history strings and home-grown registrable-domain logic are not security identities. Malformed or relative targets are denied, non-HTTP(S) targets are denied before Site comparison, and HTTP(S) targets must be schemeful-same-site according to Rarog `SiteIdentity`; ports do not split a Rarog Site, while a scheme or Site change does. Missing or divergent live Host process/context state remains `InconsistentNavigationState` rather than falling back to URL-derived source identity.
+
+Even a current same-site HTTP(S) target reaches only `DeniedUnsupported`. There is deliberately no allow/authorized target-policy result, no `rarog-broker` dependency, no capability grant and no Host network/resource operation in this slice. The target policy does not implement Fetch/CORS/origin/credentials/redirect behavior and must not be presented as doing so. A later actual broker path must bind the target to the consumed one-shot request and repeat the required source/policy checks immediately before any grant.
+
 ## One-shot privileged request lifecycle
 
 `EnginePrivilegedRequestTracker` adds a bounded process-local lifecycle around future privileged request attempts. Registration captures the exact committed-document authority snapshot plus the product request kind under a process-global monotonic non-zero `EnginePrivilegedRequestId`. The default tracker retains at most 4096 pending attempts and rejects a zero configured limit or capacity overflow. Process-global request-ID allocation fails closed on identity-space exhaustion instead of wrapping or restarting when a tracker is rebuilt.
@@ -54,8 +62,9 @@ This boundary does not provide or claim:
 - download mediation;
 - permission or clipboard mediation;
 - privileged internal-page authorization;
-- target-aware Network capability policy;
+- any successful Network capability policy result or grant;
+- target binding inside the one-shot privileged request handle;
 - a capability-routed subresource pipeline;
 - any successful Network or Clipboard capability brokering.
 
-Those remain separate reviewed Z4/Rarog work. Browser policy, authority revalidation, privileged-request preflight and one-shot request tracking must not be presented as substitutes for missing process isolation or capability mediation.
+Those remain separate reviewed Z4/Rarog work. Browser policy, authority revalidation, target admission, privileged-request preflight and one-shot request tracking must not be presented as substitutes for missing process isolation or capability mediation.
