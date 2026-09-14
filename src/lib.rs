@@ -60,9 +60,10 @@ pub use presentation_handoff::{
     PresentationTransitionStart, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
 };
 pub use privileged_request::{
-    DEFAULT_MAX_PENDING_PRIVILEGED_REQUESTS, EnginePrivilegedRequest,
-    EnginePrivilegedRequestDecision, EnginePrivilegedRequestError, EnginePrivilegedRequestId,
-    EnginePrivilegedRequestKind, EnginePrivilegedRequestTracker,
+    DEFAULT_MAX_PENDING_PRIVILEGED_REQUESTS, EngineNetworkPrivilegedRequest,
+    EnginePrivilegedRequest, EnginePrivilegedRequestDecision, EnginePrivilegedRequestError,
+    EnginePrivilegedRequestId, EnginePrivilegedRequestKind, EnginePrivilegedRequestTracker,
+    MAX_PRIVILEGED_NETWORK_TARGET_BYTES,
 };
 pub use profile::{
     MAX_SETTING_KEY_BYTES, MAX_SETTING_VALUE_BYTES, MAX_SETTINGS_ENTRIES,

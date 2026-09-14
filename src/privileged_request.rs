@@ -1,10 +1,12 @@
 use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostError};
+use crate::network_target_policy::EngineNetworkTargetDecision;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const DEFAULT_MAX_PENDING_PRIVILEGED_REQUESTS: usize = 4096;
+pub const MAX_PRIVILEGED_NETWORK_TARGET_BYTES: usize = 4 * 1024;
 
 static NEXT_ENGINE_PRIVILEGED_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -43,8 +45,9 @@ impl EnginePrivilegedRequestId {
 
 /// One-shot request handle bound to the exact source authority snapshot and request kind.
 ///
-/// Handles are process-local and must not be persisted. Copying a handle does not make it
-/// reusable: the tracker consumes its identity before source preflight.
+/// This generic handle is used only for privileged request kinds that do not require an additional
+/// payload. Network requests must use `EngineNetworkPrivilegedRequest` so the target cannot be
+/// omitted from the one-shot lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EnginePrivilegedRequest {
     id: EnginePrivilegedRequestId,
@@ -66,11 +69,56 @@ impl EnginePrivilegedRequest {
     }
 }
 
+/// One-shot Network request bound to the exact source authority and raw requested target.
+///
+/// The target is retained only in process memory and is deliberately not included in `Debug`
+/// output because URLs can contain sensitive query or fragment data. Registration does not parse
+/// or authorize the target; canonical target policy runs only when the request is consumed.
+#[derive(Clone, PartialEq, Eq)]
+pub struct EngineNetworkPrivilegedRequest {
+    id: EnginePrivilegedRequestId,
+    authority: EngineCommittedDocumentAuthority,
+    target: String,
+}
+
+impl EngineNetworkPrivilegedRequest {
+    pub const fn id(&self) -> EnginePrivilegedRequestId {
+        self.id
+    }
+
+    pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
+        self.authority
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+}
+
+impl fmt::Debug for EngineNetworkPrivilegedRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EngineNetworkPrivilegedRequest")
+            .field("id", &self.id)
+            .field("authority", &self.authority)
+            .field("target_bytes", &self.target.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingPrivilegedRequest {
+    Generic(EnginePrivilegedRequest),
+    Network(EngineNetworkPrivilegedRequest),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnginePrivilegedRequestError {
     InvalidLimit,
     CapacityExceeded,
     IdentitySpaceExhausted,
+    NetworkTargetRequired,
+    NetworkTargetTooLong { bytes: usize, max: usize },
     UnknownRequest(EnginePrivilegedRequestId),
     MismatchedRequest(EnginePrivilegedRequestId),
     Host(EngineHostError),
@@ -84,6 +132,13 @@ impl fmt::Display for EnginePrivilegedRequestError {
             Self::IdentitySpaceExhausted => {
                 formatter.write_str("privileged request identity space is exhausted")
             }
+            Self::NetworkTargetRequired => {
+                formatter.write_str("Network privileged requests require a target-bound request")
+            }
+            Self::NetworkTargetTooLong { bytes, max } => write!(
+                formatter,
+                "Network privileged request target is {bytes} bytes; maximum is {max} bytes"
+            ),
             Self::UnknownRequest(id) => write!(
                 formatter,
                 "unknown or already consumed privileged request {}",
@@ -91,7 +146,7 @@ impl fmt::Display for EnginePrivilegedRequestError {
             ),
             Self::MismatchedRequest(id) => write!(
                 formatter,
-                "privileged request {} does not match its registered source and kind",
+                "privileged request {} does not match its registered source or payload",
                 id.get()
             ),
             Self::Host(error) => write!(
@@ -132,13 +187,13 @@ fn allocate_privileged_request_id()
 ///
 /// Registration allocates only a one-shot correlation identity. It does not validate or grant
 /// authority. Request IDs are process-global and monotonic so rebuilding a tracker cannot make an
-/// old copied handle collide with a newly registered request. `preflight_once` consumes the exact
-/// registered request first and then revalidates its committed-document source through
-/// `EngineHost`.
+/// old copied handle collide with a newly registered request. Generic registration cannot create a
+/// Network request: Network attempts must retain an exact bounded target through
+/// `register_network`. Consumption removes the exact stored request before source/target policy.
 #[derive(Debug)]
 pub struct EnginePrivilegedRequestTracker {
     max_pending: usize,
-    pending: BTreeMap<EnginePrivilegedRequestId, EnginePrivilegedRequest>,
+    pending: BTreeMap<EnginePrivilegedRequestId, PendingPrivilegedRequest>,
 }
 
 impl EnginePrivilegedRequestTracker {
@@ -170,9 +225,10 @@ impl EnginePrivilegedRequestTracker {
         authority: EngineCommittedDocumentAuthority,
         kind: EnginePrivilegedRequestKind,
     ) -> Result<EnginePrivilegedRequest, EnginePrivilegedRequestError> {
-        if self.pending.len() >= self.max_pending {
-            return Err(EnginePrivilegedRequestError::CapacityExceeded);
+        if matches!(kind, EnginePrivilegedRequestKind::Network) {
+            return Err(EnginePrivilegedRequestError::NetworkTargetRequired);
         }
+        self.ensure_capacity()?;
 
         let id = allocate_privileged_request_id()?;
         let request = EnginePrivilegedRequest {
@@ -180,15 +236,39 @@ impl EnginePrivilegedRequestTracker {
             authority,
             kind,
         };
-        let previous = self.pending.insert(id, request);
-        debug_assert!(
-            previous.is_none(),
-            "process-global request IDs cannot collide"
-        );
+        self.insert_pending(id, PendingPrivilegedRequest::Generic(request));
         Ok(request)
     }
 
-    /// Consumes the exact registered request before checking its source authority.
+    /// Registers a bounded raw Network target without parsing, revalidation or authorization.
+    ///
+    /// Deferring target parsing until consumption preserves the fail-closed order where stale
+    /// source authority is rejected before target classification.
+    pub fn register_network(
+        &mut self,
+        authority: EngineCommittedDocumentAuthority,
+        target: impl Into<String>,
+    ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
+        let target = target.into();
+        if target.len() > MAX_PRIVILEGED_NETWORK_TARGET_BYTES {
+            return Err(EnginePrivilegedRequestError::NetworkTargetTooLong {
+                bytes: target.len(),
+                max: MAX_PRIVILEGED_NETWORK_TARGET_BYTES,
+            });
+        }
+        self.ensure_capacity()?;
+
+        let id = allocate_privileged_request_id()?;
+        let request = EngineNetworkPrivilegedRequest {
+            id,
+            authority,
+            target,
+        };
+        self.insert_pending(id, PendingPrivilegedRequest::Network(request.clone()));
+        Ok(request)
+    }
+
+    /// Consumes an exact generic request before checking its source authority.
     ///
     /// Replays are therefore rejected even when the source document is still current. A handle
     /// with the right ID but mismatched source/kind also burns that slot and fails closed.
@@ -201,12 +281,57 @@ impl EnginePrivilegedRequestTracker {
             .pending
             .remove(&request.id)
             .ok_or(EnginePrivilegedRequestError::UnknownRequest(request.id))?;
+        let PendingPrivilegedRequest::Generic(stored) = stored else {
+            return Err(EnginePrivilegedRequestError::MismatchedRequest(request.id));
+        };
         if stored != request {
             return Err(EnginePrivilegedRequestError::MismatchedRequest(request.id));
         }
 
         host.preflight_privileged_request(stored.authority, stored.kind)
             .map_err(EnginePrivilegedRequestError::from)
+    }
+
+    /// Consumes the exact target-bound Network request before applying canonical target policy.
+    ///
+    /// Same-ID source or target mismatches burn the stored slot. For an exact handle,
+    /// `preflight_network_target` revalidates source authority before parsing/classifying the raw
+    /// target. The current policy remains non-authorizing.
+    pub fn preflight_network_once(
+        &mut self,
+        host: &EngineHost,
+        request: EngineNetworkPrivilegedRequest,
+    ) -> Result<EngineNetworkTargetDecision, EnginePrivilegedRequestError> {
+        let id = request.id;
+        let stored = self
+            .pending
+            .remove(&id)
+            .ok_or(EnginePrivilegedRequestError::UnknownRequest(id))?;
+        let PendingPrivilegedRequest::Network(stored) = stored else {
+            return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
+        };
+        if stored != request {
+            return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
+        }
+
+        host.preflight_network_target(stored.authority, stored.target())
+            .map_err(EnginePrivilegedRequestError::from)
+    }
+
+    fn ensure_capacity(&self) -> Result<(), EnginePrivilegedRequestError> {
+        if self.pending.len() >= self.max_pending {
+            Err(EnginePrivilegedRequestError::CapacityExceeded)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn insert_pending(&mut self, id: EnginePrivilegedRequestId, request: PendingPrivilegedRequest) {
+        let previous = self.pending.insert(id, request);
+        debug_assert!(
+            previous.is_none(),
+            "process-global request IDs cannot collide"
+        );
     }
 }
 
@@ -216,7 +341,8 @@ impl EngineHost {
     ///
     /// Replayed or replaced authority is distinguished from a current-but-unsupported request.
     /// Missing or divergent live Host state continues to fail closed through
-    /// `validate_committed_document_authority`.
+    /// `validate_committed_document_authority`. Tracker-created Network requests use the separate
+    /// target-bound path; this source-only primitive remains non-authorizing.
     pub fn preflight_privileged_request(
         &self,
         authority: EngineCommittedDocumentAuthority,
@@ -410,23 +536,42 @@ mod tests {
     }
 
     #[test]
-    fn registered_current_request_is_consumed_once_and_remains_unsupported() {
+    fn generic_registration_requires_network_target() {
         let tab = initial_tab();
         let mut host = EngineHost::new().expect("engine host");
         host.create_view(tab).expect("view");
         let current = commit_remote(
             &mut host,
             tab,
-            serve_once("127.0.0.1", "127.0.0.1", "/one-shot"),
+            serve_once("127.0.0.1", "127.0.0.1", "/target-required"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+
+        assert_eq!(
+            tracker.register(current, EnginePrivilegedRequestKind::Network),
+            Err(EnginePrivilegedRequestError::NetworkTargetRequired)
+        );
+        assert_eq!(tracker.pending_requests(), 0);
+    }
+
+    #[test]
+    fn registered_clipboard_request_is_consumed_once_and_remains_unsupported() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/one-shot-clipboard"),
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(2).expect("tracker");
         let request = tracker
-            .register(current, EnginePrivilegedRequestKind::Network)
+            .register(current, EnginePrivilegedRequestKind::Clipboard)
             .expect("register request");
 
         assert!(request.id().get() > 0);
         assert_eq!(request.authority(), current);
-        assert_eq!(request.kind(), EnginePrivilegedRequestKind::Network);
+        assert_eq!(request.kind(), EnginePrivilegedRequestKind::Clipboard);
         assert_eq!(tracker.pending_requests(), 1);
         assert_eq!(
             tracker.preflight_once(&host, request),
@@ -440,16 +585,16 @@ mod tests {
     }
 
     #[test]
-    fn registered_request_revalidates_authority_at_consume_time() {
+    fn registered_clipboard_request_revalidates_authority_at_consume_time() {
         let tab = initial_tab();
         let mut host = EngineHost::new().expect("engine host");
         host.create_view(tab).expect("view");
         let first = commit_remote(
             &mut host,
             tab,
-            serve_once("127.0.0.1", "127.0.0.1", "/registered-first"),
+            serve_once("127.0.0.1", "127.0.0.1", "/clipboard-first"),
         );
-        let mut tracker = EnginePrivilegedRequestTracker::try_new(2).expect("tracker");
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
             .register(first, EnginePrivilegedRequestKind::Clipboard)
             .expect("register request");
@@ -457,7 +602,7 @@ mod tests {
         let replacement = commit_remote(
             &mut host,
             tab,
-            serve_once("127.0.0.1", "127.0.0.1", "/registered-replacement"),
+            serve_once("127.0.0.1", "127.0.0.1", "/clipboard-replacement"),
         );
         assert_eq!(replacement.host_instance(), first.host_instance());
         assert_eq!(replacement.site_process(), first.site_process());
@@ -467,14 +612,193 @@ mod tests {
             Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
         );
         assert_eq!(tracker.pending_requests(), 0);
+    }
+
+    #[test]
+    fn current_same_site_network_request_is_consumed_once_and_remains_unsupported() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/one-shot-network"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(2).expect("tracker");
+        let request = tracker
+            .register_network(current, "http://127.0.0.1:1/resource")
+            .expect("register Network request");
+
+        assert!(request.id().get() > 0);
+        assert_eq!(request.authority(), current);
+        assert_eq!(request.target(), "http://127.0.0.1:1/resource");
+        assert_eq!(tracker.pending_requests(), 1);
         assert_eq!(
-            tracker.preflight_once(&host, request),
+            tracker.preflight_network_once(&host, request.clone()),
+            Ok(EngineNetworkTargetDecision::DeniedUnsupported)
+        );
+        assert_eq!(tracker.pending_requests(), 0);
+        assert_eq!(
+            tracker.preflight_network_once(&host, request.clone()),
             Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
         );
     }
 
     #[test]
-    fn registered_request_cannot_cross_engine_host_replacement() {
+    fn network_source_revalidation_precedes_target_classification() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let first = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/network-first"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+        let request = tracker
+            .register_network(first, "../relative")
+            .expect("register raw target");
+
+        let replacement = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/network-replacement"),
+        );
+        assert_ne!(replacement.navigation_context(), first.navigation_context());
+        assert_eq!(
+            tracker.preflight_network_once(&host, request),
+            Ok(EngineNetworkTargetDecision::DeniedStaleAuthority)
+        );
+        assert_eq!(tracker.pending_requests(), 0);
+    }
+
+    #[test]
+    fn network_target_policy_results_are_one_shot() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/network-policy"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(4).expect("tracker");
+
+        for (target, expected) in [
+            (
+                "../relative",
+                EngineNetworkTargetDecision::DeniedInvalidTarget,
+            ),
+            (
+                "file:///tmp/zorya",
+                EngineNetworkTargetDecision::DeniedUnsupportedScheme,
+            ),
+            (
+                "https://127.0.0.1/resource",
+                EngineNetworkTargetDecision::DeniedCrossSite,
+            ),
+        ] {
+            let request = tracker
+                .register_network(current, target)
+                .expect("register target-bound request");
+            assert_eq!(
+                tracker.preflight_network_once(&host, request.clone()),
+                Ok(expected),
+                "{target}"
+            );
+            assert_eq!(
+                tracker.preflight_network_once(&host, request.clone()),
+                Err(EnginePrivilegedRequestError::UnknownRequest(request.id())),
+                "{target} replay"
+            );
+        }
+    }
+
+    #[test]
+    fn mismatched_network_target_burns_the_registered_slot() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/network-mismatch"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+        let request = tracker
+            .register_network(current, "http://127.0.0.1:1/original")
+            .expect("register request");
+        let forged = EngineNetworkPrivilegedRequest {
+            id: request.id,
+            authority: request.authority,
+            target: "http://127.0.0.1:1/forged".into(),
+        };
+
+        assert_eq!(
+            tracker.preflight_network_once(&host, forged),
+            Err(EnginePrivilegedRequestError::MismatchedRequest(
+                request.id()
+            ))
+        );
+        assert_eq!(tracker.pending_requests(), 0);
+        assert_eq!(
+            tracker.preflight_network_once(&host, request.clone()),
+            Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
+        );
+    }
+
+    #[test]
+    fn oversized_network_target_is_rejected_without_consuming_capacity() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/network-bound"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+        let oversized = "x".repeat(MAX_PRIVILEGED_NETWORK_TARGET_BYTES + 1);
+
+        assert_eq!(
+            tracker.register_network(current, oversized),
+            Err(EnginePrivilegedRequestError::NetworkTargetTooLong {
+                bytes: MAX_PRIVILEGED_NETWORK_TARGET_BYTES + 1,
+                max: MAX_PRIVILEGED_NETWORK_TARGET_BYTES,
+            })
+        );
+        assert_eq!(tracker.pending_requests(), 0);
+
+        tracker
+            .register(current, EnginePrivilegedRequestKind::Clipboard)
+            .expect("capacity remains available");
+        assert_eq!(tracker.pending_requests(), 1);
+    }
+
+    #[test]
+    fn network_request_debug_redacts_raw_target() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/network-debug"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+        let secret = "http://127.0.0.1:1/resource?token=do-not-log";
+        let request = tracker
+            .register_network(current, secret)
+            .expect("register request");
+        let debug = format!("{request:?}");
+
+        assert!(!debug.contains(secret));
+        assert!(!debug.contains("do-not-log"));
+        assert!(debug.contains("target_bytes"));
+    }
+
+    #[test]
+    fn target_bound_request_cannot_cross_engine_host_replacement() {
         let tab = initial_tab();
         let mut first_host = EngineHost::new().expect("first engine host");
         first_host.create_view(tab).expect("first view");
@@ -485,7 +809,7 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
-            .register(first, EnginePrivilegedRequestKind::Network)
+            .register_network(first, "http://127.0.0.1:1/resource")
             .expect("register request");
 
         let mut replacement_host = EngineHost::new().expect("replacement engine host");
@@ -502,14 +826,14 @@ mod tests {
         assert_ne!(replacement.host_instance(), first.host_instance());
 
         assert_eq!(
-            tracker.preflight_once(&replacement_host, request),
-            Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
+            tracker.preflight_network_once(&replacement_host, request),
+            Ok(EngineNetworkTargetDecision::DeniedStaleAuthority)
         );
         assert_eq!(tracker.pending_requests(), 0);
     }
 
     #[test]
-    fn copied_handle_cannot_replay_across_tracker_replacement() {
+    fn cloned_target_handle_cannot_replay_across_tracker_replacement() {
         let tab = initial_tab();
         let mut host = EngineHost::new().expect("engine host");
         host.create_view(tab).expect("view");
@@ -521,32 +845,32 @@ mod tests {
 
         let mut first_tracker = EnginePrivilegedRequestTracker::try_new(1).expect("first tracker");
         let stale = first_tracker
-            .register(current, EnginePrivilegedRequestKind::Network)
+            .register_network(current, "http://127.0.0.1:1/stale")
             .expect("first request");
         assert_eq!(
-            first_tracker.preflight_once(&host, stale),
-            Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
+            first_tracker.preflight_network_once(&host, stale.clone()),
+            Ok(EngineNetworkTargetDecision::DeniedUnsupported)
         );
 
         let mut replacement_tracker =
             EnginePrivilegedRequestTracker::try_new(1).expect("replacement tracker");
         let current_request = replacement_tracker
-            .register(current, EnginePrivilegedRequestKind::Network)
+            .register_network(current, "http://127.0.0.1:1/current")
             .expect("replacement request");
         assert_ne!(current_request.id(), stale.id());
         assert_eq!(
-            replacement_tracker.preflight_once(&host, stale),
+            replacement_tracker.preflight_network_once(&host, stale.clone()),
             Err(EnginePrivilegedRequestError::UnknownRequest(stale.id()))
         );
         assert_eq!(replacement_tracker.pending_requests(), 1);
         assert_eq!(
-            replacement_tracker.preflight_once(&host, current_request),
-            Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
+            replacement_tracker.preflight_network_once(&host, current_request),
+            Ok(EngineNetworkTargetDecision::DeniedUnsupported)
         );
     }
 
     #[test]
-    fn mismatched_request_burns_the_registered_slot() {
+    fn mismatched_generic_request_burns_the_registered_slot() {
         let tab = initial_tab();
         let mut host = EngineHost::new().expect("engine host");
         host.create_view(tab).expect("view");
@@ -557,12 +881,12 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
-            .register(current, EnginePrivilegedRequestKind::Network)
+            .register(current, EnginePrivilegedRequestKind::Clipboard)
             .expect("register request");
         let forged = EnginePrivilegedRequest {
             id: request.id,
             authority: request.authority,
-            kind: EnginePrivilegedRequestKind::Clipboard,
+            kind: EnginePrivilegedRequestKind::Network,
         };
 
         assert_eq!(
@@ -579,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn tracker_enforces_nonzero_limit_and_bounded_capacity() {
+    fn tracker_enforces_nonzero_limit_and_shared_bounded_capacity() {
         assert!(matches!(
             EnginePrivilegedRequestTracker::try_new(0),
             Err(EnginePrivilegedRequestError::InvalidLimit)
@@ -595,13 +919,13 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let first = tracker
-            .register(current, EnginePrivilegedRequestKind::Network)
+            .register(current, EnginePrivilegedRequestKind::Clipboard)
             .expect("first request");
 
         assert_eq!(tracker.max_pending(), 1);
         assert_eq!(tracker.pending_requests(), 1);
         assert_eq!(
-            tracker.register(current, EnginePrivilegedRequestKind::Clipboard),
+            tracker.register_network(current, "http://127.0.0.1:1/resource"),
             Err(EnginePrivilegedRequestError::CapacityExceeded)
         );
         assert_eq!(tracker.pending_requests(), 1);
