@@ -1,0 +1,146 @@
+name: Z4 origin docs finalize
+
+on:
+  push:
+    branches: [z4/network-origin-binding]
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Synchronize Z4 Origin boundary docs
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, got {count}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          roadmap = "docs/ROADMAP.md"
+          replace_once(
+              roadmap,
+              "Generic registration cannot create a source-only Network request. `EngineNetworkPrivilegedRequest` binds the exact committed authority to an exact raw target capped at 4 KiB, a canonical pinned-Rarog `FetchMethod`, a bounded canonical pinned-Rarog `HeaderList`, and an exact optional request body.",
+              "Generic registration cannot create a source-only Network request. Network registration instead requires an `EngineHost`-minted `EngineCommittedDocumentSource`, which binds the exact committed authority to the exact canonical Rarog `Origin` of the live committed HTTP(S) document; `EngineNetworkPrivilegedRequest` retains that exact source together with an exact raw target capped at 4 KiB, a canonical pinned-Rarog `FetchMethod`, a bounded canonical pinned-Rarog `HeaderList`, and an exact optional request body."
+          )
+          replace_once(
+              roadmap,
+              "Registration still performs no target parsing, source revalidation, Origin construction, authorization or network execution.",
+              "The source `Origin` is minted only by `EngineHost::committed_document_source` from the canonical live Rarog `View::document_url()`, rejects non-HTTP(S), opaque, missing or divergent source state, and cross-checks its Rarog Site against the live Host Site/process assignment; Zorya adds no Origin parser, default-port table or host normalization. Network registration itself still performs no target parsing, source revalidation, authorization or network execution."
+          )
+          replace_once(
+              roadmap,
+              "Raw targets, header names/values and body contents stay redacted from `Debug`; only safe aggregate sizes/presence plus the canonical method may be shown.",
+              "Raw targets, source-Origin/host serialization, header names/values and body contents stay redacted from `Debug`; only the source authority plus safe aggregate sizes/presence and the canonical method may be shown."
+          )
+          replace_once(
+              roadmap,
+              "source-Origin/request-mode/credentials/redirect/destination/response-limit binding and all capability/Host operations remain future work;",
+              "request-mode/credentials/redirect/destination/response-limit binding, Origin-header synthesis, CORS/Fetch execution and all capability/Host operations remain future work;"
+          )
+
+          security = "docs/Z4_SECURITY_BOUNDARIES.md"
+          replace_once(
+              security,
+              "These Host/context/process tokens are not product identities and are never persisted in profile or session state.\n\n## Privileged request admission",
+              """These Host/context/process tokens are not product identities and are never persisted in profile or session state.
+
+## Canonical Network source Origin
+
+`EngineHost::committed_document_source` is the only product constructor for a Network source. It combines the exact current `EngineCommittedDocumentAuthority` with the canonical Rarog `Origin` derived from the live committed Rarog `View::document_url()`. A source is minted only for a present HTTP(S) document URL with a non-opaque Origin, and that Origin's Rarog Site must agree with the live Host navigation-context Site/process assignment. Local documents expose no Network source; missing, opaque or divergent live state fails closed instead of fabricating identity. Zorya adds no independent Origin parser, default-port table or host normalization.
+
+The canonical Origin is shared across source/request clones and is part of exact one-shot Network request identity together with the Host authority snapshot. It is correlation state, not authorization. `Debug` output intentionally omits Origin/host/port serialization. Binding this source does not synthesize an HTTP `Origin` header and does not implement CORS, Fetch execution, credentials or redirect policy.
+
+## Privileged request admission"""
+          )
+          replace_once(
+              security,
+              "`EngineHost::preflight_network_target` adds a target-aware, still-non-authorizing policy gate for future privileged Network requests. It revalidates the committed-document authority before parsing or classifying the requested target.",
+              "`EngineHost::preflight_network_target` adds a target-aware, still-non-authorizing policy gate for future privileged Network requests. It first revalidates the exact Host-minted committed source, including re-minting the current authority plus canonical Origin from live View/Host state and requiring exact source equality, before parsing or classifying the requested target."
+          )
+          replace_once(
+              security,
+              "For a current source, Zorya obtains the source `SiteIdentity` only from the live Rarog Host navigation context. The target is parsed only with the pinned `rarog_url::WebUrl` contract and its canonical `site_identity()` result.",
+              "For a current source, target admission uses `source.origin().site()` only after source minting has already cross-checked that canonical Origin Site against the live Rarog Host navigation context and Site-process assignment. The target is parsed only with the pinned `rarog_url::WebUrl` contract and its canonical `site_identity()` result."
+          )
+          replace_once(
+              security,
+              "The target policy does not implement Fetch/CORS/origin/credentials/redirect behavior and must not be presented as doing so.",
+              "The target policy does not synthesize an HTTP `Origin` header and does not implement CORS, Fetch execution, credentials, redirect or destination behavior; it must not be presented as doing so."
+          )
+          replace_once(
+              security,
+              "Network attempts bind the same exact source authority to the exact raw requested target, a canonical pinned-Rarog `FetchMethod`, a bounded canonical pinned-Rarog `HeaderList`, and an exact optional bounded request body.",
+              "Network attempts require and clone the Host-minted exact committed source (authority plus canonical Origin), binding that exact source to the raw requested target, a canonical pinned-Rarog `FetchMethod`, a bounded canonical pinned-Rarog `HeaderList`, and an exact optional bounded request body."
+          )
+          replace_once(
+              security,
+              "Raw targets, header names/values and request-body contents are process-local, are not persisted, and are deliberately omitted from the Network handle's `Debug` output.",
+              "Raw targets, canonical source-Origin/host/port serialization, header names/values and request-body contents are process-local, are not persisted, and are deliberately omitted from the Network handle's `Debug` output."
+          )
+          replace_once(
+              security,
+              "Registration remains correlation only. It does not parse a Network target, revalidate source authority, construct a source `Origin`, create a Rarog `FetchRequest` or authorize an operation.",
+              "Network registration remains correlation only. It accepts but cannot fabricate the Host-minted source; it does not parse a Network target, revalidate source state, synthesize an HTTP `Origin` header, create a Rarog `FetchRequest` or authorize an operation."
+          )
+          replace_once(
+              security,
+              "Source Origin, request mode, credentials, redirect, destination and response-limit binding remain outside this slice.",
+              "Request mode, credentials, redirect, destination and response-limit binding remain outside this slice; Origin-header synthesis, CORS enforcement and Fetch execution are also not introduced."
+          )
+          replace_once(
+              security,
+              "- Network source-Origin/request-mode/credentials/redirect/destination/response-limit binding;",
+              "- Network request-mode/credentials/redirect/destination/response-limit binding;\n- HTTP `Origin` header synthesis, CORS enforcement or Fetch execution;"
+          )
+
+          arch = "docs/ARCHITECTURE.md"
+          replace_once(
+              arch,
+              "Context/process tokens are ephemeral Host-lifetime authority markers: they are never product identities and must not enter profile/session persistence.\n\nThis authority snapshot makes Rarog process/site ownership observable",
+              """Context/process tokens are ephemeral Host-lifetime authority markers: they are never product identities and must not enter profile/session persistence.
+
+For Network correlation, `EngineHost::committed_document_source` extends that exact authority snapshot with the canonical Rarog `Origin` of the live committed `View::document_url()`. Only present HTTP(S), non-opaque Origins can be minted, and the Origin's Rarog Site is cross-checked against the same live Host Site/process state before publication. The Origin is shared across clones, participates in exact one-shot Network request identity and is omitted from `Debug` serialization; Zorya does not independently parse or normalize Origin hosts/default ports. This binding is not authorization, does not synthesize an HTTP `Origin` header, and does not implement CORS or Fetch execution.
+
+This authority snapshot makes Rarog process/site ownership observable"""
+          )
+
+          for path in (roadmap, security, arch):
+              text = Path(path).read_text()
+              if "source-Origin/request-mode" in text or "Network source-Origin/request-mode" in text:
+                  raise SystemExit(f"{path}: stale source-Origin future wording remains")
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          cargo check --locked --all-targets
+          cargo test --locked
+          git diff --check
+
+      - name: Commit docs and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/z4-origin-docs-finalize.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "docs: bind canonical Network source Origin"
+          git push origin HEAD:z4/network-origin-binding
