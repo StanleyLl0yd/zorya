@@ -1,0 +1,46 @@
+name: Z4 origin roadmap finalize
+
+on:
+  push:
+    branches: [z4/network-origin-binding]
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Correct target-admission roadmap wording
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('docs/ROADMAP.md')
+          text = p.read_text()
+          old = "- Network target admission now uses only canonical pinned Rarog security identity: `EngineHost::preflight_network_target` revalidates the source authority first, resolves the source `SiteIdentity` from the live Host navigation context, parses the target through `rarog_url::WebUrl`, rejects malformed/relative and non-HTTP(S) targets, and requires schemeful same-site equality using Rarog `SiteIdentity`; ports do not split a Site, while scheme/site changes are denied. Browser display/history strings and custom registrable-domain logic are not used for security identity, missing/divergent Host state remains fail-closed, and even a current same-site HTTP(S) target still yields only `DeniedUnsupported`: no allow result, broker dependency, capability grant, Host operation or Fetch-policy reimplementation is introduced;"
+          new = "- Network target admission now uses only canonical pinned Rarog security identity: `EngineHost::preflight_network_target` revalidates the exact Host-minted committed source first, including exact canonical Origin equality against current live View/Host state, then uses that already Host-cross-checked source Origin `SiteIdentity`; only after source revalidation does it parse the target through `rarog_url::WebUrl`, reject malformed/relative and non-HTTP(S) targets, and require schemeful same-site equality using Rarog `SiteIdentity`. Ports do not split a Site, while scheme/site changes are denied. Browser display/history strings and custom registrable-domain logic are not used for security identity, missing/divergent Host state remains fail-closed, and even a current same-site HTTP(S) target still yields only `DeniedUnsupported`: no allow result, broker dependency, capability grant, Host operation or Fetch-policy reimplementation is introduced;"
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one old target-admission bullet, got {text.count(old)}')
+          p.write_text(text.replace(old, new, 1))
+          PY
+          git diff --check
+          cargo fmt --all -- --check
+
+      - name: Commit correction and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/z4-origin-roadmap-finalize.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "docs: revalidate full Network source before target"
+          git push origin HEAD:z4/network-origin-binding
