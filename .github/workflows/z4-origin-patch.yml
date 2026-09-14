@@ -1,0 +1,595 @@
+name: Z4 origin binding patch
+
+on:
+  push:
+    branches: [z4/network-origin-binding]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - name: Apply exact Origin binding patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, got {count}: {old[:80]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          # EngineHost mints an exact committed source from Rarog's live View URL and Host Site.
+          replace_once(
+              "src/engine.rs",
+              '''    pub const fn site_process(self) -> EngineSiteProcessToken {
+                  self.site_process
+              }
+          }
+
+          #[derive(Clone, Debug, PartialEq, Eq)]
+          pub enum EngineNavigationPoll {''',
+              '''    pub const fn site_process(self) -> EngineSiteProcessToken {
+                  self.site_process
+              }
+          }
+
+          /// Ephemeral committed remote-document Network source identity.
+          ///
+          /// The authority remains Host-lifetime state while `origin` is the exact canonical Rarog
+          /// Origin of the currently committed remote document. The Origin is shared across clones
+          /// and deliberately omitted from `Debug` so host/port data cannot leak through diagnostics.
+          #[derive(Clone, PartialEq, Eq)]
+          pub struct EngineCommittedDocumentSource {
+              authority: EngineCommittedDocumentAuthority,
+              origin: std::sync::Arc<rarog_url::Origin>,
+          }
+
+          impl EngineCommittedDocumentSource {
+              pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
+                  self.authority
+              }
+
+              pub fn origin(&self) -> &rarog_url::Origin {
+                  self.origin.as_ref()
+              }
+
+              pub const fn host_instance(&self) -> EngineHostInstanceToken {
+                  self.authority.host_instance()
+              }
+
+              pub const fn tab(&self) -> TabId {
+                  self.authority.tab()
+              }
+
+              pub const fn view_generation(&self) -> u64 {
+                  self.authority.view_generation()
+              }
+
+              pub const fn navigation_context(&self) -> EngineNavigationContextToken {
+                  self.authority.navigation_context()
+              }
+
+              pub const fn site_process(&self) -> EngineSiteProcessToken {
+                  self.authority.site_process()
+              }
+          }
+
+          impl fmt::Debug for EngineCommittedDocumentSource {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  formatter
+                      .debug_struct("EngineCommittedDocumentSource")
+                      .field("authority", &self.authority)
+                      .finish()
+              }
+          }
+
+          #[derive(Clone, Debug, PartialEq, Eq)]
+          pub enum EngineNavigationPoll {'''
+          )
+
+          replace_once(
+              "src/engine.rs",
+              '''        Ok(Some(snapshot.site().clone()))
+              }
+
+              pub fn load_local_html(''',
+              '''        Ok(Some(snapshot.site().clone()))
+              }
+
+              /// Mints the exact committed remote-document source for future Network correlation.
+              ///
+              /// Origin identity comes only from Rarog's canonical live View URL. Its Site must agree
+              /// with the still-live Host navigation context and Site-process assignment; browser
+              /// display/history strings are never consulted. Local/non-HTTP(S) or divergent state
+              /// fails closed instead of fabricating source identity.
+              pub fn committed_document_source(
+                  &self,
+                  tab: TabId,
+              ) -> Result<Option<EngineCommittedDocumentSource>, EngineHostError> {
+                  let Some(authority) = self.committed_document_authority(tab)? else {
+                      return Ok(None);
+                  };
+                  let hosted = self
+                      .views
+                      .get(&tab)
+                      .ok_or(EngineHostError::UnknownTab(tab))?;
+                  let url = hosted
+                      .view
+                      .document_url()
+                      .ok_or(EngineHostError::InconsistentNavigationState { tab })?;
+                  if !matches!(url.scheme(), "http" | "https") {
+                      return Err(EngineHostError::InconsistentNavigationState { tab });
+                  }
+                  let origin = url
+                      .origin()
+                      .map_err(|_| EngineHostError::InconsistentNavigationState { tab })?;
+                  if origin.is_opaque() {
+                      return Err(EngineHostError::InconsistentNavigationState { tab });
+                  }
+                  let Some(site) = self.committed_document_site_identity(tab)? else {
+                      return Err(EngineHostError::InconsistentNavigationState { tab });
+                  };
+                  if !origin.site().same_site(&site) {
+                      return Err(EngineHostError::InconsistentNavigationState { tab });
+                  }
+
+                  Ok(Some(EngineCommittedDocumentSource {
+                      authority,
+                      origin: std::sync::Arc::new(origin),
+                  }))
+              }
+
+              pub fn load_local_html('''
+          )
+
+          # Network target policy now requires and revalidates the full Host-minted source snapshot.
+          replace_once(
+              "src/network_target_policy.rs",
+              'use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostError};',
+              'use crate::engine::{EngineCommittedDocumentSource, EngineHost, EngineHostError};'
+          )
+          replace_once(
+              "src/network_target_policy.rs",
+              '''    pub fn preflight_network_target(
+                  &self,
+                  authority: EngineCommittedDocumentAuthority,
+                  target: &str,
+              ) -> Result<EngineNetworkTargetDecision, EngineHostError> {
+                  if !self.validate_committed_document_authority(authority)? {
+                      return Ok(EngineNetworkTargetDecision::DeniedStaleAuthority);
+                  }
+
+                  let Some(source_site) = self.committed_document_site_identity(authority.tab())? else {
+                      return Ok(EngineNetworkTargetDecision::DeniedStaleAuthority);
+                  };
+
+                  let target = match WebUrl::parse(target) {''',
+              '''    pub fn preflight_network_target(
+                  &self,
+                  source: &EngineCommittedDocumentSource,
+                  target: &str,
+              ) -> Result<EngineNetworkTargetDecision, EngineHostError> {
+                  let authority = source.authority();
+                  if !self.validate_committed_document_authority(authority)? {
+                      return Ok(EngineNetworkTargetDecision::DeniedStaleAuthority);
+                  }
+                  let Some(current_source) = self.committed_document_source(source.tab())? else {
+                      return Ok(EngineNetworkTargetDecision::DeniedStaleAuthority);
+                  };
+                  if &current_source != source {
+                      return Ok(EngineNetworkTargetDecision::DeniedStaleAuthority);
+                  }
+                  let source_site = source.origin().site();
+
+                  let target = match WebUrl::parse(target) {'''
+          )
+
+          # Policy tests mint source snapshots and pass them by reference.
+          p = Path("src/network_target_policy.rs")
+          text = p.read_text()
+          marker = '#[cfg(test)]\nmod tests {'
+          head, sep, tests = text.partition(marker)
+          if not sep:
+              raise SystemExit("network_target_policy.rs: test marker missing")
+          tests = tests.replace(') -> EngineCommittedDocumentAuthority {', ') -> EngineCommittedDocumentSource {', 1)
+          if tests.count('host.committed_document_authority(tab)') != 1:
+              raise SystemExit("network_target_policy.rs: committed authority helper shape changed")
+          tests = tests.replace('host.committed_document_authority(tab)', 'host.committed_document_source(tab)', 1)
+          tests, count = re.subn(r'preflight_network_target\((\w+),', r'preflight_network_target(&\1,', tests)
+          if count < 8:
+              raise SystemExit(f"network_target_policy.rs: expected policy call migrations, got {count}")
+          p.write_text(head + sep + tests)
+
+          # Network one-shot handles bind the Host-minted source snapshot, not a bare authority.
+          replace_once(
+              "src/privileged_request.rs",
+              'use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostError};',
+              'use crate::engine::{\n    EngineCommittedDocumentAuthority, EngineCommittedDocumentSource, EngineHost, EngineHostError,\n};'
+          )
+          replace_once(
+              "src/privileged_request.rs",
+              '''pub struct EngineNetworkPrivilegedRequest {
+              id: EnginePrivilegedRequestId,
+              authority: EngineCommittedDocumentAuthority,
+              method: FetchMethod,''',
+              '''pub struct EngineNetworkPrivilegedRequest {
+              id: EnginePrivilegedRequestId,
+              source: EngineCommittedDocumentSource,
+              method: FetchMethod,'''
+          )
+          replace_once(
+              "src/privileged_request.rs",
+              '''    pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
+                  self.authority
+              }
+
+              pub fn method(&self) -> &FetchMethod {''',
+              '''    pub fn source(&self) -> &EngineCommittedDocumentSource {
+                  &self.source
+              }
+
+              pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
+                  self.source.authority()
+              }
+
+              pub fn source_origin(&self) -> &rarog_url::Origin {
+                  self.source.origin()
+              }
+
+              pub fn method(&self) -> &FetchMethod {'''
+          )
+          replace_once(
+              "src/privileged_request.rs",
+              '.field("authority", &self.authority)',
+              '.field("authority", &self.source.authority())'
+          )
+
+          p = Path("src/privileged_request.rs")
+          text = p.read_text()
+          start = text.index('    /// Registers a bounded raw Network target with canonical GET semantics')
+          end = text.index('    /// Consumes an exact generic request before checking its source authority.', start)
+          seg = text[start:end]
+          if seg.count('authority: EngineCommittedDocumentAuthority') != 5:
+              raise SystemExit(f"privileged_request.rs: expected 5 Network authority params, got {seg.count('authority: EngineCommittedDocumentAuthority')}")
+          seg = seg.replace('authority: EngineCommittedDocumentAuthority', 'source: &EngineCommittedDocumentSource')
+          seg = seg.replace('\n            authority,\n', '\n            source,\n')
+          seg = seg.replace('(authority, method, target, headers, None)', '(source, method, target, headers, None)')
+          old_ctor = '''        let request = EngineNetworkPrivilegedRequest {
+                  id,
+                  authority,
+                  method,
+                  headers,
+                  body,
+                  target,
+              };'''
+          new_ctor = '''        let request = EngineNetworkPrivilegedRequest {
+                  id,
+                  source: source.clone(),
+                  method,
+                  headers,
+                  body,
+                  target,
+              };'''
+          if seg.count(old_ctor) != 1:
+              raise SystemExit("privileged_request.rs: Network constructor shape changed")
+          seg = seg.replace(old_ctor, new_ctor)
+          text = text[:start] + seg + text[end:]
+          old_policy = 'host.preflight_network_target(stored.authority, stored.target())'
+          if text.count(old_policy) != 1:
+              raise SystemExit("privileged_request.rs: stored Network policy call shape changed")
+          text = text.replace(old_policy, 'host.preflight_network_target(&stored.source, stored.target())', 1)
+          p.write_text(text)
+
+          # Inline tracker tests now mint full Network sources while generic Clipboard remains authority-only.
+          p = Path("src/privileged_request.rs")
+          text = p.read_text()
+          marker = '#[cfg(test)]\nmod tests {'
+          head, sep, tests = text.partition(marker)
+          if not sep:
+              raise SystemExit("privileged_request.rs: inline test marker missing")
+          tests = tests.replace(') -> EngineCommittedDocumentAuthority {', ') -> EngineCommittedDocumentSource {', 1)
+          if tests.count('host.committed_document_authority(tab)') != 1:
+              raise SystemExit("privileged_request.rs: commit_remote helper shape changed")
+          tests = tests.replace('host.committed_document_authority(tab)', 'host.committed_document_source(tab)', 1)
+          tests, network_calls = re.subn(
+              r'(\.register_network(?:_with_method_headers_and_body|_with_method_and_headers|_with_headers|_with_method)?\(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*,)',
+              r'\1&\2\3',
+              tests,
+          )
+          if network_calls < 12:
+              raise SystemExit(f"privileged_request.rs: expected Network registration migrations, got {network_calls}")
+          tests = re.sub(
+              r'(\.register\(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*,\s*EnginePrivilegedRequestKind::)',
+              r'\1\2.authority()\3',
+              tests,
+          )
+          tests = re.sub(
+              r'(preflight_privileged_request\()([A-Za-z_][A-Za-z0-9_]*)(\s*,)',
+              r'\1\2.authority()\3',
+              tests,
+          )
+          tests = re.sub(
+              r'(EngineNetworkPrivilegedRequest \{\s*id: request\.id,\s*)authority: request\.authority,',
+              r'\1source: request.source.clone(),',
+              tests,
+          )
+          tests = re.sub(r'(request\.authority\(\),\s*)(current|first|stale|replacement|same_site|cross_site)(\s*\))', r'\1\2.authority()\3', tests)
+          p.write_text(head + sep + tests)
+
+          # Existing body regression module follows the same source-bound API.
+          p = Path("src/privileged_request_network_body_tests.rs")
+          text = p.read_text()
+          text = text.replace(') -> EngineCommittedDocumentAuthority {', ') -> EngineCommittedDocumentSource {', 1)
+          if text.count('host.committed_document_authority(tab)') != 1:
+              raise SystemExit("body tests: commit helper shape changed")
+          text = text.replace('host.committed_document_authority(tab)', 'host.committed_document_source(tab)', 1)
+          text, body_calls = re.subn(
+              r'(\.register_network_with_method_headers_and_body\(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*,)',
+              r'\1&\2\3',
+              text,
+          )
+          if body_calls < 10:
+              raise SystemExit(f"body tests: expected body registration migrations, got {body_calls}")
+          text = re.sub(
+              r'(EngineNetworkPrivilegedRequest \{\s*id: request\.id,\s*)authority: request\.authority,',
+              r'\1source: request.source.clone(),',
+              text,
+          )
+          text = text.replace(
+              '''    let forged = EnginePrivilegedRequest {
+                  id: request.id,
+                  authority: request.authority,
+                  kind: EnginePrivilegedRequestKind::Clipboard,
+              };''',
+              '''    let forged = EnginePrivilegedRequest {
+                  id: request.id,
+                  authority: request.authority(),
+                  kind: EnginePrivilegedRequestKind::Clipboard,
+              };'''
+          )
+          p.write_text(text)
+
+          # Dedicated Origin regression coverage.
+          origin_tests = r'''use super::*;
+          use crate::engine::EngineNavigationPoll;
+          use crate::{BrowserApp, BrowserWindow, TabId};
+          use rarog_url::WebUrl;
+          use std::io::{Read, Write};
+          use std::net::TcpListener;
+          use std::thread;
+          use std::time::{Duration, Instant};
+
+          fn initial_tab() -> TabId {
+              let app = BrowserApp::bootstrap().expect("browser bootstrap");
+              app.windows()
+                  .next()
+                  .and_then(BrowserWindow::active_tab_id)
+                  .expect("bootstrap creates an active tab")
+          }
+
+          fn serve_once(path: &str) -> String {
+              let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind Origin fixture");
+              let port = listener.local_addr().expect("fixture address").port();
+              thread::spawn(move || {
+                  let (mut stream, _) = listener.accept().expect("accept Origin fixture request");
+                  stream
+                      .set_read_timeout(Some(Duration::from_secs(2)))
+                      .expect("fixture read timeout");
+                  let mut request = [0u8; 4096];
+                  let _ = stream.read(&mut request);
+                  let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 18\r\nConnection: close\r\n\r\n<main>Zorya</main>";
+                  let _ = stream.write_all(response);
+                  let _ = stream.flush();
+              });
+              format!("http://127.0.0.1:{port}{path}")
+          }
+
+          fn commit_remote(
+              host: &mut EngineHost,
+              tab: TabId,
+              location: String,
+          ) -> EngineCommittedDocumentSource {
+              let request = host
+                  .begin_navigation(tab, location)
+                  .expect("begin remote navigation")
+                  .expect("remote navigation forwarded");
+              let deadline = Instant::now() + Duration::from_secs(5);
+              loop {
+                  match host.poll_navigation(request).expect("poll remote navigation") {
+                      EngineNavigationPoll::Pending if Instant::now() < deadline => {
+                          thread::sleep(Duration::from_millis(5));
+                      }
+                      EngineNavigationPoll::Pending => panic!("Origin fixture timed out"),
+                      EngineNavigationPoll::Committed { .. } => break,
+                      EngineNavigationPoll::Failed { message } => {
+                          panic!("Origin fixture navigation failed: {message}")
+                      }
+                      EngineNavigationPoll::Stale => panic!("Origin fixture navigation went stale"),
+                  }
+              }
+              host.committed_document_source(tab)
+                  .expect("committed source query")
+                  .expect("committed remote source")
+          }
+
+          fn current_source(path: &str) -> (TabId, EngineHost, EngineCommittedDocumentSource, String) {
+              let tab = initial_tab();
+              let mut host = EngineHost::new().expect("engine host");
+              host.create_view(tab).expect("view");
+              let location = serve_once(path);
+              let source = commit_remote(&mut host, tab, location.clone());
+              (tab, host, source, location)
+          }
+
+          #[test]
+          fn source_uses_exact_canonical_rarog_origin_and_clone_shares_it() {
+              let (_tab, _host, source, location) = current_source("/exact-origin");
+              let expected = WebUrl::parse(&location)
+                  .expect("canonical source URL")
+                  .origin()
+                  .expect("canonical source Origin");
+              assert_eq!(source.origin(), &expected);
+              assert!(!source.origin().is_opaque());
+
+              let cloned = source.clone();
+              assert!(std::ptr::eq(source.origin(), cloned.origin()));
+              assert_eq!(cloned.authority(), source.authority());
+          }
+
+          #[test]
+          fn same_site_different_origin_remains_target_policy_not_origin_policy() {
+              let (_tab, host, source, _location) = current_source("/same-site-other-port");
+              let other = WebUrl::parse("http://127.0.0.1:1/resource")
+                  .expect("other-port URL")
+                  .origin()
+                  .expect("other-port Origin");
+              assert_ne!(source.origin(), &other);
+              assert!(source.origin().site().same_site(&other.site()));
+              assert_eq!(
+                  host.preflight_network_target(&source, "http://127.0.0.1:1/resource"),
+                  Ok(EngineNetworkTargetDecision::DeniedUnsupported)
+              );
+          }
+
+          #[test]
+          fn local_document_cannot_mint_network_source() {
+              let (tab, mut host, _source, _location) = current_source("/local-replacement");
+              host.load_local_html(tab, "<main>local</main>")
+                  .expect("replace with local document");
+              assert_eq!(host.committed_document_source(tab), Ok(None));
+          }
+
+          #[test]
+          fn source_and_request_debug_redact_origin_serialization() {
+              let (_tab, _host, source, _location) = current_source("/origin-debug");
+              let serialized = source.origin().ascii_serialization();
+              assert!(!format!("{source:?}").contains(&serialized));
+
+              let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+              let request = tracker
+                  .register_network(&source, "http://127.0.0.1:1/resource?secret=target")
+                  .expect("register source-bound request");
+              let debug = format!("{request:?}");
+              assert!(!debug.contains(&serialized));
+              assert!(!debug.contains("secret=target"));
+          }
+
+          #[test]
+          fn source_substitution_burns_once_and_releases_body_budget() {
+              let (tab, mut host, first, _location) = current_source("/origin-first");
+              let mut tracker =
+                  EnginePrivilegedRequestTracker::try_new_with_body_budget(1, 4).expect("tracker");
+              let request = tracker
+                  .register_network_with_method_headers_and_body(
+                      &first,
+                      FetchMethod::post(),
+                      "http://127.0.0.1:1/resource",
+                      HeaderList::default(),
+                      Some(vec![1, 2, 3, 4]),
+                  )
+                  .expect("register body request");
+              assert_eq!(tracker.pending_network_body_bytes(), 4);
+
+              let replacement = commit_remote(&mut host, tab, serve_once("/origin-replacement"));
+              assert_ne!(replacement.navigation_context(), first.navigation_context());
+              let forged = EngineNetworkPrivilegedRequest {
+                  id: request.id,
+                  source: replacement,
+                  method: request.method.clone(),
+                  headers: request.headers.clone(),
+                  body: request.body.clone(),
+                  target: request.target.clone(),
+              };
+              assert_eq!(
+                  tracker.preflight_network_once(&host, forged),
+                  Err(EnginePrivilegedRequestError::MismatchedRequest(request.id()))
+              );
+              assert_eq!(tracker.pending_requests(), 0);
+              assert_eq!(tracker.pending_network_body_bytes(), 0);
+          }
+
+          #[test]
+          fn stale_source_precedes_target_classification() {
+              let (tab, mut host, first, _location) = current_source("/origin-stale-first");
+              let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+              let request = tracker
+                  .register_network(&first, "../relative")
+                  .expect("register raw target");
+              let replacement = commit_remote(&mut host, tab, serve_once("/origin-stale-replacement"));
+              assert_ne!(replacement.navigation_context(), first.navigation_context());
+              assert_eq!(
+                  tracker.preflight_network_once(&host, request),
+                  Ok(EngineNetworkTargetDecision::DeniedStaleAuthority)
+              );
+          }
+
+          #[test]
+          fn closed_recreated_view_cannot_reuse_old_source() {
+              let (tab, mut host, stale, _location) = current_source("/origin-old-view");
+              assert!(host.close_view(tab).expect("close source view"));
+              assert_eq!(
+                  host.preflight_network_target(&stale, "../relative"),
+                  Ok(EngineNetworkTargetDecision::DeniedStaleAuthority)
+              );
+
+              host.create_view(tab).expect("replacement view");
+              let current = commit_remote(&mut host, tab, serve_once("/origin-new-view"));
+              assert_ne!(current.view_generation(), stale.view_generation());
+              assert_eq!(
+                  host.preflight_network_target(&stale, "http://127.0.0.1:1/resource"),
+                  Ok(EngineNetworkTargetDecision::DeniedStaleAuthority)
+              );
+          }
+          '''
+          Path("src/privileged_request_network_origin_tests.rs").write_text(origin_tests)
+
+          replace_once(
+              "src/privileged_request.rs",
+              '''#[cfg(test)]
+          #[path = "privileged_request_network_body_tests.rs"]
+          mod network_body_tests;
+
+          #[cfg(test)]
+          mod tests {''',
+              '''#[cfg(test)]
+          #[path = "privileged_request_network_body_tests.rs"]
+          mod network_body_tests;
+
+          #[cfg(test)]
+          #[path = "privileged_request_network_origin_tests.rs"]
+          mod network_origin_tests;
+
+          #[cfg(test)]
+          mod tests {'''
+          )
+          PY
+      - name: Format
+        run: cargo fmt --all
+      - name: Check
+        run: cargo check --locked --all-targets
+      - name: Test
+        run: cargo test --locked
+      - name: Commit production patch and remove staging workflow
+        shell: bash
+        run: |
+          rm .github/workflows/z4-origin-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Z4: bind canonical Network source Origin"
+          git push origin HEAD:z4/network-origin-binding
