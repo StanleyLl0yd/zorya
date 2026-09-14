@@ -38,6 +38,34 @@ jobs:
               raise SystemExit(f'expected one malformed new_ctor block, got {script.count(old)}')
           script = script.replace(old, new, 1)
           exec(compile(script, 'z4-origin-patch', 'exec'))
+
+          body_path = Path('src/privileged_request_network_body_tests.rs')
+          body = body_path.read_text()
+          old = 'fn current_authority(path: &str) -> (TabId, EngineHost, EngineCommittedDocumentAuthority) {'
+          new = 'fn current_authority(path: &str) -> (TabId, EngineHost, EngineCommittedDocumentSource) {'
+          if body.count(old) != 1:
+              raise SystemExit(f'body tests: expected one current_authority tuple signature, got {body.count(old)}')
+          body_path.write_text(body.replace(old, new, 1))
+
+          engine_path = Path('src/engine.rs')
+          engine = engine_path.read_text()
+          old = '''        let authority = host
+              .committed_document_authority(tab)
+              .expect("authority before process loss")
+              .expect("remote authority before process loss");'''
+          new = '''        let source = host
+              .committed_document_source(tab)
+              .expect("source before process loss")
+              .expect("remote source before process loss");
+          let authority = source.authority();'''
+          if engine.count(old) != 1:
+              raise SystemExit(f'engine tests: expected one process-loss authority fixture, got {engine.count(old)}')
+          engine = engine.replace(old, new, 1)
+          old = 'host.preflight_network_target(authority, "https://lost.example/resource")'
+          new = 'host.preflight_network_target(&source, "https://lost.example/resource")'
+          if engine.count(old) != 1:
+              raise SystemExit(f'engine tests: expected one stale target call, got {engine.count(old)}')
+          engine_path.write_text(engine.replace(old, new, 1))
           PY
       - name: Format
         run: cargo fmt --all
