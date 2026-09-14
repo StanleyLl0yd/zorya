@@ -1,5 +1,6 @@
 use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostError};
 use crate::network_target_policy::EngineNetworkTargetDecision;
+use rarog_fetch::FetchMethod;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
@@ -69,15 +70,18 @@ impl EnginePrivilegedRequest {
     }
 }
 
-/// One-shot Network request bound to the exact source authority and raw requested target.
+/// One-shot Network request bound to the exact source authority, canonical method and raw target.
 ///
 /// The target is retained only in process memory and is deliberately not included in `Debug`
-/// output because URLs can contain sensitive query or fragment data. Registration does not parse
-/// or authorize the target; canonical target policy runs only when the request is consumed.
+/// output because URLs can contain sensitive query or fragment data. The HTTP method is the
+/// canonical Rarog `FetchMethod`; Zorya does not parse or normalize HTTP methods independently.
+/// Registration does not parse or authorize the target; canonical target policy runs only when the
+/// request is consumed.
 #[derive(Clone, PartialEq, Eq)]
 pub struct EngineNetworkPrivilegedRequest {
     id: EnginePrivilegedRequestId,
     authority: EngineCommittedDocumentAuthority,
+    method: FetchMethod,
     target: String,
 }
 
@@ -88,6 +92,10 @@ impl EngineNetworkPrivilegedRequest {
 
     pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
         self.authority
+    }
+
+    pub fn method(&self) -> &FetchMethod {
+        &self.method
     }
 
     pub fn target(&self) -> &str {
@@ -101,6 +109,7 @@ impl fmt::Debug for EngineNetworkPrivilegedRequest {
             .debug_struct("EngineNetworkPrivilegedRequest")
             .field("id", &self.id)
             .field("authority", &self.authority)
+            .field("method", &self.method)
             .field("target_bytes", &self.target.len())
             .finish()
     }
@@ -188,8 +197,9 @@ fn allocate_privileged_request_id()
 /// Registration allocates only a one-shot correlation identity. It does not validate or grant
 /// authority. Request IDs are process-global and monotonic so rebuilding a tracker cannot make an
 /// old copied handle collide with a newly registered request. Generic registration cannot create a
-/// Network request: Network attempts must retain an exact bounded target through
-/// `register_network`. Consumption removes the exact stored request before source/target policy.
+/// Network request: Network attempts must retain an exact bounded target and canonical Rarog method
+/// through `register_network` / `register_network_with_method`. Consumption removes the exact
+/// stored request before source/target policy.
 #[derive(Debug)]
 pub struct EnginePrivilegedRequestTracker {
     max_pending: usize,
@@ -240,13 +250,28 @@ impl EnginePrivilegedRequestTracker {
         Ok(request)
     }
 
-    /// Registers a bounded raw Network target without parsing, revalidation or authorization.
+    /// Registers a bounded raw Network target with canonical GET semantics.
     ///
-    /// Deferring target parsing until consumption preserves the fail-closed order where stale
-    /// source authority is rejected before target classification.
+    /// Target parsing, source revalidation and authorization remain deferred to consumption.
     pub fn register_network(
         &mut self,
         authority: EngineCommittedDocumentAuthority,
+        target: impl Into<String>,
+    ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
+        self.register_network_with_method(authority, FetchMethod::get(), target)
+    }
+
+    /// Registers a bounded raw Network target plus canonical Rarog Fetch method without target
+    /// parsing, source revalidation or authorization.
+    ///
+    /// Deferring target parsing until consumption preserves the fail-closed order where stale
+    /// source authority is rejected before target classification. HTTP method syntax,
+    /// canonicalization and forbidden-method policy belong to `rarog_fetch::FetchMethod`; this
+    /// function accepts that already-validated type rather than implementing another parser.
+    pub fn register_network_with_method(
+        &mut self,
+        authority: EngineCommittedDocumentAuthority,
+        method: FetchMethod,
         target: impl Into<String>,
     ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
         let target = target.into();
@@ -262,6 +287,7 @@ impl EnginePrivilegedRequestTracker {
         let request = EngineNetworkPrivilegedRequest {
             id,
             authority,
+            method,
             target,
         };
         self.insert_pending(id, PendingPrivilegedRequest::Network(request.clone()));
@@ -292,11 +318,13 @@ impl EnginePrivilegedRequestTracker {
             .map_err(EnginePrivilegedRequestError::from)
     }
 
-    /// Consumes the exact target-bound Network request before applying canonical target policy.
+    /// Consumes the exact target/method-bound Network request before applying canonical target
+    /// policy.
     ///
-    /// Same-ID source or target mismatches burn the stored slot. For an exact handle,
+    /// Same-ID source, method or target mismatches burn the stored slot. For an exact handle,
     /// `preflight_network_target` revalidates source authority before parsing/classifying the raw
-    /// target. The current policy remains non-authorizing.
+    /// target. The current policy remains non-authorizing; the retained method is correlation data
+    /// for a later reviewed Fetch/broker path and is not executed here.
     pub fn preflight_network_once(
         &mut self,
         host: &EngineHost,
@@ -631,6 +659,7 @@ mod tests {
 
         assert!(request.id().get() > 0);
         assert_eq!(request.authority(), current);
+        assert_eq!(request.method().as_str(), "GET");
         assert_eq!(request.target(), "http://127.0.0.1:1/resource");
         assert_eq!(tracker.pending_requests(), 1);
         assert_eq!(
@@ -642,6 +671,66 @@ mod tests {
             tracker.preflight_network_once(&host, request.clone()),
             Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
         );
+    }
+
+    #[test]
+    fn explicit_network_method_uses_canonical_rarog_fetch_method() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/method-binding"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+        let method = FetchMethod::try_new("post").expect("Rarog canonical method");
+        assert_eq!(method.as_str(), "POST");
+
+        let request = tracker
+            .register_network_with_method(
+                current,
+                method,
+                "http://127.0.0.1:1/method-bound",
+            )
+            .expect("register method-bound request");
+        assert_eq!(request.method().as_str(), "POST");
+        assert_eq!(
+            tracker.preflight_network_once(&host, request.clone()),
+            Ok(EngineNetworkTargetDecision::DeniedUnsupported)
+        );
+        assert_eq!(
+            tracker.preflight_network_once(&host, request.clone()),
+            Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
+        );
+    }
+
+    #[test]
+    fn rarog_rejects_invalid_or_forbidden_methods_before_tracker_registration() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/method-validation"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+
+        assert!(FetchMethod::try_new("BAD METHOD").is_err());
+        assert!(FetchMethod::try_new("CONNECT").is_err());
+        assert!(FetchMethod::try_new("TRACE").is_err());
+        assert!(FetchMethod::try_new("TRACK").is_err());
+        assert_eq!(tracker.pending_requests(), 0);
+
+        tracker
+            .register_network_with_method(
+                current,
+                FetchMethod::head(),
+                "http://127.0.0.1:1/capacity-remains",
+            )
+            .expect("failed method construction consumes no tracker capacity");
+        assert_eq!(tracker.pending_requests(), 1);
     }
 
     #[test]
@@ -731,7 +820,42 @@ mod tests {
         let forged = EngineNetworkPrivilegedRequest {
             id: request.id,
             authority: request.authority,
+            method: request.method.clone(),
             target: "http://127.0.0.1:1/forged".into(),
+        };
+
+        assert_eq!(
+            tracker.preflight_network_once(&host, forged),
+            Err(EnginePrivilegedRequestError::MismatchedRequest(
+                request.id()
+            ))
+        );
+        assert_eq!(tracker.pending_requests(), 0);
+        assert_eq!(
+            tracker.preflight_network_once(&host, request.clone()),
+            Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
+        );
+    }
+
+    #[test]
+    fn mismatched_network_method_burns_the_registered_slot() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let current = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/method-mismatch"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+        let request = tracker
+            .register_network(current, "http://127.0.0.1:1/original")
+            .expect("register request");
+        let forged = EngineNetworkPrivilegedRequest {
+            id: request.id,
+            authority: request.authority,
+            method: FetchMethod::post(),
+            target: request.target.clone(),
         };
 
         assert_eq!(
@@ -776,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn network_request_debug_redacts_raw_target() {
+    fn network_request_debug_redacts_raw_target_and_retains_method() {
         let tab = initial_tab();
         let mut host = EngineHost::new().expect("engine host");
         host.create_view(tab).expect("view");
@@ -788,12 +912,13 @@ mod tests {
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let secret = "http://127.0.0.1:1/resource?token=do-not-log";
         let request = tracker
-            .register_network(current, secret)
+            .register_network_with_method(current, FetchMethod::post(), secret)
             .expect("register request");
         let debug = format!("{request:?}");
 
         assert!(!debug.contains(secret));
         assert!(!debug.contains("do-not-log"));
+        assert!(debug.contains("POST"));
         assert!(debug.contains("target_bytes"));
     }
 
