@@ -83,8 +83,8 @@ impl EnginePrivilegedRequest {
 }
 
 /// One-shot Network request bound to the exact source authority, canonical method, bounded
-/// canonical headers, exact optional bounded body, canonical Fetch envelope metadata, exact response-body
-/// byte limit and raw target.
+/// canonical headers, exact optional bounded body, canonical Fetch envelope metadata, exact
+/// response-body byte limit and raw target.
 ///
 /// Target, header/body and custom destination contents are retained only in process memory and are
 /// deliberately not included in `Debug` output because they can contain sensitive data. Body bytes
@@ -725,13 +725,13 @@ impl EnginePrivilegedRequestTracker {
     /// Consumes the exact source/target/method/header/body/envelope-bound Network request before
     /// applying canonical target policy.
     ///
-    /// Same-ID source, method, headers, body, mode, credentials, redirect, destination, response limit or target
-    /// mismatches burn the stored slot. Stored body
+    /// Same-ID source, method, headers, body, mode, credentials, redirect, destination, response
+    /// limit or target mismatches burn the stored slot. Stored body
     /// bytes are released from tracker accounting before equality or policy. For an exact handle,
     /// `preflight_network_target` revalidates source authority before parsing/classifying the raw
     /// target. The current policy remains non-authorizing; retained method/headers/body/envelope
-    /// metadata and response limit are correlation data for a later reviewed Fetch/broker path and are
-    /// not executed or enforced here.
+    /// metadata and response limit are correlation data for a later reviewed Fetch/broker path and
+    /// are not executed or enforced here.
     pub fn preflight_network_once(
         &mut self,
         host: &EngineHost,
