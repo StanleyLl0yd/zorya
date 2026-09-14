@@ -3,7 +3,8 @@ use crate::engine::{
 };
 use crate::network_target_policy::EngineNetworkTargetDecision;
 use rarog_fetch::{
-    CredentialsMode, FetchMethod, HeaderList, RedirectMode, RequestDestination, RequestMode,
+    CredentialsMode, DEFAULT_MAX_RESPONSE_BODY_BYTES, FetchMethod, HeaderList, RedirectMode,
+    RequestDestination, RequestMode,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -81,13 +82,15 @@ impl EnginePrivilegedRequest {
 }
 
 /// One-shot Network request bound to the exact source authority, canonical method, bounded
-/// canonical headers, exact optional bounded body, canonical Fetch envelope metadata and raw target.
+/// canonical headers, exact optional bounded body, canonical Fetch envelope metadata, exact response-body
+/// byte limit and raw target.
 ///
 /// Target, header/body and custom destination contents are retained only in process memory and are
 /// deliberately not included in `Debug` output because they can contain sensitive data. Body bytes
 /// use immutable shared storage so cloning a request handle does not duplicate the body allocation.
 /// Method, headers, mode, credentials, redirect and destination use canonical Rarog Fetch types;
-/// Zorya does not parse or normalize them independently. Registration does not parse or authorize
+/// the response-body limit follows the pinned Rarog non-zero byte-limit contract. Zorya does not
+/// parse or normalize them independently. Registration does not parse or authorize
 /// the target; canonical target policy runs only when the request is consumed.
 #[derive(Clone, PartialEq, Eq)]
 pub struct EngineNetworkPrivilegedRequest {
@@ -100,6 +103,7 @@ pub struct EngineNetworkPrivilegedRequest {
     credentials: CredentialsMode,
     redirect: RedirectMode,
     destination: RequestDestination,
+    max_response_body_bytes: usize,
     target: String,
 }
 
@@ -148,6 +152,10 @@ impl EngineNetworkPrivilegedRequest {
         &self.destination
     }
 
+    pub const fn max_response_body_bytes(&self) -> usize {
+        self.max_response_body_bytes
+    }
+
     pub fn target(&self) -> &str {
         &self.target
     }
@@ -183,6 +191,7 @@ impl fmt::Debug for EngineNetworkPrivilegedRequest {
             .field("redirect", &self.redirect)
             .field("destination_kind", &destination_kind)
             .field("destination_other_bytes", &destination_other_bytes)
+            .field("max_response_body_bytes", &self.max_response_body_bytes)
             .finish()
     }
 }
@@ -224,6 +233,7 @@ pub enum EnginePrivilegedRequestError {
         bytes: usize,
         max: usize,
     },
+    InvalidNetworkResponseBodyLimit,
     NetworkBodyBudgetExceeded {
         pending: usize,
         requested: usize,
@@ -275,6 +285,8 @@ impl fmt::Display for EnginePrivilegedRequestError {
                 formatter,
                 "Network privileged request destination is {bytes} bytes; maximum is {max} bytes"
             ),
+            Self::InvalidNetworkResponseBodyLimit => formatter
+                .write_str("Network privileged request response-body limit must be non-zero"),
             Self::NetworkBodyBudgetExceeded {
                 pending,
                 requested,
@@ -565,15 +577,12 @@ impl EnginePrivilegedRequestTracker {
         )
     }
 
-    /// Registers the exact bounded current Network request envelope without target parsing,
-    /// source revalidation or authorization.
+    /// Registers the exact bounded current Network request envelope with the pinned Rarog
+    /// default response-body limit, without target parsing, source revalidation or authorization.
     ///
-    /// Incoming headers are rebound through Rarog `HeaderList::append` into fixed product
-    /// limits. Body/method compatibility reuses Rarog `FetchMethod::permits_body`; mode,
-    /// credentials, redirect and destination remain canonical pinned-Rarog Fetch values.
-    /// `RequestDestination::Other` is retained byte-for-byte but capped before request-ID,
-    /// pending-slot or tracker body-budget consumption. Deferring target parsing until
-    /// consumption preserves stale-source-before-target classification.
+    /// This compatibility path binds `DEFAULT_MAX_RESPONSE_BODY_BYTES` exactly; callers that need
+    /// an explicit canonical response limit use
+    /// `register_network_with_request_parts_and_response_limit`.
     #[allow(clippy::too_many_arguments)]
     pub fn register_network_with_request_parts(
         &mut self,
@@ -587,12 +596,54 @@ impl EnginePrivilegedRequestTracker {
         redirect: RedirectMode,
         destination: RequestDestination,
     ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
+        self.register_network_with_request_parts_and_response_limit(
+            source,
+            method,
+            target,
+            headers,
+            body,
+            mode,
+            credentials,
+            redirect,
+            destination,
+            DEFAULT_MAX_RESPONSE_BODY_BYTES,
+        )
+    }
+
+    /// Registers the exact bounded current Network request envelope and response-body byte limit
+    /// without target parsing, source revalidation or authorization.
+    ///
+    /// Incoming headers are rebound through Rarog `HeaderList::append` into fixed product limits.
+    /// Body/method compatibility reuses Rarog `FetchMethod::permits_body`; mode, credentials,
+    /// redirect and destination remain canonical pinned-Rarog Fetch values. The response-body limit
+    /// is retained exactly under Rarog's non-zero `FetchLimits` contract; Zorya does not impose a
+    /// second cap because retaining this fixed-size scalar allocates no response storage.
+    /// `RequestDestination::Other` is retained byte-for-byte but capped before request-ID,
+    /// pending-slot or tracker body-budget consumption. Deferring target parsing until consumption
+    /// preserves stale-source-before-target classification.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_network_with_request_parts_and_response_limit(
+        &mut self,
+        source: &EngineCommittedDocumentSource,
+        method: FetchMethod,
+        target: impl Into<String>,
+        headers: HeaderList,
+        body: Option<Vec<u8>>,
+        mode: RequestMode,
+        credentials: CredentialsMode,
+        redirect: RedirectMode,
+        destination: RequestDestination,
+        max_response_body_bytes: usize,
+    ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
         let target = target.into();
         if target.len() > MAX_PRIVILEGED_NETWORK_TARGET_BYTES {
             return Err(EnginePrivilegedRequestError::NetworkTargetTooLong {
                 bytes: target.len(),
                 max: MAX_PRIVILEGED_NETWORK_TARGET_BYTES,
             });
+        }
+        if max_response_body_bytes == 0 {
+            return Err(EnginePrivilegedRequestError::InvalidNetworkResponseBodyLimit);
         }
         let destination = bind_network_destination(destination)?;
         let headers = bind_network_headers(&headers)?;
@@ -626,6 +677,7 @@ impl EnginePrivilegedRequestTracker {
             credentials,
             redirect,
             destination,
+            max_response_body_bytes,
             target,
         };
         self.insert_pending(id, PendingPrivilegedRequest::Network(request.clone()));
@@ -659,12 +711,13 @@ impl EnginePrivilegedRequestTracker {
     /// Consumes the exact source/target/method/header/body/envelope-bound Network request before
     /// applying canonical target policy.
     ///
-    /// Same-ID source, method, headers, body, mode, credentials, redirect, destination or target
+    /// Same-ID source, method, headers, body, mode, credentials, redirect, destination, response limit or target
     /// mismatches burn the stored slot. Stored body
     /// bytes are released from tracker accounting before equality or policy. For an exact handle,
     /// `preflight_network_target` revalidates source authority before parsing/classifying the raw
     /// target. The current policy remains non-authorizing; retained method/headers/body/envelope
-    /// metadata are correlation data for a later reviewed Fetch/broker path and are not executed here.
+    /// metadata and response limit are correlation data for a later reviewed Fetch/broker path and are
+    /// not executed or enforced here.
     pub fn preflight_network_once(
         &mut self,
         host: &EngineHost,
@@ -751,6 +804,10 @@ mod network_envelope_tests;
 #[cfg(test)]
 #[path = "privileged_request_network_origin_tests.rs"]
 mod network_origin_tests;
+
+#[cfg(test)]
+#[path = "privileged_request_network_response_limit_tests.rs"]
+mod network_response_limit_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1273,6 +1330,7 @@ mod tests {
             credentials: CredentialsMode::SameOrigin,
             redirect: RedirectMode::Follow,
             destination: RequestDestination::Empty,
+            max_response_body_bytes: request.max_response_body_bytes,
             target: "http://127.0.0.1:1/forged".into(),
         };
 
@@ -1313,6 +1371,7 @@ mod tests {
             credentials: CredentialsMode::SameOrigin,
             redirect: RedirectMode::Follow,
             destination: RequestDestination::Empty,
+            max_response_body_bytes: request.max_response_body_bytes,
             target: request.target.clone(),
         };
 
@@ -1358,6 +1417,7 @@ mod tests {
             credentials: CredentialsMode::SameOrigin,
             redirect: RedirectMode::Follow,
             destination: RequestDestination::Empty,
+            max_response_body_bytes: request.max_response_body_bytes,
             target: request.target.clone(),
         };
 

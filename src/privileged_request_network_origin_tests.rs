@@ -153,6 +153,7 @@ fn source_substitution_burns_once_and_releases_body_budget() {
         credentials: CredentialsMode::SameOrigin,
         redirect: RedirectMode::Follow,
         destination: RequestDestination::Empty,
+        max_response_body_bytes: request.max_response_body_bytes,
         target: request.target.clone(),
     };
     assert_eq!(
