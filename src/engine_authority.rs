@@ -2,11 +2,11 @@ use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostErro
 
 impl EngineHost {
     /// Revalidates an ephemeral committed remote-document authority snapshot against the
-    /// current product View and live Rarog Host state.
+    /// current EngineHost incarnation, product View and live Rarog Host state.
     ///
-    /// A stale snapshot is not authorization: replacement navigation, a local document, or a
-    /// closed/recreated View returns `false`. Unexpected loss or divergence in the live Host
-    /// authority remains an `InconsistentNavigationState` error through
+    /// A stale snapshot is not authorization: Host replacement, replacement navigation, a local
+    /// document, or a closed/recreated View returns `false`. Unexpected loss or divergence in the
+    /// live Host authority remains an `InconsistentNavigationState` error through
     /// `committed_document_authority`.
     pub fn validate_committed_document_authority(
         &self,
@@ -112,6 +112,7 @@ mod tests {
             tab,
             serve_once("127.0.0.1", "127.0.0.1", "/second"),
         );
+        assert_eq!(same_site.host_instance(), first.host_instance());
         assert_ne!(same_site.navigation_context(), first.navigation_context());
         assert_eq!(same_site.site_process(), first.site_process());
         assert_eq!(host.validate_committed_document_authority(first), Ok(false));
@@ -125,6 +126,7 @@ mod tests {
             tab,
             serve_once("127.0.0.1", "localhost", "/cross-site"),
         );
+        assert_eq!(cross_site.host_instance(), first.host_instance());
         assert_ne!(
             cross_site.navigation_context(),
             same_site.navigation_context()
@@ -169,10 +171,49 @@ mod tests {
             tab,
             serve_once("127.0.0.1", "127.0.0.1", "/replacement-view"),
         );
+        assert_eq!(current.host_instance(), stale.host_instance());
         assert_ne!(current.view_generation(), stale.view_generation());
         assert_eq!(host.validate_committed_document_authority(stale), Ok(false));
         assert_eq!(
             host.validate_committed_document_authority(current),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn revalidation_rejects_snapshot_from_replaced_engine_host_even_when_local_ids_collide() {
+        let tab = initial_tab();
+        let mut first_host = EngineHost::new().expect("first engine host");
+        first_host.create_view(tab).expect("first view");
+        let stale = commit_remote(
+            &mut first_host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/first-host"),
+        );
+        assert_eq!(
+            first_host.validate_committed_document_authority(stale),
+            Ok(true)
+        );
+
+        let mut replacement_host = EngineHost::new().expect("replacement engine host");
+        replacement_host.create_view(tab).expect("replacement view");
+        let current = commit_remote(
+            &mut replacement_host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/replacement-host"),
+        );
+
+        assert_eq!(current.tab(), stale.tab());
+        assert_eq!(current.view_generation(), stale.view_generation());
+        assert_eq!(current.navigation_context(), stale.navigation_context());
+        assert_eq!(current.site_process(), stale.site_process());
+        assert_ne!(current.host_instance(), stale.host_instance());
+        assert_eq!(
+            replacement_host.validate_committed_document_authority(stale),
+            Ok(false)
+        );
+        assert_eq!(
+            replacement_host.validate_committed_document_authority(current),
             Ok(true)
         );
     }
