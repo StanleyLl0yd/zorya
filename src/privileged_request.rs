@@ -688,11 +688,7 @@ mod tests {
         assert_eq!(method.as_str(), "POST");
 
         let request = tracker
-            .register_network_with_method(
-                current,
-                method,
-                "http://127.0.0.1:1/method-bound",
-            )
+            .register_network_with_method(current, method, "http://127.0.0.1:1/method-bound")
             .expect("register method-bound request");
         assert_eq!(request.method().as_str(), "POST");
         assert_eq!(
