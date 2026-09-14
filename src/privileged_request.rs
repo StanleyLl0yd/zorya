@@ -169,9 +169,8 @@ impl fmt::Display for EnginePrivilegedRequestError {
                 formatter,
                 "Network privileged request headers require {bytes} bytes; maximum is {max} bytes"
             ),
-            Self::NetworkHeaderRebindFailed => formatter.write_str(
-                "canonical Network headers could not be rebound to product limits",
-            ),
+            Self::NetworkHeaderRebindFailed => formatter
+                .write_str("canonical Network headers could not be rebound to product limits"),
             Self::UnknownRequest(id) => write!(
                 formatter,
                 "unknown or already consumed privileged request {}",
@@ -324,7 +323,12 @@ impl EnginePrivilegedRequestTracker {
         target: impl Into<String>,
         headers: HeaderList,
     ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
-        self.register_network_with_method_and_headers(authority, FetchMethod::get(), target, headers)
+        self.register_network_with_method_and_headers(
+            authority,
+            FetchMethod::get(),
+            target,
+            headers,
+        )
     }
 
     /// Registers a bounded raw Network target plus canonical Rarog Fetch method and no headers.
@@ -1096,11 +1100,7 @@ mod tests {
         }
 
         assert_eq!(
-            tracker.register_network_with_headers(
-                current,
-                "http://127.0.0.1:1/resource",
-                headers,
-            ),
+            tracker.register_network_with_headers(current, "http://127.0.0.1:1/resource", headers,),
             Err(EnginePrivilegedRequestError::NetworkHeaderCountExceeded {
                 count: MAX_PRIVILEGED_NETWORK_HEADERS + 1,
                 max: MAX_PRIVILEGED_NETWORK_HEADERS,
@@ -1127,11 +1127,7 @@ mod tests {
         let headers = one_header_list("x", &value);
 
         assert_eq!(
-            tracker.register_network_with_headers(
-                current,
-                "http://127.0.0.1:1/resource",
-                headers,
-            ),
+            tracker.register_network_with_headers(current, "http://127.0.0.1:1/resource", headers,),
             Err(EnginePrivilegedRequestError::NetworkHeaderBytesExceeded {
                 bytes: MAX_PRIVILEGED_NETWORK_HEADER_BYTES + 1,
                 max: MAX_PRIVILEGED_NETWORK_HEADER_BYTES,
