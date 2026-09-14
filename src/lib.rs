@@ -63,6 +63,7 @@ pub use privileged_request::{
     DEFAULT_MAX_PENDING_PRIVILEGED_REQUESTS, EngineNetworkPrivilegedRequest,
     EnginePrivilegedRequest, EnginePrivilegedRequestDecision, EnginePrivilegedRequestError,
     EnginePrivilegedRequestId, EnginePrivilegedRequestKind, EnginePrivilegedRequestTracker,
+    MAX_PRIVILEGED_NETWORK_HEADER_BYTES, MAX_PRIVILEGED_NETWORK_HEADERS,
     MAX_PRIVILEGED_NETWORK_TARGET_BYTES,
 };
 pub use profile::{
