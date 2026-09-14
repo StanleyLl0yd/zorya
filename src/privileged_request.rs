@@ -326,11 +326,7 @@ impl EnginePrivilegedRequestTracker {
         }
     }
 
-    fn insert_pending(
-        &mut self,
-        id: EnginePrivilegedRequestId,
-        request: PendingPrivilegedRequest,
-    ) {
+    fn insert_pending(&mut self, id: EnginePrivilegedRequestId, request: PendingPrivilegedRequest) {
         let previous = self.pending.insert(id, request);
         debug_assert!(
             previous.is_none(),
@@ -586,6 +582,36 @@ mod tests {
             tracker.preflight_once(&host, request),
             Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
         );
+    }
+
+    #[test]
+    fn registered_clipboard_request_revalidates_authority_at_consume_time() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        let first = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/clipboard-first"),
+        );
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+        let request = tracker
+            .register(first, EnginePrivilegedRequestKind::Clipboard)
+            .expect("register request");
+
+        let replacement = commit_remote(
+            &mut host,
+            tab,
+            serve_once("127.0.0.1", "127.0.0.1", "/clipboard-replacement"),
+        );
+        assert_eq!(replacement.host_instance(), first.host_instance());
+        assert_eq!(replacement.site_process(), first.site_process());
+        assert_ne!(replacement.navigation_context(), first.navigation_context());
+        assert_eq!(
+            tracker.preflight_once(&host, request),
+            Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
+        );
+        assert_eq!(tracker.pending_requests(), 0);
     }
 
     #[test]
