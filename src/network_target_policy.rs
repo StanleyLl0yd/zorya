@@ -72,7 +72,8 @@ mod tests {
     }
 
     fn serve_once(bind_host: &str, url_host: &str, path: &str) -> String {
-        let listener = TcpListener::bind((bind_host, 0)).expect("bind target-policy fixture server");
+        let listener =
+            TcpListener::bind((bind_host, 0)).expect("bind target-policy fixture server");
         let port = listener.local_addr().expect("fixture address").port();
         thread::spawn(move || {
             let (mut stream, _) = listener
@@ -113,7 +114,9 @@ mod tests {
                 EngineNavigationPoll::Failed { message } => {
                     panic!("target-policy fixture navigation failed: {message}")
                 }
-                EngineNavigationPoll::Stale => panic!("target-policy fixture navigation went stale"),
+                EngineNavigationPoll::Stale => {
+                    panic!("target-policy fixture navigation went stale")
+                }
             }
         }
 
