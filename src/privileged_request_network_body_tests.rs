@@ -18,7 +18,9 @@ fn serve_once(bind_host: &str, url_host: &str, path: &str) -> String {
     let listener = TcpListener::bind((bind_host, 0)).expect("bind privileged body fixture server");
     let port = listener.local_addr().expect("fixture address").port();
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept privileged body fixture request");
+        let (mut stream, _) = listener
+            .accept()
+            .expect("accept privileged body fixture request");
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("fixture read timeout");
@@ -67,11 +69,7 @@ fn current_authority(path: &str) -> (TabId, EngineHost, EngineCommittedDocumentA
     let tab = initial_tab();
     let mut host = EngineHost::new().expect("engine host");
     host.create_view(tab).expect("view");
-    let authority = commit_remote(
-        &mut host,
-        tab,
-        serve_once("127.0.0.1", "127.0.0.1", path),
-    );
+    let authority = commit_remote(&mut host, tab, serve_once("127.0.0.1", "127.0.0.1", path));
     (tab, host, authority)
 }
 
@@ -135,7 +133,9 @@ fn absent_and_present_empty_bodies_are_distinct_and_mismatch_burns_slot() {
     };
     assert_eq!(
         tracker.preflight_network_once(&host, forged),
-        Err(EnginePrivilegedRequestError::MismatchedRequest(request.id()))
+        Err(EnginePrivilegedRequestError::MismatchedRequest(
+            request.id()
+        ))
     );
     assert_eq!(tracker.pending_requests(), 0);
     assert_eq!(tracker.pending_network_body_bytes(), 0);
@@ -156,9 +156,7 @@ fn rarog_method_body_semantics_reject_get_and_head_before_registration() {
                 HeaderList::default(),
                 Some(Vec::new()),
             ),
-            Err(EnginePrivilegedRequestError::NetworkBodyNotPermitted {
-                method: expected,
-            })
+            Err(EnginePrivilegedRequestError::NetworkBodyNotPermitted { method: expected })
         );
         assert_eq!(tracker.pending_requests(), 0);
         assert_eq!(tracker.pending_network_body_bytes(), 0);
@@ -320,7 +318,9 @@ fn body_mismatch_burns_slot_and_releases_aggregate_budget() {
 
     assert_eq!(
         tracker.preflight_network_once(&host, forged),
-        Err(EnginePrivilegedRequestError::MismatchedRequest(request.id()))
+        Err(EnginePrivilegedRequestError::MismatchedRequest(
+            request.id()
+        ))
     );
     assert_eq!(tracker.pending_requests(), 0);
     assert_eq!(tracker.pending_network_body_bytes(), 0);
@@ -348,7 +348,9 @@ fn cross_kind_mismatch_burns_network_slot_and_releases_body_budget() {
 
     assert_eq!(
         tracker.preflight_once(&host, forged),
-        Err(EnginePrivilegedRequestError::MismatchedRequest(request.id()))
+        Err(EnginePrivilegedRequestError::MismatchedRequest(
+            request.id()
+        ))
     );
     assert_eq!(tracker.pending_requests(), 0);
     assert_eq!(tracker.pending_network_body_bytes(), 0);
