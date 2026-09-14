@@ -83,6 +83,10 @@ fn compatibility_default_and_explicit_response_limit_are_bound_exactly() {
         DEFAULT_MAX_RESPONSE_BODY_BYTES
     );
     assert_eq!(
+        defaulted.max_response_body_bytes(),
+        MAX_PRIVILEGED_NETWORK_RESPONSE_BODY_BYTES
+    );
+    assert_eq!(
         tracker.preflight_network_once(&host, defaulted),
         Ok(EngineNetworkTargetDecision::DeniedUnsupported)
     );
@@ -127,7 +131,35 @@ fn zero_response_limit_is_rejected_before_slot_or_body_budget_use() {
             RequestDestination::Empty,
             0,
         ),
-        Err(EnginePrivilegedRequestError::InvalidNetworkResponseBodyLimit)
+        Err(
+            EnginePrivilegedRequestError::NetworkResponseBodyLimitOutOfRange {
+                bytes: 0,
+                max: MAX_PRIVILEGED_NETWORK_RESPONSE_BODY_BYTES,
+            }
+        )
+    );
+    assert_eq!(tracker.pending_requests(), 0);
+    assert_eq!(tracker.pending_network_body_bytes(), 0);
+
+    assert_eq!(
+        tracker.register_network_with_request_parts_and_response_limit(
+            &current,
+            FetchMethod::post(),
+            "http://127.0.0.1:1/over-limit",
+            HeaderList::default(),
+            Some(vec![1, 2, 3, 4]),
+            RequestMode::Cors,
+            CredentialsMode::SameOrigin,
+            RedirectMode::Follow,
+            RequestDestination::Empty,
+            MAX_PRIVILEGED_NETWORK_RESPONSE_BODY_BYTES + 1,
+        ),
+        Err(
+            EnginePrivilegedRequestError::NetworkResponseBodyLimitOutOfRange {
+                bytes: MAX_PRIVILEGED_NETWORK_RESPONSE_BODY_BYTES + 1,
+                max: MAX_PRIVILEGED_NETWORK_RESPONSE_BODY_BYTES,
+            }
+        )
     );
     assert_eq!(tracker.pending_requests(), 0);
     assert_eq!(tracker.pending_network_body_bytes(), 0);

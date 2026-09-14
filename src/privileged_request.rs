@@ -19,6 +19,7 @@ pub const MAX_PRIVILEGED_NETWORK_HEADERS: usize = 64;
 pub const MAX_PRIVILEGED_NETWORK_HEADER_BYTES: usize = 16 * 1024;
 pub const MAX_PRIVILEGED_NETWORK_BODY_BYTES: usize = 1024 * 1024;
 pub const MAX_PRIVILEGED_NETWORK_DESTINATION_BYTES: usize = 256;
+pub const MAX_PRIVILEGED_NETWORK_RESPONSE_BODY_BYTES: usize = DEFAULT_MAX_RESPONSE_BODY_BYTES;
 
 static NEXT_ENGINE_PRIVILEGED_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -233,7 +234,10 @@ pub enum EnginePrivilegedRequestError {
         bytes: usize,
         max: usize,
     },
-    InvalidNetworkResponseBodyLimit,
+    NetworkResponseBodyLimitOutOfRange {
+        bytes: usize,
+        max: usize,
+    },
     NetworkBodyBudgetExceeded {
         pending: usize,
         requested: usize,
@@ -285,8 +289,10 @@ impl fmt::Display for EnginePrivilegedRequestError {
                 formatter,
                 "Network privileged request destination is {bytes} bytes; maximum is {max} bytes"
             ),
-            Self::InvalidNetworkResponseBodyLimit => formatter
-                .write_str("Network privileged request response-body limit must be non-zero"),
+            Self::NetworkResponseBodyLimitOutOfRange { bytes, max } => write!(
+                formatter,
+                "Network privileged request response-body limit is {bytes} bytes; allowed range is 1..={max} bytes"
+            ),
             Self::NetworkBodyBudgetExceeded {
                 pending,
                 requested,
@@ -616,8 +622,9 @@ impl EnginePrivilegedRequestTracker {
     /// Incoming headers are rebound through Rarog `HeaderList::append` into fixed product limits.
     /// Body/method compatibility reuses Rarog `FetchMethod::permits_body`; mode, credentials,
     /// redirect and destination remain canonical pinned-Rarog Fetch values. The response-body limit
-    /// is retained exactly under Rarog's non-zero `FetchLimits` contract; Zorya does not impose a
-    /// second cap because retaining this fixed-size scalar allocates no response storage.
+    /// is retained exactly under Rarog's non-zero `FetchLimits` contract and Zorya caps the value at
+    /// the pinned Rarog default so a future execution path cannot inherit an effectively unbounded
+    /// response budget from correlation state.
     /// `RequestDestination::Other` is retained byte-for-byte but capped before request-ID,
     /// pending-slot or tracker body-budget consumption. Deferring target parsing until consumption
     /// preserves stale-source-before-target classification.
@@ -642,8 +649,15 @@ impl EnginePrivilegedRequestTracker {
                 max: MAX_PRIVILEGED_NETWORK_TARGET_BYTES,
             });
         }
-        if max_response_body_bytes == 0 {
-            return Err(EnginePrivilegedRequestError::InvalidNetworkResponseBodyLimit);
+        if max_response_body_bytes == 0
+            || max_response_body_bytes > MAX_PRIVILEGED_NETWORK_RESPONSE_BODY_BYTES
+        {
+            return Err(
+                EnginePrivilegedRequestError::NetworkResponseBodyLimitOutOfRange {
+                    bytes: max_response_body_bytes,
+                    max: MAX_PRIVILEGED_NETWORK_RESPONSE_BODY_BYTES,
+                },
+            );
         }
         let destination = bind_network_destination(destination)?;
         let headers = bind_network_headers(&headers)?;
