@@ -133,6 +133,7 @@ fn absent_and_present_empty_bodies_are_distinct_and_mismatch_burns_slot() {
         credentials: CredentialsMode::SameOrigin,
         redirect: RedirectMode::Follow,
         destination: RequestDestination::Empty,
+        max_response_body_bytes: request.max_response_body_bytes,
         target: request.target.clone(),
     };
     assert_eq!(
@@ -321,6 +322,7 @@ fn body_mismatch_burns_slot_and_releases_aggregate_budget() {
         credentials: CredentialsMode::SameOrigin,
         redirect: RedirectMode::Follow,
         destination: RequestDestination::Empty,
+        max_response_body_bytes: request.max_response_body_bytes,
         target: request.target.clone(),
     };
 
