@@ -11,6 +11,7 @@ pub mod engine;
 mod engine_authority;
 mod http_transport;
 mod navigation;
+mod network_target_policy;
 mod platform;
 mod presentation_handoff;
 mod privileged_request;
@@ -53,6 +54,7 @@ pub use navigation::{
     HistoryEntry, HistoryEntryId, NavigationControls, NavigationFailure, NavigationId,
     NavigationIntent, NavigationIntentKind, NavigationStart, ReloadControl, TabNavigation,
 };
+pub use network_target_policy::EngineNetworkTargetDecision;
 pub use presentation_handoff::{
     CurrentFramePermit, PresentationFramePermit, PresentationGeneration, PresentationHandoffError,
     PresentationTransitionStart, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
