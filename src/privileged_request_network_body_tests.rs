@@ -129,6 +129,10 @@ fn absent_and_present_empty_bodies_are_distinct_and_mismatch_burns_slot() {
         method: request.method.clone(),
         headers: request.headers.clone(),
         body: None,
+        mode: RequestMode::Cors,
+        credentials: CredentialsMode::SameOrigin,
+        redirect: RedirectMode::Follow,
+        destination: RequestDestination::Empty,
         target: request.target.clone(),
     };
     assert_eq!(
@@ -313,6 +317,10 @@ fn body_mismatch_burns_slot_and_releases_aggregate_budget() {
         method: request.method.clone(),
         headers: request.headers.clone(),
         body: Some(Arc::<[u8]>::from(b"forged!!".to_vec())),
+        mode: RequestMode::Cors,
+        credentials: CredentialsMode::SameOrigin,
+        redirect: RedirectMode::Follow,
+        destination: RequestDestination::Empty,
         target: request.target.clone(),
     };
 

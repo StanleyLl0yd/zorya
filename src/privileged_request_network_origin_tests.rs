@@ -149,6 +149,10 @@ fn source_substitution_burns_once_and_releases_body_budget() {
         method: request.method.clone(),
         headers: request.headers.clone(),
         body: request.body.clone(),
+        mode: RequestMode::Cors,
+        credentials: CredentialsMode::SameOrigin,
+        redirect: RedirectMode::Follow,
+        destination: RequestDestination::Empty,
         target: request.target.clone(),
     };
     assert_eq!(

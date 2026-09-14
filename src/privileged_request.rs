@@ -2,7 +2,9 @@ use crate::engine::{
     EngineCommittedDocumentAuthority, EngineCommittedDocumentSource, EngineHost, EngineHostError,
 };
 use crate::network_target_policy::EngineNetworkTargetDecision;
-use rarog_fetch::{FetchMethod, HeaderList};
+use rarog_fetch::{
+    CredentialsMode, FetchMethod, HeaderList, RedirectMode, RequestDestination, RequestMode,
+};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
@@ -15,6 +17,7 @@ pub const MAX_PRIVILEGED_NETWORK_TARGET_BYTES: usize = 4 * 1024;
 pub const MAX_PRIVILEGED_NETWORK_HEADERS: usize = 64;
 pub const MAX_PRIVILEGED_NETWORK_HEADER_BYTES: usize = 16 * 1024;
 pub const MAX_PRIVILEGED_NETWORK_BODY_BYTES: usize = 1024 * 1024;
+pub const MAX_PRIVILEGED_NETWORK_DESTINATION_BYTES: usize = 256;
 
 static NEXT_ENGINE_PRIVILEGED_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -78,14 +81,14 @@ impl EnginePrivilegedRequest {
 }
 
 /// One-shot Network request bound to the exact source authority, canonical method, bounded
-/// canonical headers, exact optional bounded body and raw target.
+/// canonical headers, exact optional bounded body, canonical Fetch envelope metadata and raw target.
 ///
-/// Target, header and body contents are retained only in process memory and are deliberately not
-/// included in `Debug` output because they can contain sensitive data. Body bytes use immutable
-/// shared storage so cloning a request handle does not duplicate the body allocation. The HTTP
-/// method and headers use canonical Rarog Fetch types; Zorya does not parse or normalize them
-/// independently. Registration does not parse or authorize the target; canonical target policy
-/// runs only when the request is consumed.
+/// Target, header/body and custom destination contents are retained only in process memory and are
+/// deliberately not included in `Debug` output because they can contain sensitive data. Body bytes
+/// use immutable shared storage so cloning a request handle does not duplicate the body allocation.
+/// Method, headers, mode, credentials, redirect and destination use canonical Rarog Fetch types;
+/// Zorya does not parse or normalize them independently. Registration does not parse or authorize
+/// the target; canonical target policy runs only when the request is consumed.
 #[derive(Clone, PartialEq, Eq)]
 pub struct EngineNetworkPrivilegedRequest {
     id: EnginePrivilegedRequestId,
@@ -93,6 +96,10 @@ pub struct EngineNetworkPrivilegedRequest {
     method: FetchMethod,
     headers: HeaderList,
     body: Option<Arc<[u8]>>,
+    mode: RequestMode,
+    credentials: CredentialsMode,
+    redirect: RedirectMode,
+    destination: RequestDestination,
     target: String,
 }
 
@@ -125,6 +132,22 @@ impl EngineNetworkPrivilegedRequest {
         self.body.as_deref()
     }
 
+    pub const fn mode(&self) -> RequestMode {
+        self.mode
+    }
+
+    pub const fn credentials(&self) -> CredentialsMode {
+        self.credentials
+    }
+
+    pub const fn redirect(&self) -> RedirectMode {
+        self.redirect
+    }
+
+    pub fn destination(&self) -> &RequestDestination {
+        &self.destination
+    }
+
     pub fn target(&self) -> &str {
         &self.target
     }
@@ -136,6 +159,15 @@ impl EngineNetworkPrivilegedRequest {
 
 impl fmt::Debug for EngineNetworkPrivilegedRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (destination_kind, destination_other_bytes) = match &self.destination {
+            RequestDestination::Empty => ("empty", 0),
+            RequestDestination::Document => ("document", 0),
+            RequestDestination::Script => ("script", 0),
+            RequestDestination::Style => ("style", 0),
+            RequestDestination::Image => ("image", 0),
+            RequestDestination::Font => ("font", 0),
+            RequestDestination::Other(value) => ("other", value.len()),
+        };
         formatter
             .debug_struct("EngineNetworkPrivilegedRequest")
             .field("id", &self.id)
@@ -146,6 +178,11 @@ impl fmt::Debug for EngineNetworkPrivilegedRequest {
             .field("header_bytes", &self.headers.byte_len())
             .field("body_present", &self.body.is_some())
             .field("body_bytes", &self.body_bytes())
+            .field("mode", &self.mode)
+            .field("credentials", &self.credentials)
+            .field("redirect", &self.redirect)
+            .field("destination_kind", &destination_kind)
+            .field("destination_other_bytes", &destination_other_bytes)
             .finish()
     }
 }
@@ -180,6 +217,10 @@ pub enum EnginePrivilegedRequestError {
         method: FetchMethod,
     },
     NetworkBodyTooLong {
+        bytes: usize,
+        max: usize,
+    },
+    NetworkDestinationTooLong {
         bytes: usize,
         max: usize,
     },
@@ -229,6 +270,10 @@ impl fmt::Display for EnginePrivilegedRequestError {
             Self::NetworkBodyTooLong { bytes, max } => write!(
                 formatter,
                 "Network privileged request body is {bytes} bytes; maximum is {max} bytes"
+            ),
+            Self::NetworkDestinationTooLong { bytes, max } => write!(
+                formatter,
+                "Network privileged request destination is {bytes} bytes; maximum is {max} bytes"
             ),
             Self::NetworkBodyBudgetExceeded {
                 pending,
@@ -332,14 +377,29 @@ fn bind_network_body(
     Ok(body.map(Arc::<[u8]>::from))
 }
 
+fn bind_network_destination(
+    destination: RequestDestination,
+) -> Result<RequestDestination, EnginePrivilegedRequestError> {
+    if let RequestDestination::Other(value) = &destination {
+        if value.len() > MAX_PRIVILEGED_NETWORK_DESTINATION_BYTES {
+            return Err(EnginePrivilegedRequestError::NetworkDestinationTooLong {
+                bytes: value.len(),
+                max: MAX_PRIVILEGED_NETWORK_DESTINATION_BYTES,
+            });
+        }
+    }
+    Ok(destination)
+}
+
 /// Bounded process-local lifecycle for future privileged request attempts.
 ///
 /// Registration allocates only a one-shot correlation identity. It does not validate or grant
 /// authority. Request IDs are process-global and monotonic so rebuilding a tracker cannot make an
 /// old copied handle collide with a newly registered request. Generic registration cannot create a
 /// Network request: Network attempts must retain an exact bounded target, canonical Rarog method,
-/// bounded canonical Rarog headers and exact optional bounded body. Consumption removes the exact
-/// stored request and releases its tracker-accounted body bytes before source/target policy.
+/// bounded canonical Rarog headers, exact optional bounded body and canonical Fetch envelope
+/// metadata. Consumption removes the exact stored request and releases its tracker-accounted body
+/// bytes before source/target policy.
 #[derive(Debug)]
 pub struct EnginePrivilegedRequestTracker {
     max_pending: usize,
@@ -480,13 +540,10 @@ impl EnginePrivilegedRequestTracker {
     }
 
     /// Registers a bounded raw Network target, canonical method/headers and exact optional body
-    /// without target parsing, source revalidation or authorization.
+    /// with the pinned Rarog Fetch envelope defaults.
     ///
-    /// Incoming headers are rebound through Rarog `HeaderList::append` into fixed product limits.
-    /// Body/method compatibility reuses Rarog `FetchMethod::permits_body`; Zorya does not add a
-    /// second HTTP method table. Target/header/body and aggregate body-memory bounds are checked
-    /// before request-ID allocation. Deferring target parsing until consumption preserves the
-    /// fail-closed order where stale source authority is rejected before target classification.
+    /// This compatibility path remains exact: it binds `Cors`, `SameOrigin`, `Follow` and
+    /// `Empty`, matching `rarog_fetch::FetchRequest::try_new` at the pinned Rarog revision.
     pub fn register_network_with_method_headers_and_body(
         &mut self,
         source: &EngineCommittedDocumentSource,
@@ -495,6 +552,41 @@ impl EnginePrivilegedRequestTracker {
         headers: HeaderList,
         body: Option<Vec<u8>>,
     ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
+        self.register_network_with_request_parts(
+            source,
+            method,
+            target,
+            headers,
+            body,
+            RequestMode::Cors,
+            CredentialsMode::SameOrigin,
+            RedirectMode::Follow,
+            RequestDestination::Empty,
+        )
+    }
+
+    /// Registers the exact bounded current Network request envelope without target parsing,
+    /// source revalidation or authorization.
+    ///
+    /// Incoming headers are rebound through Rarog `HeaderList::append` into fixed product
+    /// limits. Body/method compatibility reuses Rarog `FetchMethod::permits_body`; mode,
+    /// credentials, redirect and destination remain canonical pinned-Rarog Fetch values.
+    /// `RequestDestination::Other` is retained byte-for-byte but capped before request-ID,
+    /// pending-slot or tracker body-budget consumption. Deferring target parsing until
+    /// consumption preserves stale-source-before-target classification.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_network_with_request_parts(
+        &mut self,
+        source: &EngineCommittedDocumentSource,
+        method: FetchMethod,
+        target: impl Into<String>,
+        headers: HeaderList,
+        body: Option<Vec<u8>>,
+        mode: RequestMode,
+        credentials: CredentialsMode,
+        redirect: RedirectMode,
+        destination: RequestDestination,
+    ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
         let target = target.into();
         if target.len() > MAX_PRIVILEGED_NETWORK_TARGET_BYTES {
             return Err(EnginePrivilegedRequestError::NetworkTargetTooLong {
@@ -502,6 +594,7 @@ impl EnginePrivilegedRequestTracker {
                 max: MAX_PRIVILEGED_NETWORK_TARGET_BYTES,
             });
         }
+        let destination = bind_network_destination(destination)?;
         let headers = bind_network_headers(&headers)?;
         let body = bind_network_body(&method, body)?;
         let body_bytes = body.as_ref().map_or(0, |body| body.len());
@@ -529,6 +622,10 @@ impl EnginePrivilegedRequestTracker {
             method,
             headers,
             body,
+            mode,
+            credentials,
+            redirect,
+            destination,
             target,
         };
         self.insert_pending(id, PendingPrivilegedRequest::Network(request.clone()));
@@ -559,14 +656,15 @@ impl EnginePrivilegedRequestTracker {
             .map_err(EnginePrivilegedRequestError::from)
     }
 
-    /// Consumes the exact target/method/header/body-bound Network request before applying canonical
-    /// target policy.
+    /// Consumes the exact source/target/method/header/body/envelope-bound Network request before
+    /// applying canonical target policy.
     ///
-    /// Same-ID source, method, headers, body or target mismatches burn the stored slot. Stored body
+    /// Same-ID source, method, headers, body, mode, credentials, redirect, destination or target
+    /// mismatches burn the stored slot. Stored body
     /// bytes are released from tracker accounting before equality or policy. For an exact handle,
     /// `preflight_network_target` revalidates source authority before parsing/classifying the raw
-    /// target. The current policy remains non-authorizing; retained method/headers/body are
-    /// correlation data for a later reviewed Fetch/broker path and are not executed here.
+    /// target. The current policy remains non-authorizing; retained method/headers/body/envelope
+    /// metadata are correlation data for a later reviewed Fetch/broker path and are not executed here.
     pub fn preflight_network_once(
         &mut self,
         host: &EngineHost,
@@ -645,6 +743,10 @@ impl EngineHost {
 #[cfg(test)]
 #[path = "privileged_request_network_body_tests.rs"]
 mod network_body_tests;
+
+#[cfg(test)]
+#[path = "privileged_request_network_envelope_tests.rs"]
+mod network_envelope_tests;
 
 #[cfg(test)]
 #[path = "privileged_request_network_origin_tests.rs"]
@@ -1167,6 +1269,10 @@ mod tests {
             method: request.method.clone(),
             headers: request.headers.clone(),
             body: request.body.clone(),
+            mode: RequestMode::Cors,
+            credentials: CredentialsMode::SameOrigin,
+            redirect: RedirectMode::Follow,
+            destination: RequestDestination::Empty,
             target: "http://127.0.0.1:1/forged".into(),
         };
 
@@ -1203,6 +1309,10 @@ mod tests {
             method: FetchMethod::post(),
             headers: request.headers.clone(),
             body: request.body.clone(),
+            mode: RequestMode::Cors,
+            credentials: CredentialsMode::SameOrigin,
+            redirect: RedirectMode::Follow,
+            destination: RequestDestination::Empty,
             target: request.target.clone(),
         };
 
@@ -1244,6 +1354,10 @@ mod tests {
             headers: bind_network_headers(&one_header_list("X-Zorya", "forged"))
                 .expect("forged bounded headers"),
             body: request.body.clone(),
+            mode: RequestMode::Cors,
+            credentials: CredentialsMode::SameOrigin,
+            redirect: RedirectMode::Follow,
+            destination: RequestDestination::Empty,
             target: request.target.clone(),
         };
 
