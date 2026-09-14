@@ -153,12 +153,26 @@ pub enum EnginePrivilegedRequestError {
     CapacityExceeded,
     IdentitySpaceExhausted,
     NetworkTargetRequired,
-    NetworkTargetTooLong { bytes: usize, max: usize },
-    NetworkHeaderCountExceeded { count: usize, max: usize },
-    NetworkHeaderBytesExceeded { bytes: usize, max: usize },
+    NetworkTargetTooLong {
+        bytes: usize,
+        max: usize,
+    },
+    NetworkHeaderCountExceeded {
+        count: usize,
+        max: usize,
+    },
+    NetworkHeaderBytesExceeded {
+        bytes: usize,
+        max: usize,
+    },
     NetworkHeaderRebindFailed,
-    NetworkBodyNotPermitted { method: FetchMethod },
-    NetworkBodyTooLong { bytes: usize, max: usize },
+    NetworkBodyNotPermitted {
+        method: FetchMethod,
+    },
+    NetworkBodyTooLong {
+        bytes: usize,
+        max: usize,
+    },
     NetworkBodyBudgetExceeded {
         pending: usize,
         requested: usize,
@@ -214,9 +228,9 @@ impl fmt::Display for EnginePrivilegedRequestError {
                 formatter,
                 "Network privileged request body budget exceeded: {pending} pending bytes + {requested} requested bytes; maximum is {max} bytes"
             ),
-            Self::NetworkBodyAccountingInvariant => formatter.write_str(
-                "privileged Network body accounting invariant was violated",
-            ),
+            Self::NetworkBodyAccountingInvariant => {
+                formatter.write_str("privileged Network body accounting invariant was violated")
+            }
             Self::UnknownRequest(id) => write!(
                 formatter,
                 "unknown or already consumed privileged request {}",
@@ -581,10 +595,10 @@ impl EnginePrivilegedRequestTracker {
             PendingPrivilegedRequest::Generic(_) => 0,
             PendingPrivilegedRequest::Network(request) => request.body_bytes(),
         };
-        self.pending_network_body_bytes = self
-            .pending_network_body_bytes
-            .checked_sub(body_bytes)
-            .ok_or(EnginePrivilegedRequestError::NetworkBodyAccountingInvariant)?;
+        self.pending_network_body_bytes =
+            self.pending_network_body_bytes
+                .checked_sub(body_bytes)
+                .ok_or(EnginePrivilegedRequestError::NetworkBodyAccountingInvariant)?;
         Ok(request)
     }
 
