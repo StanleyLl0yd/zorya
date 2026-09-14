@@ -503,12 +503,7 @@ mod tests {
                 .expect("fixture read timeout");
             let mut request = [0u8; 4096];
             let _ = stream.read(&mut request);
-            let response = b"HTTP/1.1 200 OK\r\
-Content-Type: text/html; charset=utf-8\r\
-Content-Length: 18\r\
-Connection: close\r\
-\r\
-<main>Zorya</main>";
+            let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 18\r\nConnection: close\r\n\r\n<main>Zorya</main>";
             let _ = stream.write_all(response);
             let _ = stream.flush();
         });
