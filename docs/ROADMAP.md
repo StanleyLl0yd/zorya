@@ -69,7 +69,7 @@ Tracks Rarog process/isolation maturity rather than replacing it.
 - crash recovery;
 - capability brokering;
 - download/file/external-protocol hardening;
-- privileged internal-page boundary;
+- privileged internal-page identity now starts from a Zorya-owned finite `EngineInternalPage` rather than an address/history string: the bundled Start page is loaded only through a dedicated EngineHost path that selects the embedded HTML itself and mints an exact `EngineCommittedInternalPageAuthority` bound to Host incarnation, stable `TabId`, View generation, page kind and a monotonic non-zero internal-document token. Generic local HTML never mints this authority; same-page reload rotates the token; View/Host replacement and committed remote navigation invalidate stale snapshots, while pending/failed/cancelled/blocked remote attempts preserve the still-committed internal page. Revalidation cross-checks live Rarog local-document state (`about:blank` base, no remote document URL/context), so the persisted/display `about:blank` label is not authority. This is identity/provenance only: no privileged internal action, JavaScript/native bridge, permission decision, capability grant or custom externally navigable internal scheme is introduced;
 - permission mediation;
 - Windows hardening.
 
