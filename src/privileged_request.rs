@@ -20,6 +20,8 @@ pub const MAX_PRIVILEGED_NETWORK_HEADER_BYTES: usize = 16 * 1024;
 pub const MAX_PRIVILEGED_NETWORK_BODY_BYTES: usize = 1024 * 1024;
 pub const MAX_PRIVILEGED_NETWORK_DESTINATION_BYTES: usize = 256;
 pub const MAX_PRIVILEGED_NETWORK_RESPONSE_BODY_BYTES: usize = DEFAULT_MAX_RESPONSE_BODY_BYTES;
+pub const MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_MAX_PENDING_PRIVILEGED_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024 * 1024;
 
 static NEXT_ENGINE_PRIVILEGED_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -58,9 +60,9 @@ impl EnginePrivilegedRequestId {
 
 /// One-shot request handle bound to the exact source authority snapshot and request kind.
 ///
-/// This generic handle is used only for privileged request kinds that do not require an additional
-/// payload. Network requests must use `EngineNetworkPrivilegedRequest` so the target cannot be
-/// omitted from the one-shot lifecycle.
+/// This generic handle is retained as a fail-closed compatibility shape only. Both current
+/// concrete request kinds require specialized envelopes: Network requests bind a full Fetch
+/// correlation envelope and Clipboard requests bind an exact bounded read/write operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EnginePrivilegedRequest {
     id: EnginePrivilegedRequestId,
@@ -79,6 +81,86 @@ impl EnginePrivilegedRequest {
 
     pub const fn kind(self) -> EnginePrivilegedRequestKind {
         self.kind
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineClipboardOperationKind {
+    ReadText,
+    WriteText,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum EngineClipboardOperation {
+    ReadText { max_result_bytes: usize },
+    WriteText { text: Arc<str> },
+}
+
+/// One-shot Clipboard request bound to the exact committed remote-document authority and an exact
+/// bounded text operation.
+///
+/// This is correlation state only. Registration does not grant a Rarog Clipboard capability and
+/// consumption never calls an OS/platform clipboard service in this slice. Write text is retained
+/// in immutable shared storage so cloning a handle does not duplicate the allocation; Debug output
+/// exposes only safe operation/size metadata.
+#[derive(Clone, PartialEq, Eq)]
+pub struct EngineClipboardPrivilegedRequest {
+    id: EnginePrivilegedRequestId,
+    authority: EngineCommittedDocumentAuthority,
+    operation: EngineClipboardOperation,
+}
+
+impl EngineClipboardPrivilegedRequest {
+    pub const fn id(&self) -> EnginePrivilegedRequestId {
+        self.id
+    }
+
+    pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
+        self.authority
+    }
+
+    pub fn operation_kind(&self) -> EngineClipboardOperationKind {
+        match &self.operation {
+            EngineClipboardOperation::ReadText { .. } => EngineClipboardOperationKind::ReadText,
+            EngineClipboardOperation::WriteText { .. } => EngineClipboardOperationKind::WriteText,
+        }
+    }
+
+    pub fn max_read_text_bytes(&self) -> Option<usize> {
+        match &self.operation {
+            EngineClipboardOperation::ReadText { max_result_bytes } => Some(*max_result_bytes),
+            EngineClipboardOperation::WriteText { .. } => None,
+        }
+    }
+
+    pub fn write_text(&self) -> Option<&str> {
+        match &self.operation {
+            EngineClipboardOperation::ReadText { .. } => None,
+            EngineClipboardOperation::WriteText { text } => Some(text),
+        }
+    }
+
+    fn write_text_bytes(&self) -> usize {
+        self.write_text().map_or(0, str::len)
+    }
+}
+
+impl fmt::Debug for EngineClipboardPrivilegedRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("EngineClipboardPrivilegedRequest");
+        debug
+            .field("id", &self.id)
+            .field("authority", &self.authority)
+            .field("operation", &self.operation_kind());
+        match &self.operation {
+            EngineClipboardOperation::ReadText { max_result_bytes } => {
+                debug.field("max_result_bytes", max_result_bytes);
+            }
+            EngineClipboardOperation::WriteText { text } => {
+                debug.field("write_text_bytes", &text.len());
+            }
+        }
+        debug.finish()
     }
 }
 
@@ -199,17 +281,33 @@ impl fmt::Debug for EngineNetworkPrivilegedRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PendingPrivilegedRequest {
-    Generic(EnginePrivilegedRequest),
     Network(EngineNetworkPrivilegedRequest),
+    Clipboard(EngineClipboardPrivilegedRequest),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnginePrivilegedRequestError {
     InvalidLimit,
     InvalidNetworkBodyBudget,
+    InvalidClipboardTextBudget,
     CapacityExceeded,
     IdentitySpaceExhausted,
     NetworkTargetRequired,
+    ClipboardOperationRequired,
+    ClipboardReadTextLimitOutOfRange {
+        bytes: usize,
+        max: usize,
+    },
+    ClipboardWriteTextTooLong {
+        bytes: usize,
+        max: usize,
+    },
+    ClipboardTextBudgetExceeded {
+        pending: usize,
+        requested: usize,
+        max: usize,
+    },
+    ClipboardTextAccountingInvariant,
     NetworkTargetTooLong {
         bytes: usize,
         max: usize,
@@ -256,12 +354,36 @@ impl fmt::Display for EnginePrivilegedRequestError {
             Self::InvalidNetworkBodyBudget => {
                 formatter.write_str("privileged Network body budget must be non-zero")
             }
+            Self::InvalidClipboardTextBudget => {
+                formatter.write_str("privileged Clipboard text budget must be non-zero")
+            }
             Self::CapacityExceeded => formatter.write_str("privileged request limit reached"),
             Self::IdentitySpaceExhausted => {
                 formatter.write_str("privileged request identity space is exhausted")
             }
             Self::NetworkTargetRequired => {
                 formatter.write_str("Network privileged requests require a target-bound request")
+            }
+            Self::ClipboardOperationRequired => formatter
+                .write_str("Clipboard privileged requests require an operation-bound request"),
+            Self::ClipboardReadTextLimitOutOfRange { bytes, max } => write!(
+                formatter,
+                "Clipboard read-text result limit is {bytes} bytes; allowed range is 1..={max} bytes"
+            ),
+            Self::ClipboardWriteTextTooLong { bytes, max } => write!(
+                formatter,
+                "Clipboard write text is {bytes} bytes; maximum is {max} bytes"
+            ),
+            Self::ClipboardTextBudgetExceeded {
+                pending,
+                requested,
+                max,
+            } => write!(
+                formatter,
+                "Clipboard privileged request text budget exceeded: {pending} pending bytes + {requested} requested bytes; maximum is {max} bytes"
+            ),
+            Self::ClipboardTextAccountingInvariant => {
+                formatter.write_str("privileged Clipboard text accounting invariant was violated")
             }
             Self::NetworkTargetTooLong { bytes, max } => write!(
                 formatter,
@@ -413,24 +535,27 @@ fn bind_network_destination(
 ///
 /// Registration allocates only a one-shot correlation identity. It does not validate or grant
 /// authority. Request IDs are process-global and monotonic so rebuilding a tracker cannot make an
-/// old copied handle collide with a newly registered request. Generic registration cannot create a
-/// Network request: Network attempts must retain an exact bounded target, canonical Rarog method,
-/// bounded canonical Rarog headers, exact optional bounded body and canonical Fetch envelope
-/// metadata. Consumption removes the exact stored request and releases its tracker-accounted body
-/// bytes before source/target policy.
+/// old copied handle collide with a newly registered request. Generic registration cannot create
+/// either current concrete request kind: Network attempts must retain the exact bounded Fetch
+/// correlation envelope, while Clipboard attempts must retain an exact bounded read/write
+/// operation. Consumption removes the exact stored request and releases tracker-accounted Network
+/// body / Clipboard write-text bytes before equality and source/target policy.
 #[derive(Debug)]
 pub struct EnginePrivilegedRequestTracker {
     max_pending: usize,
     max_pending_network_body_bytes: usize,
     pending_network_body_bytes: usize,
+    max_pending_clipboard_text_bytes: usize,
+    pending_clipboard_text_bytes: usize,
     pending: BTreeMap<EnginePrivilegedRequestId, PendingPrivilegedRequest>,
 }
 
 impl EnginePrivilegedRequestTracker {
     pub fn try_new(max_pending: usize) -> Result<Self, EnginePrivilegedRequestError> {
-        Self::try_new_with_body_budget(
+        Self::try_new_with_budgets(
             max_pending,
             DEFAULT_MAX_PENDING_PRIVILEGED_NETWORK_BODY_BYTES,
+            DEFAULT_MAX_PENDING_PRIVILEGED_CLIPBOARD_TEXT_BYTES,
         )
     }
 
@@ -438,17 +563,34 @@ impl EnginePrivilegedRequestTracker {
         max_pending: usize,
         max_pending_network_body_bytes: usize,
     ) -> Result<Self, EnginePrivilegedRequestError> {
+        Self::try_new_with_budgets(
+            max_pending,
+            max_pending_network_body_bytes,
+            DEFAULT_MAX_PENDING_PRIVILEGED_CLIPBOARD_TEXT_BYTES,
+        )
+    }
+
+    pub fn try_new_with_budgets(
+        max_pending: usize,
+        max_pending_network_body_bytes: usize,
+        max_pending_clipboard_text_bytes: usize,
+    ) -> Result<Self, EnginePrivilegedRequestError> {
         if max_pending == 0 {
             return Err(EnginePrivilegedRequestError::InvalidLimit);
         }
         if max_pending_network_body_bytes == 0 {
             return Err(EnginePrivilegedRequestError::InvalidNetworkBodyBudget);
         }
+        if max_pending_clipboard_text_bytes == 0 {
+            return Err(EnginePrivilegedRequestError::InvalidClipboardTextBudget);
+        }
 
         Ok(Self {
             max_pending,
             max_pending_network_body_bytes,
             pending_network_body_bytes: 0,
+            max_pending_clipboard_text_bytes,
+            pending_clipboard_text_bytes: 0,
             pending: BTreeMap::new(),
         })
     }
@@ -469,27 +611,108 @@ impl EnginePrivilegedRequestTracker {
         self.pending_network_body_bytes
     }
 
+    pub const fn max_pending_clipboard_text_bytes(&self) -> usize {
+        self.max_pending_clipboard_text_bytes
+    }
+
+    pub const fn pending_clipboard_text_bytes(&self) -> usize {
+        self.pending_clipboard_text_bytes
+    }
+
     pub fn pending_requests(&self) -> usize {
         self.pending.len()
     }
 
     pub fn register(
         &mut self,
-        authority: EngineCommittedDocumentAuthority,
+        _authority: EngineCommittedDocumentAuthority,
         kind: EnginePrivilegedRequestKind,
     ) -> Result<EnginePrivilegedRequest, EnginePrivilegedRequestError> {
-        if matches!(kind, EnginePrivilegedRequestKind::Network) {
-            return Err(EnginePrivilegedRequestError::NetworkTargetRequired);
+        match kind {
+            EnginePrivilegedRequestKind::Network => {
+                Err(EnginePrivilegedRequestError::NetworkTargetRequired)
+            }
+            EnginePrivilegedRequestKind::Clipboard => {
+                Err(EnginePrivilegedRequestError::ClipboardOperationRequired)
+            }
+        }
+    }
+
+    /// Registers a Clipboard text read request with the exact product maximum result bound.
+    pub fn register_clipboard_read(
+        &mut self,
+        authority: EngineCommittedDocumentAuthority,
+    ) -> Result<EngineClipboardPrivilegedRequest, EnginePrivilegedRequestError> {
+        self.register_clipboard_read_with_limit(authority, MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES)
+    }
+
+    /// Registers a Clipboard text read request with an exact non-zero bounded result limit.
+    pub fn register_clipboard_read_with_limit(
+        &mut self,
+        authority: EngineCommittedDocumentAuthority,
+        max_result_bytes: usize,
+    ) -> Result<EngineClipboardPrivilegedRequest, EnginePrivilegedRequestError> {
+        if max_result_bytes == 0 || max_result_bytes > MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES {
+            return Err(
+                EnginePrivilegedRequestError::ClipboardReadTextLimitOutOfRange {
+                    bytes: max_result_bytes,
+                    max: MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES,
+                },
+            );
         }
         self.ensure_capacity()?;
 
         let id = allocate_privileged_request_id()?;
-        let request = EnginePrivilegedRequest {
+        let request = EngineClipboardPrivilegedRequest {
             id,
             authority,
-            kind,
+            operation: EngineClipboardOperation::ReadText { max_result_bytes },
         };
-        self.insert_pending(id, PendingPrivilegedRequest::Generic(request));
+        self.insert_pending(id, PendingPrivilegedRequest::Clipboard(request.clone()));
+        Ok(request)
+    }
+
+    /// Registers an exact bounded Clipboard text write request.
+    pub fn register_clipboard_write(
+        &mut self,
+        authority: EngineCommittedDocumentAuthority,
+        text: impl Into<String>,
+    ) -> Result<EngineClipboardPrivilegedRequest, EnginePrivilegedRequestError> {
+        let text = text.into();
+        let text_bytes = text.len();
+        if text_bytes > MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES {
+            return Err(EnginePrivilegedRequestError::ClipboardWriteTextTooLong {
+                bytes: text_bytes,
+                max: MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES,
+            });
+        }
+        let next_text_bytes = self
+            .pending_clipboard_text_bytes
+            .checked_add(text_bytes)
+            .ok_or(EnginePrivilegedRequestError::ClipboardTextBudgetExceeded {
+                pending: self.pending_clipboard_text_bytes,
+                requested: text_bytes,
+                max: self.max_pending_clipboard_text_bytes,
+            })?;
+        if next_text_bytes > self.max_pending_clipboard_text_bytes {
+            return Err(EnginePrivilegedRequestError::ClipboardTextBudgetExceeded {
+                pending: self.pending_clipboard_text_bytes,
+                requested: text_bytes,
+                max: self.max_pending_clipboard_text_bytes,
+            });
+        }
+        self.ensure_capacity()?;
+
+        let id = allocate_privileged_request_id()?;
+        let request = EngineClipboardPrivilegedRequest {
+            id,
+            authority,
+            operation: EngineClipboardOperation::WriteText {
+                text: Arc::<str>::from(text),
+            },
+        };
+        self.insert_pending(id, PendingPrivilegedRequest::Clipboard(request.clone()));
+        self.pending_clipboard_text_bytes = next_text_bytes;
         Ok(request)
     }
 
@@ -699,26 +922,37 @@ impl EnginePrivilegedRequestTracker {
         Ok(request)
     }
 
-    /// Consumes an exact generic request before checking its source authority.
+    /// Consumes a legacy generic handle only to fail closed.
     ///
-    /// Replays are therefore rejected even when the source document is still current. A handle
-    /// with the right ID but mismatched source/kind also burns that slot and fails closed. If the
-    /// ID actually belongs to a Network request, its tracker-accounted body bytes are released
-    /// before returning the mismatch.
+    /// No current concrete request kind can be registered through the generic path. If a stale
+    /// caller presents a generic handle whose ID belongs to a specialized request, the stored
+    /// request is burned and its accounting is released before returning `MismatchedRequest`.
     pub fn preflight_once(
         &mut self,
-        host: &EngineHost,
+        _host: &EngineHost,
         request: EnginePrivilegedRequest,
     ) -> Result<EnginePrivilegedRequestDecision, EnginePrivilegedRequestError> {
-        let stored = self.remove_pending(request.id)?;
-        let PendingPrivilegedRequest::Generic(stored) = stored else {
-            return Err(EnginePrivilegedRequestError::MismatchedRequest(request.id));
+        let id = request.id;
+        let _stored = self.remove_pending(id)?;
+        Err(EnginePrivilegedRequestError::MismatchedRequest(id))
+    }
+
+    /// Consumes an exact operation-bound Clipboard request before source policy.
+    pub fn preflight_clipboard_once(
+        &mut self,
+        host: &EngineHost,
+        request: EngineClipboardPrivilegedRequest,
+    ) -> Result<EnginePrivilegedRequestDecision, EnginePrivilegedRequestError> {
+        let id = request.id;
+        let stored = self.remove_pending(id)?;
+        let PendingPrivilegedRequest::Clipboard(stored) = stored else {
+            return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
         };
         if stored != request {
-            return Err(EnginePrivilegedRequestError::MismatchedRequest(request.id));
+            return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
         }
 
-        host.preflight_privileged_request(stored.authority, stored.kind)
+        host.preflight_privileged_request(stored.authority, EnginePrivilegedRequestKind::Clipboard)
             .map_err(EnginePrivilegedRequestError::from)
     }
 
@@ -766,14 +1000,20 @@ impl EnginePrivilegedRequestTracker {
             .pending
             .remove(&id)
             .ok_or(EnginePrivilegedRequestError::UnknownRequest(id))?;
-        let body_bytes = match &request {
-            PendingPrivilegedRequest::Generic(_) => 0,
-            PendingPrivilegedRequest::Network(request) => request.body_bytes(),
+        let (body_bytes, clipboard_text_bytes) = match &request {
+            PendingPrivilegedRequest::Network(request) => (request.body_bytes(), 0),
+            PendingPrivilegedRequest::Clipboard(request) => (0, request.write_text_bytes()),
         };
-        self.pending_network_body_bytes =
-            self.pending_network_body_bytes
-                .checked_sub(body_bytes)
-                .ok_or(EnginePrivilegedRequestError::NetworkBodyAccountingInvariant)?;
+        let next_network_body_bytes = self
+            .pending_network_body_bytes
+            .checked_sub(body_bytes)
+            .ok_or(EnginePrivilegedRequestError::NetworkBodyAccountingInvariant)?;
+        let next_clipboard_text_bytes = self
+            .pending_clipboard_text_bytes
+            .checked_sub(clipboard_text_bytes)
+            .ok_or(EnginePrivilegedRequestError::ClipboardTextAccountingInvariant)?;
+        self.pending_network_body_bytes = next_network_body_bytes;
+        self.pending_clipboard_text_bytes = next_clipboard_text_bytes;
         Ok(request)
     }
 
@@ -806,6 +1046,10 @@ impl EngineHost {
         Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
     }
 }
+
+#[cfg(test)]
+#[path = "privileged_request_clipboard_tests.rs"]
+mod clipboard_tests;
 
 #[cfg(test)]
 #[path = "privileged_request_network_body_tests.rs"]
@@ -1068,20 +1312,23 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(2).expect("tracker");
         let request = tracker
-            .register(current.authority(), EnginePrivilegedRequestKind::Clipboard)
+            .register_clipboard_read(current.authority())
             .expect("register request");
 
         assert!(request.id().get() > 0);
         assert_eq!(request.authority(), current.authority());
-        assert_eq!(request.kind(), EnginePrivilegedRequestKind::Clipboard);
+        assert_eq!(
+            request.operation_kind(),
+            EngineClipboardOperationKind::ReadText
+        );
         assert_eq!(tracker.pending_requests(), 1);
         assert_eq!(
-            tracker.preflight_once(&host, request),
+            tracker.preflight_clipboard_once(&host, request.clone()),
             Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
         );
         assert_eq!(tracker.pending_requests(), 0);
         assert_eq!(
-            tracker.preflight_once(&host, request),
+            tracker.preflight_clipboard_once(&host, request.clone()),
             Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
         );
     }
@@ -1098,7 +1345,7 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
-            .register(first.authority(), EnginePrivilegedRequestKind::Clipboard)
+            .register_clipboard_read(first.authority())
             .expect("register request");
 
         let replacement = commit_remote(
@@ -1110,7 +1357,7 @@ mod tests {
         assert_eq!(replacement.site_process(), first.site_process());
         assert_ne!(replacement.navigation_context(), first.navigation_context());
         assert_eq!(
-            tracker.preflight_once(&host, request),
+            tracker.preflight_clipboard_once(&host, request.clone()),
             Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
         );
         assert_eq!(tracker.pending_requests(), 0);
@@ -1471,7 +1718,7 @@ mod tests {
         assert_eq!(tracker.pending_requests(), 0);
 
         tracker
-            .register(current.authority(), EnginePrivilegedRequestKind::Clipboard)
+            .register_clipboard_read(current.authority())
             .expect("capacity remains available");
         assert_eq!(tracker.pending_requests(), 1);
     }
@@ -1503,7 +1750,7 @@ mod tests {
         );
         assert_eq!(tracker.pending_requests(), 0);
         tracker
-            .register(current.authority(), EnginePrivilegedRequestKind::Clipboard)
+            .register_clipboard_read(current.authority())
             .expect("capacity remains available");
     }
 
@@ -1531,7 +1778,7 @@ mod tests {
         );
         assert_eq!(tracker.pending_requests(), 0);
         tracker
-            .register(current.authority(), EnginePrivilegedRequestKind::Clipboard)
+            .register_clipboard_read(current.authority())
             .expect("capacity remains available");
     }
 
@@ -1655,7 +1902,7 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
-            .register(current.authority(), EnginePrivilegedRequestKind::Clipboard)
+            .register_clipboard_read(current.authority())
             .expect("register request");
         let forged = EnginePrivilegedRequest {
             id: request.id,
@@ -1671,7 +1918,7 @@ mod tests {
         );
         assert_eq!(tracker.pending_requests(), 0);
         assert_eq!(
-            tracker.preflight_once(&host, request),
+            tracker.preflight_clipboard_once(&host, request.clone()),
             Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
         );
     }
@@ -1693,7 +1940,7 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let first = tracker
-            .register(current.authority(), EnginePrivilegedRequestKind::Clipboard)
+            .register_clipboard_read(current.authority())
             .expect("first request");
 
         assert_eq!(tracker.max_pending(), 1);
@@ -1713,7 +1960,7 @@ mod tests {
         );
         assert_eq!(tracker.pending_requests(), 1);
         assert_eq!(
-            tracker.preflight_once(&host, first),
+            tracker.preflight_clipboard_once(&host, first),
             Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
         );
     }
