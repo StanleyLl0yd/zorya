@@ -1,7 +1,9 @@
 use crate::engine::{
     EngineCommittedDocumentAuthority, EngineCommittedDocumentSource, EngineHost, EngineHostError,
 };
-use crate::network_target_policy::EngineNetworkTargetDecision;
+use crate::network_target_policy::{
+    EngineNetworkTargetDecision, preflight_consumed_network_target,
+};
 use rarog_fetch::{
     CredentialsMode, DEFAULT_MAX_RESPONSE_BODY_BYTES, FetchMethod, HeaderList, RedirectMode,
     RequestDestination, RequestMode,
@@ -903,7 +905,8 @@ impl EnginePrivilegedRequestTracker {
     /// Same-ID source, method, headers, body, mode, credentials, redirect, destination, response
     /// limit or target mismatches burn the stored slot. Stored body
     /// bytes are released from tracker accounting before equality or policy. For an exact handle,
-    /// `preflight_network_target` revalidates source authority before parsing/classifying the raw
+    /// crate-private Network target policy revalidates source authority before parsing/classifying
+    /// the raw
     /// target. The current policy remains non-authorizing; retained method/headers/body/envelope
     /// metadata and response limit are correlation data for a later reviewed Fetch/broker path and
     /// are not executed or enforced here.
@@ -921,7 +924,7 @@ impl EnginePrivilegedRequestTracker {
             return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
         }
 
-        host.preflight_network_target(&stored.source, stored.target())
+        preflight_consumed_network_target(host, &stored.source, stored.target())
             .map_err(EnginePrivilegedRequestError::from)
     }
 

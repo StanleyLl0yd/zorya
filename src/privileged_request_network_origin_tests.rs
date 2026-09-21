@@ -96,10 +96,16 @@ fn same_site_different_origin_remains_target_policy_not_origin_policy() {
         .expect("other-port Origin");
     assert_ne!(source.origin(), &other);
     assert!(source.origin().site().same_site(&other.site()));
+
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+    let request = tracker
+        .register_network(&source, "http://127.0.0.1:1/resource")
+        .expect("register one-shot target");
     assert_eq!(
-        host.preflight_network_target(&source, "http://127.0.0.1:1/resource"),
+        tracker.preflight_network_once(&host, request),
         Ok(EngineNetworkTargetDecision::DeniedUnsupported)
     );
+    assert_eq!(tracker.pending_requests(), 0);
 }
 
 #[test]
@@ -184,9 +190,17 @@ fn stale_source_precedes_target_classification() {
 #[test]
 fn closed_recreated_view_cannot_reuse_old_source() {
     let (tab, mut host, stale, _location) = current_source("/origin-old-view");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(2).expect("tracker");
+    let closed_request = tracker
+        .register_network(&stale, "../relative")
+        .expect("register pre-close request");
+    let recreated_request = tracker
+        .register_network(&stale, "http://127.0.0.1:1/resource")
+        .expect("register pre-recreate request");
+
     assert!(host.close_view(tab).expect("close source view"));
     assert_eq!(
-        host.preflight_network_target(&stale, "../relative"),
+        tracker.preflight_network_once(&host, closed_request),
         Ok(EngineNetworkTargetDecision::DeniedStaleAuthority)
     );
 
@@ -194,7 +208,8 @@ fn closed_recreated_view_cannot_reuse_old_source() {
     let current = commit_remote(&mut host, tab, serve_once("/origin-new-view"));
     assert_ne!(current.view_generation(), stale.view_generation());
     assert_eq!(
-        host.preflight_network_target(&stale, "http://127.0.0.1:1/resource"),
+        tracker.preflight_network_once(&host, recreated_request),
         Ok(EngineNetworkTargetDecision::DeniedStaleAuthority)
     );
+    assert_eq!(tracker.pending_requests(), 0);
 }
