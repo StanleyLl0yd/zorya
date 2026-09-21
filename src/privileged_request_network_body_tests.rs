@@ -352,7 +352,7 @@ fn cross_kind_mismatch_burns_network_slot_and_releases_body_budget() {
         .expect("register body request");
     let forged = EngineClipboardPrivilegedRequest {
         id: request.id,
-        authority: request.authority(),
+        source: request.source.clone(),
         operation: EngineClipboardOperation::ReadText {
             max_result_bytes: 1,
         },
