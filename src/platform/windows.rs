@@ -4,7 +4,7 @@ use crate::async_lifecycle::{
 };
 use crate::branding::application_icon;
 use crate::engine::{
-    EngineFrameCause, EngineFrameRequest, EngineHost, EngineNavigationPoll,
+    EngineFrameCause, EngineFrameRequest, EngineHost, EngineInternalPage, EngineNavigationPoll,
     EngineNavigationRequest, Viewport,
 };
 use crate::{
@@ -44,8 +44,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Icon, Theme, Window, WindowId};
 
-const START_LOCATION: &str = "about:blank";
-const START_PAGE: &str = include_str!("../../assets/z1-start.html");
+const START_LOCATION: &str = EngineInternalPage::Start.display_location();
 const HTTP_SMOKE_BODY: &str = "<main>Zorya real HTTP navigation</main>";
 const NAVIGATION_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const PRODUCT_DATA_DIRECTORY: &str = "Zorya";
@@ -4512,7 +4511,7 @@ fn render_worker_main(
                             Ok(()) => WorkerNavigationOutcome::Committed {
                                 location,
                                 status: 200,
-                                source_bytes: START_PAGE.len(),
+                                source_bytes: EngineInternalPage::Start.source_bytes(),
                             },
                             Err(message) => WorkerNavigationOutcome::InternalFailure { message },
                         };
@@ -4595,7 +4594,7 @@ impl RenderWorker {
             .create_view(tab)
             .map_err(|error| format!("failed to create Rarog View: {error}"))?;
         engine
-            .load_local_html(tab, START_PAGE)
+            .load_internal_page(tab, EngineInternalPage::Start)
             .map_err(|error| format!("failed to load Z1 start fixture: {error}"))?;
 
         if cancellation.is_cancelled() {
@@ -4664,7 +4663,10 @@ impl RenderWorker {
                 target.tab().get()
             )
         })?;
-        if let Err(error) = self.engine.load_local_html(target.tab(), START_PAGE) {
+        if let Err(error) = self
+            .engine
+            .load_internal_page(target.tab(), EngineInternalPage::Start)
+        {
             let _ = self.engine.close_view(target.tab());
             return Err(format!(
                 "failed to load start document for tab {}: {error}",
@@ -4719,7 +4721,7 @@ impl RenderWorker {
             .create_view(target.tab())
             .map_err(|error| format!("failed to create fresh profile View: {error}"))?;
         engine
-            .load_local_html(target.tab(), START_PAGE)
+            .load_internal_page(target.tab(), EngineInternalPage::Start)
             .map_err(|error| format!("failed to load fresh profile start document: {error}"))?;
 
         self.engine = engine;
@@ -4753,7 +4755,8 @@ impl RenderWorker {
             ));
         }
         self.engine
-            .load_local_html(target.tab, START_PAGE)
+            .load_internal_page(target.tab, EngineInternalPage::Start)
+            .map(|_| ())
             .map_err(|error| format!("failed to reload local start document: {error}"))
     }
 
