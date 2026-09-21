@@ -100,10 +100,7 @@ fn clipboard_read_binds_exact_default_and_explicit_limits() {
         .register_clipboard_read_with_limit(&current, 4096)
         .expect("explicit read");
     let maximum = tracker
-        .register_clipboard_read_with_limit(
-            &current,
-            MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES,
-        )
+        .register_clipboard_read_with_limit(&current, MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES)
         .expect("explicit maximum read");
     assert_eq!(minimum.max_read_text_bytes(), Some(1));
     assert_eq!(middle.max_read_text_bytes(), Some(4096));
@@ -341,16 +338,9 @@ fn clipboard_source_substitution_burns_once_and_releases_write_budget() {
     let request = tracker
         .register_clipboard_write(&first, "source-bound")
         .expect("Clipboard request");
-    assert_eq!(
-        tracker.pending_clipboard_text_bytes(),
-        "source-bound".len()
-    );
+    assert_eq!(tracker.pending_clipboard_text_bytes(), "source-bound".len());
 
-    let replacement = commit_remote(
-        &mut host,
-        tab,
-        serve_once("/clipboard-source-replacement"),
-    );
+    let replacement = commit_remote(&mut host, tab, serve_once("/clipboard-source-replacement"));
     assert_ne!(replacement, first);
     let forged = EngineClipboardPrivilegedRequest {
         id: request.id,
@@ -360,7 +350,9 @@ fn clipboard_source_substitution_burns_once_and_releases_write_budget() {
 
     assert_eq!(
         tracker.preflight_clipboard_once(&host, forged),
-        Err(EnginePrivilegedRequestError::MismatchedRequest(request.id()))
+        Err(EnginePrivilegedRequestError::MismatchedRequest(
+            request.id()
+        ))
     );
     assert_eq!(tracker.pending_requests(), 0);
     assert_eq!(tracker.pending_clipboard_text_bytes(), 0);
