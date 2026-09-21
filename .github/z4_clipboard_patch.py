@@ -140,7 +140,6 @@ once(
 }
 """,
 """enum PendingPrivilegedRequest {
-    Generic(EnginePrivilegedRequest),
     Network(EngineNetworkPrivilegedRequest),
     Clipboard(EngineClipboardPrivilegedRequest),
 }
@@ -513,7 +512,6 @@ once(
         Ok(request)
 """,
 """        let (body_bytes, clipboard_text_bytes) = match &request {
-            PendingPrivilegedRequest::Generic(_) => (0, 0),
             PendingPrivilegedRequest::Network(request) => (request.body_bytes(), 0),
             PendingPrivilegedRequest::Clipboard(request) => (0, request.write_text_bytes()),
         };
@@ -949,3 +947,37 @@ fn clipboard_budget_is_independent_from_network_body_budget() {
     assert_eq!(tracker.pending_network_body_bytes(), 0);
 }
 ''')
+
+
+# Generic registration is now fail-only for both concrete kinds; there is no stored generic request.
+# Keep the compatibility preflight fail-closed so a stale caller cannot reinterpret a specialized
+# pending ID, while still releasing the specialized accounting before returning mismatch.
+p = Path("src/privileged_request.rs")
+s = p.read_text()
+start = s.index("    /// Consumes an exact generic request before checking its source authority.")
+end = s.index("    /// Consumes an exact operation-bound Clipboard request before source policy.", start)
+legacy = """    /// Consumes a legacy generic handle only to fail closed.
+    ///
+    /// No current concrete request kind can be registered through the generic path. If a stale
+    /// caller presents a generic handle whose ID belongs to a specialized request, the stored
+    /// request is burned and its accounting is released before returning §MismatchedRequest§.
+    pub fn preflight_once(
+        &mut self,
+        _host: &EngineHost,
+        request: EnginePrivilegedRequest,
+    ) -> Result<EnginePrivilegedRequestDecision, EnginePrivilegedRequestError> {
+        let id = request.id;
+        let _stored = self.remove_pending(id)?;
+        Err(EnginePrivilegedRequestError::MismatchedRequest(id))
+    }
+
+""".replace("§", chr(96))
+s = s[:start] + legacy + s[end:]
+
+# Clipboard handles are non-Copy because write payloads share Arc storage. Preserve replay IDs by
+# consuming a clone in tests that intentionally use the original handle again.
+s = s.replace(
+    "tracker.preflight_clipboard_once(&host, request),",
+    "tracker.preflight_clipboard_once(&host, request.clone()),",
+)
+p.write_text(s)
