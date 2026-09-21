@@ -906,7 +906,7 @@ impl EnginePrivilegedRequestTracker {
     /// limit or target mismatches burn the stored slot. Stored body
     /// bytes are released from tracker accounting before equality or policy. For an exact handle,
     /// crate-private Network target policy revalidates source authority before parsing/classifying
-/// the raw
+    /// the raw
     /// target. The current policy remains non-authorizing; retained method/headers/body/envelope
     /// metadata and response limit are correlation data for a later reviewed Fetch/broker path and
     /// are not executed or enforced here.
