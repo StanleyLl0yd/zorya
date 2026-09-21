@@ -101,7 +101,7 @@ fn clipboard_read_binds_exact_default_and_explicit_limits() {
         .expect("explicit read");
     let maximum = tracker
         .register_clipboard_read_with_limit(
-            current.authority(),
+            &current,
             MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES,
         )
         .expect("explicit maximum read");
