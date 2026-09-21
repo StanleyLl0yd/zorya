@@ -51,7 +51,10 @@ fn serve_invalid_utf8_once() -> String {
 
 fn serve_stalled_once() -> String {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind stalled fixture");
-    let port = listener.local_addr().expect("stalled fixture address").port();
+    let port = listener
+        .local_addr()
+        .expect("stalled fixture address")
+        .port();
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept stalled fixture");
         let mut request = [0u8; 4096];
@@ -61,7 +64,10 @@ fn serve_stalled_once() -> String {
     format!("http://127.0.0.1:{port}/stall")
 }
 
-fn poll_terminal(host: &mut EngineHost, request: crate::engine::EngineNavigationRequest) -> EngineNavigationPoll {
+fn poll_terminal(
+    host: &mut EngineHost,
+    request: crate::engine::EngineNavigationRequest,
+) -> EngineNavigationPoll {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match host.poll_navigation(request).expect("poll navigation") {
@@ -123,10 +129,7 @@ fn same_internal_page_reload_rotates_document_token_and_blocked_navigation_prese
             .expect("blocked navigation result"),
         None
     );
-    assert_eq!(
-        host.committed_internal_page_authority(tab),
-        Ok(Some(first))
-    );
+    assert_eq!(host.committed_internal_page_authority(tab), Ok(Some(first)));
 
     let second = load_start(&mut host, tab);
     assert_eq!(second.host_instance(), first.host_instance());
@@ -159,7 +162,10 @@ fn pending_cancelled_and_failed_remote_navigation_preserve_committed_internal_au
         host.committed_internal_page_authority(tab),
         Ok(Some(authority))
     );
-    assert!(host.cancel_navigation(pending).expect("cancel stalled remote"));
+    assert!(
+        host.cancel_navigation(pending)
+            .expect("cancel stalled remote")
+    );
     assert_eq!(
         host.committed_internal_page_authority(tab),
         Ok(Some(authority))

@@ -9,9 +9,9 @@ mod chrome;
 mod commands;
 pub mod engine;
 mod engine_authority;
+mod http_transport;
 #[cfg(test)]
 mod internal_page_authority_tests;
-mod http_transport;
 mod navigation;
 mod network_target_policy;
 mod platform;
