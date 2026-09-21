@@ -1,0 +1,43 @@
+name: Z4 internal-page authority validation
+
+on:
+  push:
+    branches: [z4/internal-page-authority]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
+        with:
+          ref: z4/internal-page-authority
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Format and validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo check --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          git diff --check
+      - name: Commit rustfmt output if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add             src/engine.rs             src/engine_authority.rs             src/internal_page_authority_tests.rs             src/lib.rs             src/platform/windows.rs
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "style: format internal-page authority slice"
+          git push origin HEAD:z4/internal-page-authority
