@@ -1,0 +1,26 @@
+name: Z4 specialized final validation
+
+on:
+  push:
+    branches: [z4/specialized-privileged-request-only]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
+        with:
+          ref: z4/specialized-privileged-request-only
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate final specialized privileged request slice
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo check --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          git diff --check
