@@ -34,6 +34,16 @@ These Host/context/process tokens are not product identities and are never persi
 
 The canonical Origin is shared across source/request clones and is part of exact one-shot Network request identity together with the Host authority snapshot. It is correlation state, not authorization. `Debug` output intentionally omits Origin/host/port serialization. Binding this source does not synthesize an HTTP `Origin` header and does not implement CORS or Fetch execution. Canonical mode/credentials/redirect/destination values retained by the one-shot request envelope are correlation state only and do not enact Fetch policy.
 
+## Committed internal-page authority
+
+Privileged internal-page provenance is no longer inferred from a URL-like browser string. `EngineInternalPage` is a finite Zorya product identity; in this slice only `Start` exists. `EngineHost::load_internal_page` chooses the exact bundled Start HTML internally and loads it with Rarog's local `about:blank` base. No caller-provided source can be marked as a privileged internal page. The existing `load_local_html` path remains available for deterministic local rendering/tests but is explicitly unprivileged and clears any committed internal-page authority, including when passed bytes identical to the Start asset.
+
+A committed internal document is represented by `EngineCommittedInternalPageAuthority`: exact EngineHost incarnation, stable product `TabId`, current View generation, finite page kind and a monotonic non-zero per-Host internal-document token. A same-page reload consumes a new token, so an older Start snapshot cannot become valid again merely because the page kind and `about:blank` display label match. Identity-space exhaustion fails closed before replacing the current document. Closing/recreating a View or replacing EngineHost invalidates old snapshots through the existing View-generation/Host-incarnation boundaries even when per-Host document counters collide.
+
+`committed_internal_page_authority` cross-checks the stored page state against the live Rarog View: there must be no committed remote Host context, no remote `document_url`, and the local base must still equal the page's expected `about:blank` base. `validate_committed_internal_page_authority` compares the exact current snapshot and returns false for normal stale/closed/replaced state; impossible live-state divergence remains `InconsistentNavigationState`. The browser-model history/address value `about:blank` is only a display/session label and is never consulted as security authority.
+
+Internal and remote committed authority are mutually exclusive. Beginning remote navigation does not displace a committed internal page; failed, cancelled, superseded or Host-policy-blocked attempts preserve it. A successful remote document commit clears internal-page authority and establishes the normal remote Host authority. Loading an internal or generic local document removes committed remote Host authority. This slice introduces no custom externally navigable internal scheme, privileged page action, JavaScript/native bridge, capability grant, permission decision or broker path.
+
 ## Privileged request admission
 
 `EngineHost::preflight_privileged_request` is a deny-by-default browser-product gate for future privileged requests. It first reuses committed-document authority revalidation so a replaced Host, replaced/local document, closed or recreated View is rejected as stale before any later capability policy could run. A still-current remote document reaches only `DeniedUnsupported` for both current request labels (`Network` and `Clipboard`). There is deliberately no allow/authorized result in this slice.
@@ -75,7 +85,7 @@ This boundary does not provide or claim:
 - local-file navigation or file chooser policy;
 - download mediation;
 - permission or clipboard mediation;
-- privileged internal-page authorization;
+- any privileged internal-page action, JavaScript/native bridge, permission decision or capability grant;
 - any successful Network capability policy result or grant;
 - Network response allocation, buffering or enforcement and any execution/policy semantics for the bound request mode, credentials, redirect, destination or response-body limit;
 - HTTP `Origin` header synthesis, CORS enforcement or Fetch execution;

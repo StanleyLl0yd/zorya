@@ -18,6 +18,70 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ENGINE_HOST_INSTANCE: AtomicU64 = AtomicU64::new(1);
+const START_INTERNAL_PAGE_SOURCE: &str = include_str!("../assets/z1-start.html");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineInternalPage {
+    Start,
+}
+
+impl EngineInternalPage {
+    pub const fn display_location(self) -> &'static str {
+        match self {
+            Self::Start => "about:blank",
+        }
+    }
+
+    pub const fn source_bytes(self) -> usize {
+        self.source().len()
+    }
+
+    const fn source(self) -> &'static str {
+        match self {
+            Self::Start => START_INTERNAL_PAGE_SOURCE,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EngineInternalDocumentToken(u64);
+
+impl EngineInternalDocumentToken {
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineCommittedInternalPageAuthority {
+    host_instance: EngineHostInstanceToken,
+    tab: TabId,
+    view_generation: u64,
+    document: EngineInternalDocumentToken,
+    page: EngineInternalPage,
+}
+
+impl EngineCommittedInternalPageAuthority {
+    pub const fn host_instance(self) -> EngineHostInstanceToken {
+        self.host_instance
+    }
+
+    pub const fn tab(self) -> TabId {
+        self.tab
+    }
+
+    pub const fn view_generation(self) -> u64 {
+        self.view_generation
+    }
+
+    pub const fn document(self) -> EngineInternalDocumentToken {
+        self.document
+    }
+
+    pub const fn page(self) -> EngineInternalPage {
+        self.page
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Viewport {
@@ -274,6 +338,7 @@ pub enum EngineHostError {
     UnknownTab(TabId),
     HostInstanceIdentitySpaceExhausted,
     ViewGenerationExhausted,
+    InternalDocumentIdentitySpaceExhausted,
     Host(String),
     Navigation(String),
     InconsistentNavigationState {
@@ -301,6 +366,9 @@ impl fmt::Display for EngineHostError {
             }
             Self::ViewGenerationExhausted => {
                 formatter.write_str("engine view generation space is exhausted")
+            }
+            Self::InternalDocumentIdentitySpaceExhausted => {
+                formatter.write_str("engine internal-document identity space is exhausted")
             }
             Self::Host(message) => write!(formatter, "Rarog Host authority failure: {message}"),
             Self::Navigation(message) => write!(formatter, "Rarog navigation failure: {message}"),
@@ -342,6 +410,12 @@ fn allocate_engine_host_instance() -> Result<EngineHostInstanceToken, EngineHost
     Ok(EngineHostInstanceToken(raw))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CommittedInternalPage {
+    document: EngineInternalDocumentToken,
+    page: EngineInternalPage,
+}
+
 #[derive(Clone, Copy)]
 struct PendingHostedNavigation {
     navigation: RarogNavigationId,
@@ -354,6 +428,7 @@ struct HostedView {
     generation: u64,
     view: View,
     committed_context: Option<NavigationContextId>,
+    committed_internal_page: Option<CommittedInternalPage>,
     pending_navigation: Option<PendingHostedNavigation>,
 }
 
@@ -377,6 +452,7 @@ pub struct EngineHost {
     network: Option<Box<dyn NetworkCapability>>,
     views: BTreeMap<TabId, HostedView>,
     next_view_generation: u64,
+    next_internal_document_token: u64,
 }
 
 impl EngineHost {
@@ -394,6 +470,7 @@ impl EngineHost {
             network,
             views: BTreeMap::new(),
             next_view_generation: 1,
+            next_internal_document_token: 1,
         })
     }
 
@@ -410,6 +487,7 @@ impl EngineHost {
                 generation,
                 view,
                 committed_context: None,
+                committed_internal_page: None,
                 pending_navigation: None,
             },
         );
@@ -450,6 +528,9 @@ impl EngineHost {
             .views
             .get(&tab)
             .ok_or(EngineHostError::UnknownTab(tab))?;
+        if hosted.committed_context.is_some() && hosted.committed_internal_page.is_some() {
+            return Err(EngineHostError::InconsistentNavigationState { tab });
+        }
         let Some(context) = hosted.committed_context else {
             return Ok(None);
         };
@@ -472,6 +553,34 @@ impl EngineHost {
             view_generation: hosted.generation,
             navigation_context: EngineNavigationContextToken(context.get()),
             site_process: EngineSiteProcessToken(process.get()),
+        }))
+    }
+
+    pub fn committed_internal_page_authority(
+        &self,
+        tab: TabId,
+    ) -> Result<Option<EngineCommittedInternalPageAuthority>, EngineHostError> {
+        let hosted = self
+            .views
+            .get(&tab)
+            .ok_or(EngineHostError::UnknownTab(tab))?;
+        let Some(committed) = hosted.committed_internal_page else {
+            return Ok(None);
+        };
+        if hosted.committed_context.is_some()
+            || hosted.view.document_url().is_some()
+            || hosted.view.base_url().map(BaseUrl::as_str)
+                != Some(committed.page.display_location())
+        {
+            return Err(EngineHostError::InconsistentNavigationState { tab });
+        }
+
+        Ok(Some(EngineCommittedInternalPageAuthority {
+            host_instance: self.instance,
+            tab,
+            view_generation: hosted.generation,
+            document: committed.document,
+            page: committed.page,
         }))
     }
 
@@ -556,6 +665,7 @@ impl EngineHost {
         let (pending, committed) = {
             let hosted = self.view_mut(tab)?;
             hosted.view.load_html(source, BaseUrl::about_blank())?;
+            hosted.committed_internal_page = None;
             (
                 hosted.pending_navigation.take(),
                 hosted.committed_context.take(),
@@ -571,6 +681,46 @@ impl EngineHost {
                 .map_err(|error| EngineHostError::Host(error.to_string()))?;
         }
         Ok(())
+    }
+
+    pub fn load_internal_page(
+        &mut self,
+        tab: TabId,
+        page: EngineInternalPage,
+    ) -> Result<EngineCommittedInternalPageAuthority, EngineHostError> {
+        let document = self.allocate_internal_document_token()?;
+        let (generation, pending, committed) = {
+            let hosted = self.view_mut(tab)?;
+            hosted
+                .view
+                .load_html(page.source(), BaseUrl::about_blank())?;
+            hosted.committed_internal_page = None;
+            (
+                hosted.generation,
+                hosted.pending_navigation.take(),
+                hosted.committed_context.take(),
+            )
+        };
+
+        if let Some(pending) = pending {
+            self.cancel_pending_authority(pending)?;
+        }
+        if let Some(context) = committed {
+            self.host
+                .close_navigation_context(context)
+                .map_err(|error| EngineHostError::Host(error.to_string()))?;
+        }
+
+        let authority = EngineCommittedInternalPageAuthority {
+            host_instance: self.instance,
+            tab,
+            view_generation: generation,
+            document,
+            page,
+        };
+        self.view_mut(tab)?.committed_internal_page =
+            Some(CommittedInternalPage { document, page });
+        Ok(authority)
     }
 
     pub fn begin_navigation(
@@ -716,6 +866,7 @@ impl EngineHost {
                     NavigationCompletion::Committed(commit) => {
                         let previous = {
                             let hosted = self.view_mut(request.tab)?;
+                            hosted.committed_internal_page = None;
                             hosted.committed_context.replace(pending.context)
                         };
                         if let Some(previous) = previous {
@@ -921,6 +1072,18 @@ impl EngineHost {
 
         self.next_view_generation = generation.checked_add(1).unwrap_or(0);
         Ok(generation)
+    }
+
+    fn allocate_internal_document_token(
+        &mut self,
+    ) -> Result<EngineInternalDocumentToken, EngineHostError> {
+        let raw = self.next_internal_document_token;
+        if raw == 0 {
+            return Err(EngineHostError::InternalDocumentIdentitySpaceExhausted);
+        }
+
+        self.next_internal_document_token = raw.checked_add(1).unwrap_or(0);
+        Ok(EngineInternalDocumentToken(raw))
     }
 
     fn view_mut(&mut self, tab: TabId) -> Result<&mut HostedView, EngineHostError> {
@@ -1792,6 +1955,32 @@ mod tests {
         assert_eq!(
             host.preflight_network_target(&source, "https://lost.example/resource"),
             Err(EngineHostError::InconsistentNavigationState { tab })
+        );
+    }
+
+    #[test]
+    fn internal_document_token_exhaustion_fails_before_replacing_current_document() {
+        let tab = initial_tab();
+        let mut host = EngineHost::new().expect("engine host");
+        host.create_view(tab).expect("view");
+        host.next_internal_document_token = u64::MAX;
+
+        let current = host
+            .load_internal_page(tab, EngineInternalPage::Start)
+            .expect("last internal document token");
+        assert_eq!(current.document().get(), u64::MAX);
+        assert_eq!(
+            host.committed_internal_page_authority(tab),
+            Ok(Some(current))
+        );
+
+        assert_eq!(
+            host.load_internal_page(tab, EngineInternalPage::Start),
+            Err(EngineHostError::InternalDocumentIdentitySpaceExhausted)
+        );
+        assert_eq!(
+            host.committed_internal_page_authority(tab),
+            Ok(Some(current))
         );
     }
 

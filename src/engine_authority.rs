@@ -1,4 +1,7 @@
-use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostError};
+use crate::engine::{
+    EngineCommittedDocumentAuthority, EngineCommittedInternalPageAuthority, EngineHost,
+    EngineHostError,
+};
 
 impl EngineHost {
     /// Revalidates an ephemeral committed remote-document authority snapshot against the
@@ -13,6 +16,24 @@ impl EngineHost {
         authority: EngineCommittedDocumentAuthority,
     ) -> Result<bool, EngineHostError> {
         match self.committed_document_authority(authority.tab()) {
+            Ok(current) => Ok(current == Some(authority)),
+            Err(EngineHostError::UnknownTab(tab)) if tab == authority.tab() => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Revalidates an opaque committed internal-page authority against the exact current
+    /// EngineHost incarnation, View generation, internal-document token and page kind.
+    ///
+    /// Browser history/address text is not consulted. A generic local document, committed remote
+    /// document, reloaded internal page, closed/recreated View or replacement EngineHost returns
+    /// `false`; impossible live View/authority divergence remains fail-closed through
+    /// `committed_internal_page_authority`.
+    pub fn validate_committed_internal_page_authority(
+        &self,
+        authority: EngineCommittedInternalPageAuthority,
+    ) -> Result<bool, EngineHostError> {
+        match self.committed_internal_page_authority(authority.tab()) {
             Ok(current) => Ok(current == Some(authority)),
             Err(EngineHostError::UnknownTab(tab)) if tab == authority.tab() => Ok(false),
             Err(error) => Err(error),
