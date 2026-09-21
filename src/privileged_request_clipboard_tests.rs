@@ -83,7 +83,7 @@ fn generic_clipboard_registration_is_rejected_without_consuming_capacity() {
 #[test]
 fn clipboard_read_binds_exact_default_and_explicit_limits() {
     let (_tab, host, current) = current_authority("/clipboard-read");
-    let mut tracker = EnginePrivilegedRequestTracker::try_new(3).expect("tracker");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(4).expect("tracker");
     let default = tracker
         .register_clipboard_read(current.authority())
         .expect("default read");
@@ -102,9 +102,19 @@ fn clipboard_read_binds_exact_default_and_explicit_limits() {
     let middle = tracker
         .register_clipboard_read_with_limit(current.authority(), 4096)
         .expect("explicit read");
+    let maximum = tracker
+        .register_clipboard_read_with_limit(
+            current.authority(),
+            MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES,
+        )
+        .expect("explicit maximum read");
     assert_eq!(minimum.max_read_text_bytes(), Some(1));
     assert_eq!(middle.max_read_text_bytes(), Some(4096));
-    for request in [default, minimum, middle] {
+    assert_eq!(
+        maximum.max_read_text_bytes(),
+        Some(MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES)
+    );
+    for request in [default, minimum, middle, maximum] {
         assert_eq!(
             tracker.preflight_clipboard_once(&host, request),
             Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
@@ -279,13 +289,21 @@ fn cross_kind_mismatch_releases_clipboard_and_network_accounting_before_equality
     let clipboard = clipboard_tracker
         .register_clipboard_write(current.authority(), "cross-kind")
         .expect("Clipboard write");
-    let forged_generic = EnginePrivilegedRequest {
+    let forged_network = EngineNetworkPrivilegedRequest {
         id: clipboard.id,
-        authority: clipboard.authority,
-        kind: EnginePrivilegedRequestKind::Network,
+        source: current.clone(),
+        method: FetchMethod::get(),
+        headers: HeaderList::default(),
+        body: None,
+        mode: RequestMode::Cors,
+        credentials: CredentialsMode::SameOrigin,
+        redirect: RedirectMode::Follow,
+        destination: RequestDestination::Empty,
+        max_response_body_bytes: MAX_PRIVILEGED_NETWORK_RESPONSE_BODY_BYTES,
+        target: "http://127.0.0.1:1/cross-kind-forged".to_owned(),
     };
     assert_eq!(
-        clipboard_tracker.preflight_once(&host, forged_generic),
+        clipboard_tracker.preflight_network_once(&host, forged_network),
         Err(EnginePrivilegedRequestError::MismatchedRequest(
             clipboard.id()
         ))
