@@ -61,17 +61,18 @@ enum EngineClipboardOperation {
     WriteText { text: Arc<str> },
 }
 
-/// One-shot Clipboard request bound to the exact committed remote-document authority and an exact
+/// One-shot Clipboard request bound to the exact committed remote-document source and an exact
 /// bounded text operation.
 ///
-/// This is correlation state only. Registration does not grant a Rarog Clipboard capability and
-/// consumption never calls an OS/platform clipboard service in this slice. Write text is retained
-/// in immutable shared storage so cloning a handle does not duplicate the allocation; Debug output
-/// exposes only safe operation/size metadata.
+/// Source identity is the Host-minted authority plus canonical Rarog Origin. This is correlation
+/// state only: registration does not grant a Rarog Clipboard capability and consumption never calls
+/// an OS/platform clipboard service in this slice. Write text is retained in immutable shared
+/// storage so cloning a handle does not duplicate the allocation; Debug output exposes only safe
+/// authority/operation/size metadata and never serializes the source Origin.
 #[derive(Clone, PartialEq, Eq)]
 pub struct EngineClipboardPrivilegedRequest {
     id: EnginePrivilegedRequestId,
-    authority: EngineCommittedDocumentAuthority,
+    source: EngineCommittedDocumentSource,
     operation: EngineClipboardOperation,
 }
 
@@ -80,8 +81,16 @@ impl EngineClipboardPrivilegedRequest {
         self.id
     }
 
+    pub fn source(&self) -> &EngineCommittedDocumentSource {
+        &self.source
+    }
+
     pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
-        self.authority
+        self.source.authority()
+    }
+
+    pub fn source_origin(&self) -> &rarog_url::Origin {
+        self.source.origin()
     }
 
     pub fn operation_kind(&self) -> EngineClipboardOperationKind {
@@ -115,7 +124,7 @@ impl fmt::Debug for EngineClipboardPrivilegedRequest {
         let mut debug = formatter.debug_struct("EngineClipboardPrivilegedRequest");
         debug
             .field("id", &self.id)
-            .field("authority", &self.authority)
+            .field("authority", &self.source.authority())
             .field("operation", &self.operation_kind());
         match &self.operation {
             EngineClipboardOperation::ReadText { max_result_bytes } => {
@@ -584,15 +593,15 @@ impl EnginePrivilegedRequestTracker {
     /// Registers a Clipboard text read request with the exact product maximum result bound.
     pub fn register_clipboard_read(
         &mut self,
-        authority: EngineCommittedDocumentAuthority,
+        source: &EngineCommittedDocumentSource,
     ) -> Result<EngineClipboardPrivilegedRequest, EnginePrivilegedRequestError> {
-        self.register_clipboard_read_with_limit(authority, MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES)
+        self.register_clipboard_read_with_limit(source, MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES)
     }
 
     /// Registers a Clipboard text read request with an exact non-zero bounded result limit.
     pub fn register_clipboard_read_with_limit(
         &mut self,
-        authority: EngineCommittedDocumentAuthority,
+        source: &EngineCommittedDocumentSource,
         max_result_bytes: usize,
     ) -> Result<EngineClipboardPrivilegedRequest, EnginePrivilegedRequestError> {
         if max_result_bytes == 0 || max_result_bytes > MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES {
@@ -608,7 +617,7 @@ impl EnginePrivilegedRequestTracker {
         let id = allocate_privileged_request_id()?;
         let request = EngineClipboardPrivilegedRequest {
             id,
-            authority,
+            source: source.clone(),
             operation: EngineClipboardOperation::ReadText { max_result_bytes },
         };
         self.insert_pending(id, PendingPrivilegedRequest::Clipboard(request.clone()));
@@ -618,7 +627,7 @@ impl EnginePrivilegedRequestTracker {
     /// Registers an exact bounded Clipboard text write request.
     pub fn register_clipboard_write(
         &mut self,
-        authority: EngineCommittedDocumentAuthority,
+        source: &EngineCommittedDocumentSource,
         text: impl Into<String>,
     ) -> Result<EngineClipboardPrivilegedRequest, EnginePrivilegedRequestError> {
         let text = text.into();
@@ -649,7 +658,7 @@ impl EnginePrivilegedRequestTracker {
         let id = allocate_privileged_request_id()?;
         let request = EngineClipboardPrivilegedRequest {
             id,
-            authority,
+            source: source.clone(),
             operation: EngineClipboardOperation::WriteText {
                 text: Arc::<str>::from(text),
             },
@@ -884,7 +893,7 @@ impl EnginePrivilegedRequestTracker {
             return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
         }
 
-        host.preflight_clipboard_source(stored.authority)
+        host.preflight_clipboard_source(&stored.source)
             .map_err(EnginePrivilegedRequestError::from)
     }
 
@@ -967,9 +976,15 @@ impl EngineHost {
     /// committed authority alone is not a public privileged-request admission surface.
     fn preflight_clipboard_source(
         &self,
-        authority: EngineCommittedDocumentAuthority,
+        source: &EngineCommittedDocumentSource,
     ) -> Result<EngineClipboardRequestDecision, EngineHostError> {
-        if !self.validate_committed_document_authority(authority)? {
+        if !self.validate_committed_document_authority(source.authority())? {
+            return Ok(EngineClipboardRequestDecision::DeniedStaleAuthority);
+        }
+        let Some(current_source) = self.committed_document_source(source.tab())? else {
+            return Ok(EngineClipboardRequestDecision::DeniedStaleAuthority);
+        };
+        if &current_source != source {
             return Ok(EngineClipboardRequestDecision::DeniedStaleAuthority);
         }
 
@@ -1086,7 +1101,7 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(2).expect("tracker");
         let request = tracker
-            .register_clipboard_read(current.authority())
+            .register_clipboard_read(&current)
             .expect("register request");
 
         assert!(request.id().get() > 0);
@@ -1119,7 +1134,7 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let request = tracker
-            .register_clipboard_read(first.authority())
+            .register_clipboard_read(&first)
             .expect("register request");
 
         let replacement = commit_remote(
@@ -1492,7 +1507,7 @@ mod tests {
         assert_eq!(tracker.pending_requests(), 0);
 
         tracker
-            .register_clipboard_read(current.authority())
+            .register_clipboard_read(&current)
             .expect("capacity remains available");
         assert_eq!(tracker.pending_requests(), 1);
     }
@@ -1524,7 +1539,7 @@ mod tests {
         );
         assert_eq!(tracker.pending_requests(), 0);
         tracker
-            .register_clipboard_read(current.authority())
+            .register_clipboard_read(&current)
             .expect("capacity remains available");
     }
 
@@ -1552,7 +1567,7 @@ mod tests {
         );
         assert_eq!(tracker.pending_requests(), 0);
         tracker
-            .register_clipboard_read(current.authority())
+            .register_clipboard_read(&current)
             .expect("capacity remains available");
     }
 
@@ -1681,7 +1696,7 @@ mod tests {
         );
         let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
         let first = tracker
-            .register_clipboard_read(current.authority())
+            .register_clipboard_read(&current)
             .expect("first request");
 
         assert_eq!(tracker.max_pending(), 1);

@@ -218,11 +218,13 @@ impl EngineCommittedDocumentAuthority {
     }
 }
 
-/// Ephemeral committed remote-document Network source identity.
+/// Ephemeral committed remote-document privileged source identity.
 ///
 /// The authority remains Host-lifetime state while `origin` is the exact canonical Rarog
-/// Origin of the currently committed remote document. The Origin is shared across clones
-/// and deliberately omitted from `Debug` so host/port data cannot leak through diagnostics.
+/// Origin of the currently committed remote document. Reviewed Network and Clipboard correlation
+/// paths reuse this same Host-minted source instead of reconstructing origin identity. The Origin is
+/// shared across clones and deliberately omitted from `Debug` so host/port data cannot leak
+/// through diagnostics.
 #[derive(Clone, PartialEq, Eq)]
 pub struct EngineCommittedDocumentSource {
     authority: EngineCommittedDocumentAuthority,
