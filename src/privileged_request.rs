@@ -25,22 +25,13 @@ pub const DEFAULT_MAX_PENDING_PRIVILEGED_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024
 
 static NEXT_ENGINE_PRIVILEGED_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Browser-product taxonomy for future privileged capability requests.
+/// Fail-closed result of exact Clipboard request source preflight.
 ///
-/// These values are request labels only. They are not Rarog capability classes or grants.
+/// There is intentionally no allow/authorized variant. A current committed remote-document
+/// authority only proves that the operation-bound Clipboard request source is not stale; actual
+/// Clipboard capability/permission/backend work remains a separate reviewed boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EnginePrivilegedRequestKind {
-    Network,
-    Clipboard,
-}
-
-/// Fail-closed result of the privileged-request source preflight.
-///
-/// There is intentionally no allow/authorized variant in this Z4 slice. A current committed
-/// authority only proves that the request source is not stale; the requested operation remains
-/// unsupported until a separately reviewed capability-brokering policy exists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EnginePrivilegedRequestDecision {
+pub enum EngineClipboardRequestDecision {
     DeniedStaleAuthority,
     DeniedUnsupported,
 }
@@ -55,32 +46,6 @@ pub struct EnginePrivilegedRequestId(NonZeroU64);
 impl EnginePrivilegedRequestId {
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-}
-
-/// One-shot request handle bound to the exact source authority snapshot and request kind.
-///
-/// This generic handle is retained as a fail-closed compatibility shape only. Both current
-/// concrete request kinds require specialized envelopes: Network requests bind a full Fetch
-/// correlation envelope and Clipboard requests bind an exact bounded read/write operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EnginePrivilegedRequest {
-    id: EnginePrivilegedRequestId,
-    authority: EngineCommittedDocumentAuthority,
-    kind: EnginePrivilegedRequestKind,
-}
-
-impl EnginePrivilegedRequest {
-    pub const fn id(self) -> EnginePrivilegedRequestId {
-        self.id
-    }
-
-    pub const fn authority(self) -> EngineCommittedDocumentAuthority {
-        self.authority
-    }
-
-    pub const fn kind(self) -> EnginePrivilegedRequestKind {
-        self.kind
     }
 }
 
@@ -292,8 +257,6 @@ pub enum EnginePrivilegedRequestError {
     InvalidClipboardTextBudget,
     CapacityExceeded,
     IdentitySpaceExhausted,
-    NetworkTargetRequired,
-    ClipboardOperationRequired,
     ClipboardReadTextLimitOutOfRange {
         bytes: usize,
         max: usize,
@@ -361,11 +324,6 @@ impl fmt::Display for EnginePrivilegedRequestError {
             Self::IdentitySpaceExhausted => {
                 formatter.write_str("privileged request identity space is exhausted")
             }
-            Self::NetworkTargetRequired => {
-                formatter.write_str("Network privileged requests require a target-bound request")
-            }
-            Self::ClipboardOperationRequired => formatter
-                .write_str("Clipboard privileged requests require an operation-bound request"),
             Self::ClipboardReadTextLimitOutOfRange { bytes, max } => write!(
                 formatter,
                 "Clipboard read-text result limit is {bytes} bytes; allowed range is 1..={max} bytes"
@@ -621,21 +579,6 @@ impl EnginePrivilegedRequestTracker {
 
     pub fn pending_requests(&self) -> usize {
         self.pending.len()
-    }
-
-    pub fn register(
-        &mut self,
-        _authority: EngineCommittedDocumentAuthority,
-        kind: EnginePrivilegedRequestKind,
-    ) -> Result<EnginePrivilegedRequest, EnginePrivilegedRequestError> {
-        match kind {
-            EnginePrivilegedRequestKind::Network => {
-                Err(EnginePrivilegedRequestError::NetworkTargetRequired)
-            }
-            EnginePrivilegedRequestKind::Clipboard => {
-                Err(EnginePrivilegedRequestError::ClipboardOperationRequired)
-            }
-        }
     }
 
     /// Registers a Clipboard text read request with the exact product maximum result bound.
@@ -922,27 +865,12 @@ impl EnginePrivilegedRequestTracker {
         Ok(request)
     }
 
-    /// Consumes a legacy generic handle only to fail closed.
-    ///
-    /// No current concrete request kind can be registered through the generic path. If a stale
-    /// caller presents a generic handle whose ID belongs to a specialized request, the stored
-    /// request is burned and its accounting is released before returning `MismatchedRequest`.
-    pub fn preflight_once(
-        &mut self,
-        _host: &EngineHost,
-        request: EnginePrivilegedRequest,
-    ) -> Result<EnginePrivilegedRequestDecision, EnginePrivilegedRequestError> {
-        let id = request.id;
-        let _stored = self.remove_pending(id)?;
-        Err(EnginePrivilegedRequestError::MismatchedRequest(id))
-    }
-
     /// Consumes an exact operation-bound Clipboard request before source policy.
     pub fn preflight_clipboard_once(
         &mut self,
         host: &EngineHost,
         request: EngineClipboardPrivilegedRequest,
-    ) -> Result<EnginePrivilegedRequestDecision, EnginePrivilegedRequestError> {
+    ) -> Result<EngineClipboardRequestDecision, EnginePrivilegedRequestError> {
         let id = request.id;
         let stored = self.remove_pending(id)?;
         let PendingPrivilegedRequest::Clipboard(stored) = stored else {
@@ -952,7 +880,7 @@ impl EnginePrivilegedRequestTracker {
             return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
         }
 
-        host.preflight_privileged_request(stored.authority, EnginePrivilegedRequestKind::Clipboard)
+        host.preflight_clipboard_request_source(stored.authority)
             .map_err(EnginePrivilegedRequestError::from)
     }
 
@@ -1027,23 +955,21 @@ impl EnginePrivilegedRequestTracker {
 }
 
 impl EngineHost {
-    /// Revalidates the committed remote-document source of a future privileged request and then
-    /// denies the request because capability brokering is not implemented yet.
+    /// Revalidates the exact committed remote-document source of an already consumed/equality-
+    /// checked Clipboard request, then denies it because permission/capability/backend integration
+    /// is intentionally not implemented here.
     ///
-    /// Replayed or replaced authority is distinguished from a current-but-unsupported request.
-    /// Missing or divergent live Host state continues to fail closed through
-    /// `validate_committed_document_authority`. Tracker-created Network requests use the separate
-    /// target-bound path; this source-only primitive remains non-authorizing.
-    pub fn preflight_privileged_request(
+    /// This helper is private to the specialized Clipboard tracker path. There is no public
+    /// source-only privileged-request admission API.
+    fn preflight_clipboard_request_source(
         &self,
         authority: EngineCommittedDocumentAuthority,
-        _kind: EnginePrivilegedRequestKind,
-    ) -> Result<EnginePrivilegedRequestDecision, EngineHostError> {
+    ) -> Result<EngineClipboardRequestDecision, EngineHostError> {
         if !self.validate_committed_document_authority(authority)? {
-            return Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority);
+            return Ok(EngineClipboardRequestDecision::DeniedStaleAuthority);
         }
 
-        Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
+        Ok(EngineClipboardRequestDecision::DeniedUnsupported)
     }
 }
 
@@ -1145,162 +1071,6 @@ mod tests {
     }
 
     #[test]
-    fn current_authority_is_still_denied_for_all_unsupported_privileged_kinds() {
-        let tab = initial_tab();
-        let mut host = EngineHost::new().expect("engine host");
-        host.create_view(tab).expect("view");
-        let current = commit_remote(
-            &mut host,
-            tab,
-            serve_once("127.0.0.1", "127.0.0.1", "/current"),
-        );
-
-        assert_eq!(
-            host.preflight_privileged_request(
-                current.authority(),
-                EnginePrivilegedRequestKind::Network
-            ),
-            Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
-        );
-        assert_eq!(
-            host.preflight_privileged_request(
-                current.authority(),
-                EnginePrivilegedRequestKind::Clipboard
-            ),
-            Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
-        );
-
-        assert_eq!(
-            host.begin_navigation(tab, "mailto:zorya@example.invalid")
-                .expect("blocked external protocol"),
-            None
-        );
-        assert_eq!(
-            host.preflight_privileged_request(
-                current.authority(),
-                EnginePrivilegedRequestKind::Clipboard
-            ),
-            Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
-        );
-    }
-
-    #[test]
-    fn replacement_and_local_document_turn_old_request_source_into_stale_denial() {
-        let tab = initial_tab();
-        let mut host = EngineHost::new().expect("engine host");
-        host.create_view(tab).expect("view");
-        let first = commit_remote(
-            &mut host,
-            tab,
-            serve_once("127.0.0.1", "127.0.0.1", "/first"),
-        );
-        let same_site = commit_remote(
-            &mut host,
-            tab,
-            serve_once("127.0.0.1", "127.0.0.1", "/second"),
-        );
-
-        assert_eq!(same_site.host_instance(), first.host_instance());
-        assert_eq!(same_site.site_process(), first.site_process());
-        assert_ne!(same_site.navigation_context(), first.navigation_context());
-        assert_eq!(
-            host.preflight_privileged_request(
-                first.authority(),
-                EnginePrivilegedRequestKind::Network
-            ),
-            Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
-        );
-
-        let cross_site = commit_remote(
-            &mut host,
-            tab,
-            serve_once("127.0.0.1", "localhost", "/cross-site"),
-        );
-        assert_eq!(cross_site.host_instance(), first.host_instance());
-        assert_ne!(cross_site.site_process(), same_site.site_process());
-        assert_eq!(
-            host.preflight_privileged_request(
-                same_site.authority(),
-                EnginePrivilegedRequestKind::Clipboard
-            ),
-            Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
-        );
-
-        host.load_local_html(tab, "<main>local</main>")
-            .expect("replace with local document");
-        assert_eq!(
-            host.preflight_privileged_request(
-                cross_site.authority(),
-                EnginePrivilegedRequestKind::Network
-            ),
-            Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
-        );
-    }
-
-    #[test]
-    fn closed_or_recreated_view_cannot_reuse_old_request_source() {
-        let tab = initial_tab();
-        let mut host = EngineHost::new().expect("engine host");
-        host.create_view(tab).expect("first view");
-        let stale = commit_remote(
-            &mut host,
-            tab,
-            serve_once("127.0.0.1", "127.0.0.1", "/first-view"),
-        );
-
-        assert!(host.close_view(tab).expect("close first view"));
-        assert_eq!(
-            host.preflight_privileged_request(
-                stale.authority(),
-                EnginePrivilegedRequestKind::Clipboard
-            ),
-            Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
-        );
-
-        host.create_view(tab).expect("replacement view");
-        let current = commit_remote(
-            &mut host,
-            tab,
-            serve_once("127.0.0.1", "127.0.0.1", "/replacement-view"),
-        );
-        assert_eq!(current.host_instance(), stale.host_instance());
-        assert_ne!(current.view_generation(), stale.view_generation());
-        assert_eq!(
-            host.preflight_privileged_request(
-                stale.authority(),
-                EnginePrivilegedRequestKind::Network
-            ),
-            Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
-        );
-        assert_eq!(
-            host.preflight_privileged_request(
-                current.authority(),
-                EnginePrivilegedRequestKind::Network
-            ),
-            Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
-        );
-    }
-
-    #[test]
-    fn generic_registration_requires_network_target() {
-        let tab = initial_tab();
-        let mut host = EngineHost::new().expect("engine host");
-        host.create_view(tab).expect("view");
-        let current = commit_remote(
-            &mut host,
-            tab,
-            serve_once("127.0.0.1", "127.0.0.1", "/target-required"),
-        );
-        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
-
-        assert_eq!(
-            tracker.register(current.authority(), EnginePrivilegedRequestKind::Network),
-            Err(EnginePrivilegedRequestError::NetworkTargetRequired)
-        );
-        assert_eq!(tracker.pending_requests(), 0);
-    }
-
-    #[test]
     fn registered_clipboard_request_is_consumed_once_and_remains_unsupported() {
         let tab = initial_tab();
         let mut host = EngineHost::new().expect("engine host");
@@ -1324,7 +1094,7 @@ mod tests {
         assert_eq!(tracker.pending_requests(), 1);
         assert_eq!(
             tracker.preflight_clipboard_once(&host, request.clone()),
-            Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
+            Ok(EngineClipboardRequestDecision::DeniedUnsupported)
         );
         assert_eq!(tracker.pending_requests(), 0);
         assert_eq!(
@@ -1358,7 +1128,7 @@ mod tests {
         assert_ne!(replacement.navigation_context(), first.navigation_context());
         assert_eq!(
             tracker.preflight_clipboard_once(&host, request.clone()),
-            Ok(EnginePrivilegedRequestDecision::DeniedStaleAuthority)
+            Ok(EngineClipboardRequestDecision::DeniedStaleAuthority)
         );
         assert_eq!(tracker.pending_requests(), 0);
     }
@@ -1891,39 +1661,6 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_generic_request_burns_the_registered_slot() {
-        let tab = initial_tab();
-        let mut host = EngineHost::new().expect("engine host");
-        host.create_view(tab).expect("view");
-        let current = commit_remote(
-            &mut host,
-            tab,
-            serve_once("127.0.0.1", "127.0.0.1", "/mismatch"),
-        );
-        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
-        let request = tracker
-            .register_clipboard_read(current.authority())
-            .expect("register request");
-        let forged = EnginePrivilegedRequest {
-            id: request.id,
-            authority: request.authority,
-            kind: EnginePrivilegedRequestKind::Network,
-        };
-
-        assert_eq!(
-            tracker.preflight_once(&host, forged),
-            Err(EnginePrivilegedRequestError::MismatchedRequest(
-                request.id()
-            ))
-        );
-        assert_eq!(tracker.pending_requests(), 0);
-        assert_eq!(
-            tracker.preflight_clipboard_once(&host, request.clone()),
-            Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
-        );
-    }
-
-    #[test]
     fn tracker_enforces_nonzero_limit_and_shared_bounded_capacity() {
         assert!(matches!(
             EnginePrivilegedRequestTracker::try_new(0),
@@ -1961,7 +1698,7 @@ mod tests {
         assert_eq!(tracker.pending_requests(), 1);
         assert_eq!(
             tracker.preflight_clipboard_once(&host, first),
-            Ok(EnginePrivilegedRequestDecision::DeniedUnsupported)
+            Ok(EngineClipboardRequestDecision::DeniedUnsupported)
         );
     }
 }
