@@ -350,14 +350,16 @@ fn cross_kind_mismatch_burns_network_slot_and_releases_body_budget() {
             Some(vec![1, 2, 3, 4]),
         )
         .expect("register body request");
-    let forged = EnginePrivilegedRequest {
+    let forged = EngineClipboardPrivilegedRequest {
         id: request.id,
         authority: request.authority(),
-        kind: EnginePrivilegedRequestKind::Clipboard,
+        operation: EngineClipboardOperation::ReadText {
+            max_result_bytes: 1,
+        },
     };
 
     assert_eq!(
-        tracker.preflight_once(&host, forged),
+        tracker.preflight_clipboard_once(&host, forged),
         Err(EnginePrivilegedRequestError::MismatchedRequest(
             request.id()
         ))
