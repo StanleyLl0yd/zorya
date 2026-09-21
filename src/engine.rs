@@ -1120,7 +1120,9 @@ impl EngineHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BrowserApp, BrowserWindow};
+    use crate::{
+        BrowserApp, BrowserWindow, EnginePrivilegedRequestError, EnginePrivilegedRequestTracker,
+    };
 
     fn initial_tab() -> TabId {
         let app = BrowserApp::bootstrap().expect("browser bootstrap");
@@ -1936,6 +1938,10 @@ mod tests {
             .expect("source before process loss")
             .expect("remote source before process loss");
         assert_eq!(source.authority(), authority);
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+        let request = tracker
+            .register_network(&source, "https://lost.example/resource")
+            .expect("register exact Network request");
         let context = host
             .views
             .get(&tab)
@@ -1955,9 +1961,12 @@ mod tests {
             Err(EngineHostError::InconsistentNavigationState { tab })
         );
         assert_eq!(
-            host.preflight_network_target(&source, "https://lost.example/resource"),
-            Err(EngineHostError::InconsistentNavigationState { tab })
+            tracker.preflight_network_once(&host, request),
+            Err(EnginePrivilegedRequestError::Host(
+                EngineHostError::InconsistentNavigationState { tab }
+            ))
         );
+        assert_eq!(tracker.pending_requests(), 0);
     }
 
     #[test]
