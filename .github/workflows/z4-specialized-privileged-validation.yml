@@ -24,3 +24,30 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
           git diff --check
+
+          forbidden=(
+            'EnginePrivilegedRequestKind'
+            'EnginePrivilegedRequestDecision'
+            'preflight_privileged_request'
+            'NetworkTargetRequired'
+            'ClipboardOperationRequired'
+          )
+          for symbol in "${forbidden[@]}"; do
+            if git grep -n -F "$symbol" -- src docs README.md; then
+              echo "obsolete generic privileged symbol remains: $symbol" >&2
+              exit 1
+            fi
+          done
+
+          if git grep -n -E '(^|[^A-Za-z0-9_])EnginePrivilegedRequest([^A-Za-z0-9_]|$)' -- src docs README.md; then
+            echo 'obsolete generic EnginePrivilegedRequest handle remains' >&2
+            exit 1
+          fi
+          if git grep -n -F 'pub fn preflight_once(' -- src; then
+            echo 'obsolete generic tracker preflight remains' >&2
+            exit 1
+          fi
+          if git grep -n -F 'pub fn register(' -- src/privileged_request.rs; then
+            echo 'obsolete generic tracker registration remains' >&2
+            exit 1
+          fi
