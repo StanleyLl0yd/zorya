@@ -1,0 +1,34 @@
+name: Z4 Network one-shot policy validation
+
+on:
+  push:
+    branches: [z4/network-policy-one-shot-only]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
+        with:
+          ref: z4/network-policy-one-shot-only
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate one-shot-only Network policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo check --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          git diff --check
+          if git grep -n -F 'pub fn preflight_network_target' -- src; then
+            echo 'public Network target policy method remains' >&2
+            exit 1
+          fi
+          if git grep -n -F 'preflight_network_target(' -- src docs README.md; then
+            echo 'obsolete Network target policy API name remains' >&2
+            exit 1
+          fi
