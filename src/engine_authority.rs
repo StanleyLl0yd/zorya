@@ -1,7 +1,6 @@
-use crate::engine::{
-    EngineCommittedDocumentAuthority, EngineCommittedInternalPageAuthority, EngineHost,
-    EngineHostError,
-};
+#[cfg(test)]
+use crate::engine::EngineCommittedInternalPageAuthority;
+use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostError};
 
 impl EngineHost {
     /// Revalidates an ephemeral committed remote-document authority snapshot against the
@@ -11,7 +10,7 @@ impl EngineHost {
     /// document, or a closed/recreated View returns `false`. Unexpected loss or divergence in the
     /// live Host authority remains an `InconsistentNavigationState` error through
     /// `committed_document_authority`.
-    pub fn validate_committed_document_authority(
+    pub(crate) fn validate_committed_document_authority(
         &self,
         authority: EngineCommittedDocumentAuthority,
     ) -> Result<bool, EngineHostError> {
@@ -29,7 +28,8 @@ impl EngineHost {
     /// document, reloaded internal page, closed/recreated View or replacement EngineHost returns
     /// `false`; impossible live View/authority divergence remains fail-closed through
     /// `committed_internal_page_authority`.
-    pub fn validate_committed_internal_page_authority(
+    #[cfg(test)]
+    pub(crate) fn validate_committed_internal_page_authority(
         &self,
         authority: EngineCommittedInternalPageAuthority,
     ) -> Result<bool, EngineHostError> {
