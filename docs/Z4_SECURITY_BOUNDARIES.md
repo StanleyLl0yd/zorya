@@ -26,6 +26,8 @@ Raw committed remote-document validation is crate-private and is used only as an
 
 The validator is not public admission API. Public callers may observe the current committed authority/source snapshots, but reviewed Network/Clipboard one-shot paths own revalidation before policy. Revalidation is read-only: it mints no Network or Clipboard capability, starts no network operation, grants no IPC authority and does not persist any Host token.
 
+Committed remote authority retains the exact pinned-Rarog `NavigationContextId` privately rather than only its numeric Zorya observation token. The public `EngineNavigationContextToken` remains an opaque observation wrapper, while crate-private policy can use the original Host-owned context identity directly. This prevents a later capability-brokering slice from recreating Host authority with `NavigationContextId::try_new(token.get())`; exact authority equality/revalidation compares the retained Rarog context identity. No capability is granted by retaining it.
+
 These Host/context/process tokens are not product identities and are never persisted in profile or session state.
 
 ## Canonical Network source Origin
