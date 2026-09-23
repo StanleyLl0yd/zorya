@@ -1,6 +1,8 @@
 #[cfg(test)]
 use crate::engine::EngineCommittedInternalPageAuthority;
-use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostError};
+use crate::engine::{
+    EngineCommittedDocumentAuthority, EngineCommittedDocumentSource, EngineHost, EngineHostError,
+};
 
 impl EngineHost {
     /// Revalidates an ephemeral committed remote-document authority snapshot against the
@@ -19,6 +21,27 @@ impl EngineHost {
             Err(EngineHostError::UnknownTab(tab)) if tab == authority.tab() => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    /// Revalidates an exact Host-minted committed remote-document source against current live
+    /// EngineHost/Rarog state.
+    ///
+    /// This is crate-private policy plumbing, not a public admission primitive. Authority is
+    /// checked first so replaced Hosts/documents/Views fail stale before Origin/source comparison.
+    /// The current source is then re-minted from live Rarog View + Host Site/process state and must
+    /// match exactly, including canonical Origin. Impossible live Host divergence remains an error.
+    pub(crate) fn validate_committed_document_source(
+        &self,
+        source: &EngineCommittedDocumentSource,
+    ) -> Result<bool, EngineHostError> {
+        if !self.validate_committed_document_authority(source.authority())? {
+            return Ok(false);
+        }
+
+        Ok(self
+            .committed_document_source(source.tab())?
+            .as_ref()
+            .is_some_and(|current| current == source))
     }
 
     /// Revalidates an opaque committed internal-page authority against the exact current
