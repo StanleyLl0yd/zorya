@@ -1970,6 +1970,57 @@ mod tests {
     }
 
     #[test]
+    fn retired_host_authority_fails_closed_for_clipboard_one_shot_source() {
+        let tab = initial_tab();
+        let (mut host, _) = engine_host_with_fixture(None);
+        host.create_view(tab).expect("view");
+
+        let committed = host
+            .begin_navigation(tab, "https://lost-clipboard.example/")
+            .expect("begin committed")
+            .expect("forwarded");
+        assert!(matches!(
+            host.poll_navigation(committed).expect("commit"),
+            EngineNavigationPoll::Committed { .. }
+        ));
+        let source = host
+            .committed_document_source(tab)
+            .expect("source before process loss")
+            .expect("remote source before process loss");
+        let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+        let request = tracker
+            .register_clipboard_read(&source)
+            .expect("register exact Clipboard request");
+
+        let context = host
+            .views
+            .get(&tab)
+            .and_then(|hosted| hosted.committed_context)
+            .expect("committed context");
+        let site = host
+            .host
+            .navigation_context(context)
+            .expect("live context")
+            .site()
+            .clone();
+        let process = host.host.process_for_site(&site).expect("live process");
+        host.host.process_lost(process).expect("process loss");
+
+        assert_eq!(
+            host.committed_document_authority(tab),
+            Err(EngineHostError::InconsistentNavigationState { tab })
+        );
+        assert_eq!(
+            tracker.preflight_clipboard_once(&host, request),
+            Err(EnginePrivilegedRequestError::Host(
+                EngineHostError::InconsistentNavigationState { tab }
+            ))
+        );
+        assert_eq!(tracker.pending_requests(), 0);
+    }
+
+
+    #[test]
     fn internal_document_token_exhaustion_fails_before_replacing_current_document() {
         let tab = initial_tab();
         let mut host = EngineHost::new().expect("engine host");
