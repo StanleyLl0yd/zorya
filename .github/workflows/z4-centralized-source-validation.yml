@@ -1,0 +1,47 @@
+name: Z4 centralized privileged source validation
+
+on:
+  push:
+    branches: [z4/centralize-privileged-source-revalidation]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
+        with:
+          ref: z4/centralize-privileged-source-revalidation
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate centralized source revalidation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo check --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          git diff --check
+
+          if git grep -n -F 'pub fn validate_committed_document_source' -- src; then
+            echo 'committed source validator must not be public' >&2
+            exit 1
+          fi
+
+          test "$(git grep -n -F 'pub(crate) fn validate_committed_document_source' -- src/engine_authority.rs | wc -l)" -eq 1
+
+          for file in src/network_target_policy.rs src/privileged_request.rs; do
+            if git grep -n -F 'validate_committed_document_authority(' -- "$file"; then
+              echo "duplicated authority-only privileged source validation remains in $file" >&2
+              exit 1
+            fi
+            if git grep -n -F 'committed_document_source(source.tab())' -- "$file"; then
+              echo "duplicated live source remint remains in $file" >&2
+              exit 1
+            fi
+          done
+
+          test "$(git grep -n -F 'validate_committed_document_source(source)?' -- src/network_target_policy.rs | wc -l)" -eq 1
+          test "$(git grep -n -F 'validate_committed_document_source(source)?' -- src/privileged_request.rs | wc -l)" -eq 1
