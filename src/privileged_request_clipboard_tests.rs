@@ -390,11 +390,7 @@ fn clipboard_request_cannot_cross_engine_host_replacement() {
     let tab = initial_tab();
     let mut first_host = EngineHost::new().expect("first engine host");
     first_host.create_view(tab).expect("first view");
-    let first = commit_remote(
-        &mut first_host,
-        tab,
-        serve_once("/clipboard-first-host"),
-    );
+    let first = commit_remote(&mut first_host, tab, serve_once("/clipboard-first-host"));
     let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
     let request = tracker
         .register_clipboard_read(&first)
