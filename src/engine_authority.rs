@@ -17,10 +17,9 @@ impl EngineHost {
         authority: EngineCommittedDocumentAuthority,
     ) -> Result<bool, EngineHostError> {
         match self.committed_document_authority(authority.tab()) {
-            Ok(Some(current)) => Ok(
-                current.rarog_navigation_context() == authority.rarog_navigation_context()
-                    && current == authority,
-            ),
+            Ok(Some(current)) => Ok(current.rarog_navigation_context()
+                == authority.rarog_navigation_context()
+                && current == authority),
             Ok(None) => Ok(false),
             Err(EngineHostError::UnknownTab(tab)) if tab == authority.tab() => Ok(false),
             Err(error) => Err(error),
