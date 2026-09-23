@@ -1,0 +1,37 @@
+name: Z4 authority validator visibility
+
+on:
+  push:
+    branches: [z4/internalize-authority-validators]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
+        with:
+          ref: z4/internalize-authority-validators
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate crate-private authority validators
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo check --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          git diff --check
+
+          if git grep -n -F 'pub fn validate_committed_document_authority' -- src; then
+            echo 'remote authority validator remains public' >&2
+            exit 1
+          fi
+          if git grep -n -F 'pub fn validate_committed_internal_page_authority' -- src; then
+            echo 'internal-page authority validator remains public' >&2
+            exit 1
+          fi
+          git grep -n -F 'pub(crate) fn validate_committed_document_authority' -- src/engine_authority.rs
+          git grep -n -F 'pub(crate) fn validate_committed_internal_page_authority' -- src/engine_authority.rs
