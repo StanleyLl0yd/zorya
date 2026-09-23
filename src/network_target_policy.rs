@@ -31,14 +31,7 @@ pub(crate) fn preflight_consumed_network_target(
     source: &EngineCommittedDocumentSource,
     target: &str,
 ) -> Result<EngineNetworkTargetDecision, EngineHostError> {
-    let authority = source.authority();
-    if !host.validate_committed_document_authority(authority)? {
-        return Ok(EngineNetworkTargetDecision::DeniedStaleAuthority);
-    }
-    let Some(current_source) = host.committed_document_source(source.tab())? else {
-        return Ok(EngineNetworkTargetDecision::DeniedStaleAuthority);
-    };
-    if &current_source != source {
+    if !host.validate_committed_document_source(source)? {
         return Ok(EngineNetworkTargetDecision::DeniedStaleAuthority);
     }
     let source_site = source.origin().site();
