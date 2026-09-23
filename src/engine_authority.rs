@@ -1,6 +1,6 @@
-use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostError};
 #[cfg(test)]
 use crate::engine::EngineCommittedInternalPageAuthority;
+use crate::engine::{EngineCommittedDocumentAuthority, EngineHost, EngineHostError};
 
 impl EngineHost {
     /// Revalidates an ephemeral committed remote-document authority snapshot against the
