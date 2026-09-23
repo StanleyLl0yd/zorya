@@ -386,6 +386,38 @@ fn clipboard_source_is_revalidated_only_at_consume_time() {
 }
 
 #[test]
+fn clipboard_request_cannot_cross_engine_host_replacement() {
+    let tab = initial_tab();
+    let mut first_host = EngineHost::new().expect("first engine host");
+    first_host.create_view(tab).expect("first view");
+    let first = commit_remote(&mut first_host, tab, serve_once("/clipboard-first-host"));
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+    let request = tracker
+        .register_clipboard_read(&first)
+        .expect("Clipboard request");
+
+    let mut replacement_host = EngineHost::new().expect("replacement engine host");
+    replacement_host.create_view(tab).expect("replacement view");
+    let replacement = commit_remote(
+        &mut replacement_host,
+        tab,
+        serve_once("/clipboard-replacement-host"),
+    );
+
+    assert_eq!(replacement.tab(), first.tab());
+    assert_eq!(replacement.view_generation(), first.view_generation());
+    assert_eq!(replacement.navigation_context(), first.navigation_context());
+    assert_eq!(replacement.site_process(), first.site_process());
+    assert_ne!(replacement.host_instance(), first.host_instance());
+
+    assert_eq!(
+        tracker.preflight_clipboard_once(&replacement_host, request),
+        Ok(EngineClipboardRequestDecision::DeniedStaleAuthority)
+    );
+    assert_eq!(tracker.pending_requests(), 0);
+}
+
+#[test]
 fn local_document_cannot_mint_clipboard_remote_source() {
     let tab = initial_tab();
     let mut host = EngineHost::new().expect("engine host");
