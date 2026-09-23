@@ -29,6 +29,7 @@ impl EngineHost {
     /// document, reloaded internal page, closed/recreated View or replacement EngineHost returns
     /// `false`; impossible live View/authority divergence remains fail-closed through
     /// `committed_internal_page_authority`.
+    #[cfg(test)]
     pub(crate) fn validate_committed_internal_page_authority(
         &self,
         authority: EngineCommittedInternalPageAuthority,
