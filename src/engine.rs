@@ -185,14 +185,16 @@ impl EngineSiteProcessToken {
 
 /// Ephemeral Rarog Host authority for the currently committed remote document.
 ///
-/// The contained tokens are Host-lifetime authority markers. They are not browser product
-/// identities and must not be persisted or substituted for `TabId` or other product-owned IDs.
+/// The committed Rarog `NavigationContextId` is retained exactly in private state so later
+/// context-scoped Host integration never needs to reconstruct authority from the public numeric
+/// observation token. Exposed tokens remain Host-lifetime observations, not browser product
+/// identities; none of this authority state may be persisted or substituted for `TabId`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EngineCommittedDocumentAuthority {
     host_instance: EngineHostInstanceToken,
     tab: TabId,
     view_generation: u64,
-    navigation_context: EngineNavigationContextToken,
+    navigation_context: NavigationContextId,
     site_process: EngineSiteProcessToken,
 }
 
@@ -209,7 +211,11 @@ impl EngineCommittedDocumentAuthority {
         self.view_generation
     }
 
-    pub const fn navigation_context(self) -> EngineNavigationContextToken {
+    pub fn navigation_context(self) -> EngineNavigationContextToken {
+        EngineNavigationContextToken(self.navigation_context.get())
+    }
+
+    pub(crate) const fn rarog_navigation_context(self) -> NavigationContextId {
         self.navigation_context
     }
 
@@ -252,7 +258,7 @@ impl EngineCommittedDocumentSource {
         self.authority.view_generation()
     }
 
-    pub const fn navigation_context(&self) -> EngineNavigationContextToken {
+    pub fn navigation_context(&self) -> EngineNavigationContextToken {
         self.authority.navigation_context()
     }
 
@@ -553,7 +559,7 @@ impl EngineHost {
             host_instance: self.instance,
             tab,
             view_generation: hosted.generation,
-            navigation_context: EngineNavigationContextToken(context.get()),
+            navigation_context: context,
             site_process: EngineSiteProcessToken(process.get()),
         }))
     }
