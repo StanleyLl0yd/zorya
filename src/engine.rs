@@ -2019,7 +2019,6 @@ mod tests {
         assert_eq!(tracker.pending_requests(), 0);
     }
 
-
     #[test]
     fn internal_document_token_exhaustion_fails_before_replacing_current_document() {
         let tab = initial_tab();
