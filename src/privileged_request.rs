@@ -981,13 +981,7 @@ impl EngineHost {
         &self,
         source: &EngineCommittedDocumentSource,
     ) -> Result<EngineClipboardRequestDecision, EngineHostError> {
-        if !self.validate_committed_document_authority(source.authority())? {
-            return Ok(EngineClipboardRequestDecision::DeniedStaleAuthority);
-        }
-        let Some(current_source) = self.committed_document_source(source.tab())? else {
-            return Ok(EngineClipboardRequestDecision::DeniedStaleAuthority);
-        };
-        if &current_source != source {
+        if !self.validate_committed_document_source(source)? {
             return Ok(EngineClipboardRequestDecision::DeniedStaleAuthority);
         }
 
