@@ -17,7 +17,11 @@ impl EngineHost {
         authority: EngineCommittedDocumentAuthority,
     ) -> Result<bool, EngineHostError> {
         match self.committed_document_authority(authority.tab()) {
-            Ok(current) => Ok(current == Some(authority)),
+            Ok(Some(current)) => Ok(
+                current.rarog_navigation_context() == authority.rarog_navigation_context()
+                    && current == authority,
+            ),
+            Ok(None) => Ok(false),
             Err(EngineHostError::UnknownTab(tab)) if tab == authority.tab() => Ok(false),
             Err(error) => Err(error),
         }
@@ -142,6 +146,10 @@ mod tests {
             tab,
             serve_once("127.0.0.1", "127.0.0.1", "/first"),
         );
+        assert_eq!(
+            first.rarog_navigation_context().get(),
+            first.navigation_context().get()
+        );
         assert_eq!(host.validate_committed_document_authority(first), Ok(true));
 
         assert_eq!(
@@ -158,6 +166,10 @@ mod tests {
         );
         assert_eq!(same_site.host_instance(), first.host_instance());
         assert_ne!(same_site.navigation_context(), first.navigation_context());
+        assert_ne!(
+            same_site.rarog_navigation_context(),
+            first.rarog_navigation_context()
+        );
         assert_eq!(same_site.site_process(), first.site_process());
         assert_eq!(host.validate_committed_document_authority(first), Ok(false));
         assert_eq!(
