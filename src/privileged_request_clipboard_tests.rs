@@ -314,7 +314,9 @@ fn clipboard_discard_mismatch_burns_once_and_releases_write_budget() {
 
     assert_eq!(
         tracker.discard_clipboard_once(forged),
-        Err(EnginePrivilegedRequestError::MismatchedRequest(request.id()))
+        Err(EnginePrivilegedRequestError::MismatchedRequest(
+            request.id()
+        ))
     );
     assert_eq!(tracker.pending_requests(), 0);
     assert_eq!(tracker.pending_clipboard_text_bytes(), 0);
