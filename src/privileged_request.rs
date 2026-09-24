@@ -2,6 +2,10 @@ use crate::engine::{
     EngineCommittedDocumentAuthority, EngineCommittedDocumentSource, EngineHost, EngineHostError,
 };
 use crate::network_target_policy::{
+    EngineNetworkAuthorizationResult, authorize_consumed_network_target,
+};
+#[cfg(test)]
+use crate::network_target_policy::{
     EngineNetworkTargetDecision, preflight_consumed_network_target,
 };
 use rarog_fetch::{
@@ -903,18 +907,25 @@ impl EnginePrivilegedRequestTracker {
         self.consume_clipboard_exact(request).map(|_| ())
     }
 
-    /// Consumes the exact source/target/method/header/body/envelope-bound Network request before
-    /// applying canonical target policy.
+    /// Consumes one exact source/target/method/header/body/envelope-bound Network request and
+    /// applies canonical target policy before any Host capability grant.
     ///
-    /// Same-ID source, method, headers, body, mode, credentials, redirect, destination, response
-    /// limit or target mismatches burn the stored slot. Stored body
-    /// bytes are released from tracker accounting before equality or policy. For an exact handle,
-    /// crate-private Network target policy revalidates source authority before parsing/classifying
-    /// the raw
-    /// target. The current policy remains non-authorizing; retained method/headers/body/envelope
-    /// metadata and response limit are correlation data for a later reviewed Fetch/broker path and
-    /// are not executed or enforced here.
-    pub fn preflight_network_once(
+    /// Same-ID substitutions burn the stored slot. Stored body bytes are released from tracker
+    /// accounting before equality, source revalidation or target policy. Only an exact current
+    /// same-Site HTTP(S) request can return an opaque context-scoped Network authorization; this
+    /// method starts no backend operation.
+    pub fn authorize_network_once(
+        &mut self,
+        host: &mut EngineHost,
+        request: EngineNetworkPrivilegedRequest,
+    ) -> Result<EngineNetworkAuthorizationResult, EnginePrivilegedRequestError> {
+        let stored = self.consume_network_exact(request)?;
+        authorize_consumed_network_target(host, &stored.source, stored.target())
+            .map_err(EnginePrivilegedRequestError::from)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn preflight_network_once(
         &mut self,
         host: &EngineHost,
         request: EngineNetworkPrivilegedRequest,
@@ -1030,6 +1041,10 @@ impl EngineHost {
 #[cfg(test)]
 #[path = "privileged_request_clipboard_tests.rs"]
 mod clipboard_tests;
+
+#[cfg(test)]
+#[path = "privileged_request_network_authorization_tests.rs"]
+mod network_authorization_tests;
 
 #[cfg(test)]
 #[path = "privileged_request_network_body_tests.rs"]

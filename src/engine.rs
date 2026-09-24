@@ -276,6 +276,30 @@ impl fmt::Debug for EngineCommittedDocumentSource {
     }
 }
 
+pub struct EngineNetworkAuthorization {
+    source: EngineCommittedDocumentSource,
+    capability: NavigationContextCapability,
+}
+
+impl EngineNetworkAuthorization {
+    pub fn source(&self) -> &EngineCommittedDocumentSource {
+        &self.source
+    }
+
+    pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
+        self.source.authority()
+    }
+}
+
+impl fmt::Debug for EngineNetworkAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EngineNetworkAuthorization")
+            .field("authority", &self.source.authority())
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineNavigationPoll {
     Pending,
@@ -352,6 +376,10 @@ pub enum EngineHostError {
     InconsistentNavigationState {
         tab: TabId,
     },
+    ForeignNetworkAuthorization {
+        authorization_host: EngineHostInstanceToken,
+        current_host: EngineHostInstanceToken,
+    },
     StaleFrameRequest {
         tab: TabId,
         view_generation: u64,
@@ -384,6 +412,15 @@ impl fmt::Display for EngineHostError {
                 formatter,
                 "engine/Host navigation state diverged for tab {}",
                 tab.get()
+            ),
+            Self::ForeignNetworkAuthorization {
+                authorization_host,
+                current_host,
+            } => write!(
+                formatter,
+                "Network authorization belongs to EngineHost {} but current EngineHost is {}",
+                authorization_host.get(),
+                current_host.get()
             ),
             Self::StaleFrameRequest {
                 tab,
@@ -663,6 +700,47 @@ impl EngineHost {
             authority,
             origin: std::sync::Arc::new(origin),
         }))
+    }
+
+    pub(crate) fn grant_network_authorization(
+        &mut self,
+        source: &EngineCommittedDocumentSource,
+    ) -> Result<Option<EngineNetworkAuthorization>, EngineHostError> {
+        if !self.validate_committed_document_source(source)? {
+            return Ok(None);
+        }
+
+        let capability = self
+            .host
+            .grant_navigation_context_network_capability(
+                source.authority().rarog_navigation_context(),
+            )
+            .map_err(|error| EngineHostError::Host(error.to_string()))?;
+        Ok(Some(EngineNetworkAuthorization {
+            source: source.clone(),
+            capability,
+        }))
+    }
+
+    pub fn revoke_network_authorization(
+        &mut self,
+        authorization: EngineNetworkAuthorization,
+    ) -> Result<(), EngineHostError> {
+        if authorization.source.host_instance() != self.instance {
+            return Err(EngineHostError::ForeignNetworkAuthorization {
+                authorization_host: authorization.source.host_instance(),
+                current_host: self.instance,
+            });
+        }
+
+        self.host
+            .revoke_navigation_context_capability(authorization.capability)
+            .map_err(|error| EngineHostError::Host(error.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_privileged_capabilities(&self) -> usize {
+        self.host.active_capabilities()
     }
 
     pub fn load_local_html(
