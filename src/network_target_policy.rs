@@ -40,9 +40,7 @@ fn classify_consumed_network_target(
         Err(_) => return Ok(Some(EngineNetworkTargetDecision::DeniedInvalidTarget)),
     };
     if !matches!(target.scheme(), "http" | "https") {
-        return Ok(Some(
-            EngineNetworkTargetDecision::DeniedUnsupportedScheme,
-        ));
+        return Ok(Some(EngineNetworkTargetDecision::DeniedUnsupportedScheme));
     }
     let target_site = match target.site_identity() {
         Ok(site) => site,
