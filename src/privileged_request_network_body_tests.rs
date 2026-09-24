@@ -164,7 +164,7 @@ fn absent_and_present_empty_bodies_are_distinct_and_mismatch_burns_slot() {
         target: request.target.clone(),
     };
     assert_eq!(
-        tracker.discard_network_once(forged),
+        tracker.preflight_network_once(&host, forged),
         Err(EnginePrivilegedRequestError::MismatchedRequest(
             request.id()
         ))
@@ -354,7 +354,7 @@ fn body_mismatch_burns_slot_and_releases_aggregate_budget() {
     };
 
     assert_eq!(
-        tracker.preflight_network_once(&host, forged),
+        tracker.discard_network_once(forged),
         Err(EnginePrivilegedRequestError::MismatchedRequest(
             request.id()
         ))
