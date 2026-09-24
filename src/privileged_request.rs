@@ -886,17 +886,21 @@ impl EnginePrivilegedRequestTracker {
         host: &EngineHost,
         request: EngineClipboardPrivilegedRequest,
     ) -> Result<EngineClipboardRequestDecision, EnginePrivilegedRequestError> {
-        let id = request.id;
-        let stored = self.remove_pending(id)?;
-        let PendingPrivilegedRequest::Clipboard(stored) = stored else {
-            return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
-        };
-        if stored != request {
-            return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
-        }
-
+        let stored = self.consume_clipboard_exact(request)?;
         host.preflight_clipboard_source(&stored.source)
             .map_err(EnginePrivilegedRequestError::from)
+    }
+
+    /// Discards one exact pending Clipboard request without running source policy or a backend.
+    ///
+    /// This is lifecycle cleanup only. The exact stored slot is consumed once and any tracked
+    /// write-text bytes are released before specialized type/equality checks, so stale browser or
+    /// Host state cannot prevent callers from abandoning a request that has not reached policy.
+    pub fn discard_clipboard_once(
+        &mut self,
+        request: EngineClipboardPrivilegedRequest,
+    ) -> Result<(), EnginePrivilegedRequestError> {
+        self.consume_clipboard_exact(request).map(|_| ())
     }
 
     /// Consumes the exact source/target/method/header/body/envelope-bound Network request before
@@ -915,6 +919,42 @@ impl EnginePrivilegedRequestTracker {
         host: &EngineHost,
         request: EngineNetworkPrivilegedRequest,
     ) -> Result<EngineNetworkTargetDecision, EnginePrivilegedRequestError> {
+        let stored = self.consume_network_exact(request)?;
+        preflight_consumed_network_target(host, &stored.source, stored.target())
+            .map_err(EnginePrivilegedRequestError::from)
+    }
+
+    /// Discards one exact pending Network request without parsing its target or running policy.
+    ///
+    /// This is lifecycle cleanup only. The exact stored slot is consumed once and any tracked
+    /// request-body bytes are released before specialized type/equality checks. No Host capability,
+    /// transport operation or source revalidation is performed.
+    pub fn discard_network_once(
+        &mut self,
+        request: EngineNetworkPrivilegedRequest,
+    ) -> Result<(), EnginePrivilegedRequestError> {
+        self.consume_network_exact(request).map(|_| ())
+    }
+
+    fn consume_clipboard_exact(
+        &mut self,
+        request: EngineClipboardPrivilegedRequest,
+    ) -> Result<EngineClipboardPrivilegedRequest, EnginePrivilegedRequestError> {
+        let id = request.id;
+        let stored = self.remove_pending(id)?;
+        let PendingPrivilegedRequest::Clipboard(stored) = stored else {
+            return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
+        };
+        if stored != request {
+            return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
+        }
+        Ok(stored)
+    }
+
+    fn consume_network_exact(
+        &mut self,
+        request: EngineNetworkPrivilegedRequest,
+    ) -> Result<EngineNetworkPrivilegedRequest, EnginePrivilegedRequestError> {
         let id = request.id;
         let stored = self.remove_pending(id)?;
         let PendingPrivilegedRequest::Network(stored) = stored else {
@@ -923,9 +963,7 @@ impl EnginePrivilegedRequestTracker {
         if stored != request {
             return Err(EnginePrivilegedRequestError::MismatchedRequest(id));
         }
-
-        preflight_consumed_network_target(host, &stored.source, stored.target())
-            .map_err(EnginePrivilegedRequestError::from)
+        Ok(stored)
     }
 
     fn ensure_capacity(&self) -> Result<(), EnginePrivilegedRequestError> {

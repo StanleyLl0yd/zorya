@@ -108,6 +108,33 @@ fn exact_network_body_is_shared_consumed_once_and_remains_unsupported() {
 }
 
 #[test]
+fn network_discard_is_exact_hostless_and_releases_body_budget() {
+    let (tab, mut host, current) = current_authority("/body-discard");
+    let mut tracker =
+        EnginePrivilegedRequestTracker::try_new_with_body_budget(1, 4).expect("tracker");
+    let request = tracker
+        .register_network_with_method_headers_and_body(
+            &current,
+            FetchMethod::post(),
+            "../discard-never-parsed",
+            HeaderList::default(),
+            Some(vec![1, 2, 3, 4]),
+        )
+        .expect("Network body request");
+    assert_eq!(tracker.pending_requests(), 1);
+    assert_eq!(tracker.pending_network_body_bytes(), 4);
+
+    assert!(host.close_view(tab).expect("close source View"));
+    assert_eq!(tracker.discard_network_once(request.clone()), Ok(()));
+    assert_eq!(tracker.pending_requests(), 0);
+    assert_eq!(tracker.pending_network_body_bytes(), 0);
+    assert_eq!(
+        tracker.discard_network_once(request.clone()),
+        Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
+    );
+}
+
+#[test]
 fn absent_and_present_empty_bodies_are_distinct_and_mismatch_burns_slot() {
     let (_tab, host, current) = current_authority("/empty-body-identity");
     let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
@@ -299,7 +326,7 @@ fn aggregate_body_budget_is_bounded_and_released_after_consume() {
 
 #[test]
 fn body_mismatch_burns_slot_and_releases_aggregate_budget() {
-    let (_tab, host, current) = current_authority("/body-mismatch");
+    let (_tab, _host, current) = current_authority("/body-mismatch");
     let mut tracker =
         EnginePrivilegedRequestTracker::try_new_with_body_budget(1, 8).expect("tracker");
     let request = tracker
@@ -327,7 +354,7 @@ fn body_mismatch_burns_slot_and_releases_aggregate_budget() {
     };
 
     assert_eq!(
-        tracker.preflight_network_once(&host, forged),
+        tracker.discard_network_once(forged),
         Err(EnginePrivilegedRequestError::MismatchedRequest(
             request.id()
         ))
@@ -338,7 +365,7 @@ fn body_mismatch_burns_slot_and_releases_aggregate_budget() {
 
 #[test]
 fn cross_kind_mismatch_burns_network_slot_and_releases_body_budget() {
-    let (_tab, host, current) = current_authority("/cross-kind-body-burn");
+    let (_tab, _host, current) = current_authority("/cross-kind-body-burn");
     let mut tracker =
         EnginePrivilegedRequestTracker::try_new_with_body_budget(1, 4).expect("tracker");
     let request = tracker
@@ -359,7 +386,7 @@ fn cross_kind_mismatch_burns_network_slot_and_releases_body_budget() {
     };
 
     assert_eq!(
-        tracker.preflight_clipboard_once(&host, forged),
+        tracker.discard_clipboard_once(forged),
         Err(EnginePrivilegedRequestError::MismatchedRequest(
             request.id()
         ))
