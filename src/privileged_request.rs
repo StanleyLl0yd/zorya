@@ -2,7 +2,7 @@ use crate::engine::{
     EngineCommittedDocumentAuthority, EngineCommittedDocumentSource, EngineHost, EngineHostError,
 };
 use crate::network_target_policy::{
-    EngineNetworkTargetDecision, preflight_consumed_network_target,
+    EngineNetworkAuthorizationResult, authorize_consumed_network_target,
 };
 use rarog_fetch::{
     CredentialsMode, DEFAULT_MAX_RESPONSE_BODY_BYTES, FetchMethod, HeaderList, RedirectMode,
@@ -903,24 +903,20 @@ impl EnginePrivilegedRequestTracker {
         self.consume_clipboard_exact(request).map(|_| ())
     }
 
-    /// Consumes the exact source/target/method/header/body/envelope-bound Network request before
-    /// applying canonical target policy.
+    /// Consumes one exact source/target/method/header/body/envelope-bound Network request and
+    /// applies canonical target policy before any Host capability grant.
     ///
-    /// Same-ID source, method, headers, body, mode, credentials, redirect, destination, response
-    /// limit or target mismatches burn the stored slot. Stored body
-    /// bytes are released from tracker accounting before equality or policy. For an exact handle,
-    /// crate-private Network target policy revalidates source authority before parsing/classifying
-    /// the raw
-    /// target. The current policy remains non-authorizing; retained method/headers/body/envelope
-    /// metadata and response limit are correlation data for a later reviewed Fetch/broker path and
-    /// are not executed or enforced here.
-    pub fn preflight_network_once(
+    /// Same-ID substitutions burn the stored slot. Stored body bytes are released from tracker
+    /// accounting before equality, source revalidation or target policy. Only an exact current
+    /// same-Site HTTP(S) request can return an opaque context-scoped Network authorization; this
+    /// method starts no backend operation.
+    pub fn authorize_network_once(
         &mut self,
-        host: &EngineHost,
+        host: &mut EngineHost,
         request: EngineNetworkPrivilegedRequest,
-    ) -> Result<EngineNetworkTargetDecision, EnginePrivilegedRequestError> {
+    ) -> Result<EngineNetworkAuthorizationResult, EnginePrivilegedRequestError> {
         let stored = self.consume_network_exact(request)?;
-        preflight_consumed_network_target(host, &stored.source, stored.target())
+        authorize_consumed_network_target(host, &stored.source, stored.target())
             .map_err(EnginePrivilegedRequestError::from)
     }
 
