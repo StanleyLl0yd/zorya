@@ -117,6 +117,26 @@ fn clipboard_read_binds_exact_default_and_explicit_limits() {
 }
 
 #[test]
+fn clipboard_discard_is_exact_hostless_and_releases_write_budget() {
+    let (tab, mut host, current) = current_authority("/clipboard-discard");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+    let request = tracker
+        .register_clipboard_write(&current, "discard-me")
+        .expect("Clipboard write");
+    assert_eq!(tracker.pending_requests(), 1);
+    assert_eq!(tracker.pending_clipboard_text_bytes(), "discard-me".len());
+
+    assert!(host.close_view(tab).expect("close source View"));
+    assert_eq!(tracker.discard_clipboard_once(request.clone()), Ok(()));
+    assert_eq!(tracker.pending_requests(), 0);
+    assert_eq!(tracker.pending_clipboard_text_bytes(), 0);
+    assert_eq!(
+        tracker.discard_clipboard_once(request.clone()),
+        Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
+    );
+}
+
+#[test]
 fn clipboard_read_rejects_zero_and_over_max_without_slot_use() {
     let (_tab, _host, current) = current_authority("/clipboard-read-bounds");
     let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
@@ -275,6 +295,33 @@ fn clipboard_operation_and_payload_substitution_burn_once_and_release_budget() {
         Err(EnginePrivilegedRequestError::MismatchedRequest(write.id()))
     );
     assert_eq!(operation_tracker.pending_clipboard_text_bytes(), 0);
+}
+
+#[test]
+fn clipboard_discard_mismatch_burns_once_and_releases_write_budget() {
+    let (_tab, _host, current) = current_authority("/clipboard-discard-mismatch");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+    let request = tracker
+        .register_clipboard_write(&current, "original")
+        .expect("Clipboard write");
+    let forged = EngineClipboardPrivilegedRequest {
+        id: request.id,
+        source: request.source.clone(),
+        operation: EngineClipboardOperation::WriteText {
+            text: Arc::<str>::from("forged"),
+        },
+    };
+
+    assert_eq!(
+        tracker.discard_clipboard_once(forged),
+        Err(EnginePrivilegedRequestError::MismatchedRequest(request.id()))
+    );
+    assert_eq!(tracker.pending_requests(), 0);
+    assert_eq!(tracker.pending_clipboard_text_bytes(), 0);
+    assert_eq!(
+        tracker.discard_clipboard_once(request.clone()),
+        Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
+    );
 }
 
 #[test]
