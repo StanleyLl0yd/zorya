@@ -178,9 +178,7 @@ fn stale_source_is_denied_before_capability_grant() {
         tracker
             .authorize_network_once(&mut host, request)
             .expect("stale policy result"),
-        EngineNetworkAuthorizationResult::Denied(
-            EngineNetworkTargetDecision::DeniedStaleAuthority
-        )
+        EngineNetworkAuthorizationResult::Denied(EngineNetworkTargetDecision::DeniedStaleAuthority)
     ));
     assert_eq!(host.active_privileged_capabilities(), 0);
 }
