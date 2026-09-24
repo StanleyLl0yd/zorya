@@ -1,8 +1,6 @@
 use super::*;
 use crate::engine::{EngineHost, EngineHostError, EngineNavigationPoll};
-use crate::network_target_policy::{
-    EngineNetworkAuthorizationResult, EngineNetworkTargetDecision,
-};
+use crate::network_target_policy::{EngineNetworkAuthorizationResult, EngineNetworkTargetDecision};
 use crate::{BrowserApp, BrowserWindow, TabId};
 use std::io::{Read, Write};
 use std::net::TcpListener;
