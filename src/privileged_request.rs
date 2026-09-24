@@ -4,6 +4,10 @@ use crate::engine::{
 use crate::network_target_policy::{
     EngineNetworkAuthorizationResult, authorize_consumed_network_target,
 };
+#[cfg(test)]
+use crate::network_target_policy::{
+    EngineNetworkTargetDecision, preflight_consumed_network_target,
+};
 use rarog_fetch::{
     CredentialsMode, DEFAULT_MAX_RESPONSE_BODY_BYTES, FetchMethod, HeaderList, RedirectMode,
     RequestDestination, RequestMode,
@@ -917,6 +921,17 @@ impl EnginePrivilegedRequestTracker {
     ) -> Result<EngineNetworkAuthorizationResult, EnginePrivilegedRequestError> {
         let stored = self.consume_network_exact(request)?;
         authorize_consumed_network_target(host, &stored.source, stored.target())
+            .map_err(EnginePrivilegedRequestError::from)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn preflight_network_once(
+        &mut self,
+        host: &EngineHost,
+        request: EngineNetworkPrivilegedRequest,
+    ) -> Result<EngineNetworkTargetDecision, EnginePrivilegedRequestError> {
+        let stored = self.consume_network_exact(request)?;
+        preflight_consumed_network_target(host, &stored.source, stored.target())
             .map_err(EnginePrivilegedRequestError::from)
     }
 
