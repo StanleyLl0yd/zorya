@@ -133,7 +133,10 @@ fn target_denials_never_grant_host_capability() {
     let mut tracker = EnginePrivilegedRequestTracker::try_new(4).expect("tracker");
 
     for (target, expected) in [
-        ("../relative", EngineNetworkTargetDecision::DeniedInvalidTarget),
+        (
+            "../relative",
+            EngineNetworkTargetDecision::DeniedInvalidTarget,
+        ),
         (
             "file:///tmp/zorya-authorization",
             EngineNetworkTargetDecision::DeniedUnsupportedScheme,
