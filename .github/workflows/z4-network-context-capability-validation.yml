@@ -29,3 +29,26 @@ jobs:
         run: cargo test --locked
       - name: Diff check
         run: git diff --check c503320060fffb5e6291f70f4bc47f90f038d82e..HEAD
+      - name: Capability boundary checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'pub fn authorize_network_once' src/privileged_request.rs
+          grep -q 'pub struct EngineNetworkAuthorization' src/engine.rs
+          grep -q 'grant_navigation_context_network_capability' src/engine.rs
+          grep -q 'pub fn revoke_network_authorization' src/engine.rs
+          ! grep -q 'NavigationContextId::try_new' src/engine.rs src/engine_authority.rs src/network_target_policy.rs src/privileged_request.rs
+          ! grep -q 'start_navigation_context_network_operation' src/network_target_policy.rs src/privileged_request.rs
+          git diff --quiet c503320060fffb5e6291f70f4bc47f90f038d82e..HEAD -- Cargo.toml Cargo.lock
+          python3 - <<'PY'
+          from pathlib import Path
+          engine = Path("src/engine.rs").read_text()
+          privileged = Path("src/privileged_request.rs").read_text()
+          start = engine.index("pub struct EngineNetworkAuthorization")
+          prefix = engine[max(0, start - 160):start]
+          assert "#[derive(Clone" not in prefix
+          method = privileged.index("pub(crate) fn preflight_network_once")
+          prefix = privileged[max(0, method - 80):method]
+          assert "#[cfg(test)]" in prefix
+          assert "pub fn preflight_network_once" not in privileged
+          PY
