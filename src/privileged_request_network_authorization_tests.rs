@@ -170,10 +170,7 @@ fn stale_source_is_denied_before_capability_grant() {
         .expect("register request");
 
     let replacement = commit_remote(&mut host, tab, serve_once("/authorization-stale-second"));
-    assert_ne!(
-        replacement.navigation_context(),
-        first.navigation_context()
-    );
+    assert_ne!(replacement.navigation_context(), first.navigation_context());
     assert!(matches!(
         tracker
             .authorize_network_once(&mut host, request)
