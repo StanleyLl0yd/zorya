@@ -56,7 +56,9 @@ pub use navigation::{
     HistoryEntry, HistoryEntryId, NavigationControls, NavigationFailure, NavigationId,
     NavigationIntent, NavigationIntentKind, NavigationStart, ReloadControl, TabNavigation,
 };
-pub use network_target_policy::EngineNetworkTargetDecision;
+pub use network_target_policy::{
+    EngineNetworkAuthorizationResult, EngineNetworkTargetDecision,
+};
 pub use presentation_handoff::{
     CurrentFramePermit, PresentationFramePermit, PresentationGeneration, PresentationHandoffError,
     PresentationTransitionStart, TabPresentationHandoff, TargetFramePermit, WebContentPresentation,
