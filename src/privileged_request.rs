@@ -1043,6 +1043,10 @@ impl EngineHost {
 mod clipboard_tests;
 
 #[cfg(test)]
+#[path = "privileged_request_network_authorization_tests.rs"]
+mod network_authorization_tests;
+
+#[cfg(test)]
 #[path = "privileged_request_network_body_tests.rs"]
 mod network_body_tests;
 
