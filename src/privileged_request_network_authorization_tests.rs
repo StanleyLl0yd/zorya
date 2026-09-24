@@ -45,7 +45,10 @@ fn commit_remote(
         .expect("remote navigation forwarded");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match host.poll_navigation(request).expect("poll remote navigation") {
+        match host
+            .poll_navigation(request)
+            .expect("poll remote navigation")
+        {
             EngineNavigationPoll::Pending if Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(5));
             }
