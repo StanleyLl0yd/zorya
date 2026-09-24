@@ -10,6 +10,8 @@ pub enum EngineNetworkTargetDecision {
     DeniedInvalidTarget,
     DeniedUnsupportedScheme,
     DeniedCrossSite,
+    #[cfg(test)]
+    DeniedUnsupported,
 }
 
 /// Result of consuming one exact Network privileged request through canonical target policy.
@@ -21,6 +23,36 @@ pub enum EngineNetworkTargetDecision {
 pub enum EngineNetworkAuthorizationResult {
     Authorized(EngineNetworkAuthorization),
     Denied(EngineNetworkTargetDecision),
+}
+
+fn classify_consumed_network_target(
+    host: &EngineHost,
+    source: &EngineCommittedDocumentSource,
+    target: &str,
+) -> Result<Option<EngineNetworkTargetDecision>, EngineHostError> {
+    if !host.validate_committed_document_source(source)? {
+        return Ok(Some(EngineNetworkTargetDecision::DeniedStaleAuthority));
+    }
+    let source_site = source.origin().site();
+
+    let target = match WebUrl::parse(target) {
+        Ok(target) => target,
+        Err(_) => return Ok(Some(EngineNetworkTargetDecision::DeniedInvalidTarget)),
+    };
+    if !matches!(target.scheme(), "http" | "https") {
+        return Ok(Some(
+            EngineNetworkTargetDecision::DeniedUnsupportedScheme,
+        ));
+    }
+    let target_site = match target.site_identity() {
+        Ok(site) => site,
+        Err(_) => return Ok(Some(EngineNetworkTargetDecision::DeniedInvalidTarget)),
+    };
+    if !source_site.same_site(&target_site) {
+        return Ok(Some(EngineNetworkTargetDecision::DeniedCrossSite));
+    }
+
+    Ok(None)
 }
 
 /// Applies canonical target policy only after the caller has consumed and exact-matched a
@@ -35,38 +67,8 @@ pub(crate) fn authorize_consumed_network_target(
     source: &EngineCommittedDocumentSource,
     target: &str,
 ) -> Result<EngineNetworkAuthorizationResult, EngineHostError> {
-    if !host.validate_committed_document_source(source)? {
-        return Ok(EngineNetworkAuthorizationResult::Denied(
-            EngineNetworkTargetDecision::DeniedStaleAuthority,
-        ));
-    }
-    let source_site = source.origin().site();
-
-    let target = match WebUrl::parse(target) {
-        Ok(target) => target,
-        Err(_) => {
-            return Ok(EngineNetworkAuthorizationResult::Denied(
-                EngineNetworkTargetDecision::DeniedInvalidTarget,
-            ));
-        }
-    };
-    if !matches!(target.scheme(), "http" | "https") {
-        return Ok(EngineNetworkAuthorizationResult::Denied(
-            EngineNetworkTargetDecision::DeniedUnsupportedScheme,
-        ));
-    }
-    let target_site = match target.site_identity() {
-        Ok(site) => site,
-        Err(_) => {
-            return Ok(EngineNetworkAuthorizationResult::Denied(
-                EngineNetworkTargetDecision::DeniedInvalidTarget,
-            ));
-        }
-    };
-    if !source_site.same_site(&target_site) {
-        return Ok(EngineNetworkAuthorizationResult::Denied(
-            EngineNetworkTargetDecision::DeniedCrossSite,
-        ));
+    if let Some(decision) = classify_consumed_network_target(host, source, target)? {
+        return Ok(EngineNetworkAuthorizationResult::Denied(decision));
     }
 
     match host.grant_network_authorization(source)? {
@@ -75,4 +77,14 @@ pub(crate) fn authorize_consumed_network_target(
             EngineNetworkTargetDecision::DeniedStaleAuthority,
         )),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn preflight_consumed_network_target(
+    host: &EngineHost,
+    source: &EngineCommittedDocumentSource,
+    target: &str,
+) -> Result<EngineNetworkTargetDecision, EngineHostError> {
+    Ok(classify_consumed_network_target(host, source, target)?
+        .unwrap_or(EngineNetworkTargetDecision::DeniedUnsupported))
 }
