@@ -31,15 +31,15 @@ pub const DEFAULT_MAX_PENDING_PRIVILEGED_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024
 
 static NEXT_ENGINE_PRIVILEGED_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Fail-closed result of exact Clipboard request source preflight.
+/// Result of consuming one exact Clipboard request into permission mediation.
 ///
-/// There is intentionally no allow/authorized variant. A current committed remote-document
-/// authority only proves that the exact one-shot Clipboard request source is not stale; Clipboard
-/// execution remains unsupported until a separately reviewed capability/backend slice exists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A stale source is denied before any permission state is produced. A current source yields one
+/// opaque, non-cloneable permission request retaining the exact consumed Clipboard operation.
+/// Neither variant grants a Rarog capability or reaches a platform Clipboard backend.
+#[derive(Debug, PartialEq, Eq)]
 pub enum EngineClipboardRequestDecision {
     DeniedStaleAuthority,
-    DeniedUnsupported,
+    PermissionRequired(EngineClipboardPermissionRequest),
 }
 
 /// Process-local identity for one pending privileged request attempt.
@@ -65,6 +65,91 @@ pub enum EngineClipboardOperationKind {
 enum EngineClipboardOperation {
     ReadText { max_result_bytes: usize },
     WriteText { text: Arc<str> },
+}
+
+impl EngineClipboardOperation {
+    fn kind(&self) -> EngineClipboardOperationKind {
+        match self {
+            Self::ReadText { .. } => EngineClipboardOperationKind::ReadText,
+            Self::WriteText { .. } => EngineClipboardOperationKind::WriteText,
+        }
+    }
+
+    fn max_read_text_bytes(&self) -> Option<usize> {
+        match self {
+            Self::ReadText { max_result_bytes } => Some(*max_result_bytes),
+            Self::WriteText { .. } => None,
+        }
+    }
+
+    fn write_text(&self) -> Option<&str> {
+        match self {
+            Self::ReadText { .. } => None,
+            Self::WriteText { text } => Some(text),
+        }
+    }
+
+    fn write_text_bytes(&self) -> usize {
+        self.write_text().map_or(0, str::len)
+    }
+}
+
+/// Opaque permission-mediation handoff for one exact consumed Clipboard operation.
+///
+/// This value deliberately carries no Rarog Clipboard capability. It retains the exact source and
+/// operation privately so a later reviewed permission-resolution slice cannot substitute the read
+/// limit or write payload. Public observation is restricted to safe UI metadata; source Origin and
+/// write text are never exposed by this type or its Debug implementation.
+#[must_use = "Clipboard permission requests must be explicitly denied or resolved"]
+#[derive(PartialEq, Eq)]
+pub struct EngineClipboardPermissionRequest {
+    id: EnginePrivilegedRequestId,
+    source: EngineCommittedDocumentSource,
+    operation: EngineClipboardOperation,
+}
+
+impl EngineClipboardPermissionRequest {
+    pub const fn request_id(&self) -> EnginePrivilegedRequestId {
+        self.id
+    }
+
+    pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
+        self.source.authority()
+    }
+
+    pub fn operation_kind(&self) -> EngineClipboardOperationKind {
+        self.operation.kind()
+    }
+
+    pub fn max_read_text_bytes(&self) -> Option<usize> {
+        self.operation.max_read_text_bytes()
+    }
+
+    pub fn write_text_bytes(&self) -> usize {
+        self.operation.write_text_bytes()
+    }
+
+    /// Explicitly denies this permission request without granting authority or touching a backend.
+    pub fn deny(self) {}
+}
+
+impl fmt::Debug for EngineClipboardPermissionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("EngineClipboardPermissionRequest");
+        debug
+            .field("request_id", &self.id)
+            .field("authority", &self.source.authority())
+            .field("operation", &self.operation.kind());
+        match &self.operation {
+            EngineClipboardOperation::ReadText { max_result_bytes } => {
+                debug.field("max_result_bytes", max_result_bytes);
+            }
+            EngineClipboardOperation::WriteText { text } => {
+                debug.field("write_text_bytes", &text.len());
+            }
+        }
+        debug.finish()
+    }
 }
 
 /// One-shot Clipboard request bound to the exact committed remote-document source and an exact
@@ -100,28 +185,19 @@ impl EngineClipboardPrivilegedRequest {
     }
 
     pub fn operation_kind(&self) -> EngineClipboardOperationKind {
-        match &self.operation {
-            EngineClipboardOperation::ReadText { .. } => EngineClipboardOperationKind::ReadText,
-            EngineClipboardOperation::WriteText { .. } => EngineClipboardOperationKind::WriteText,
-        }
+        self.operation.kind()
     }
 
     pub fn max_read_text_bytes(&self) -> Option<usize> {
-        match &self.operation {
-            EngineClipboardOperation::ReadText { max_result_bytes } => Some(*max_result_bytes),
-            EngineClipboardOperation::WriteText { .. } => None,
-        }
+        self.operation.max_read_text_bytes()
     }
 
     pub fn write_text(&self) -> Option<&str> {
-        match &self.operation {
-            EngineClipboardOperation::ReadText { .. } => None,
-            EngineClipboardOperation::WriteText { text } => Some(text),
-        }
+        self.operation.write_text()
     }
 
     fn write_text_bytes(&self) -> usize {
-        self.write_text().map_or(0, str::len)
+        self.operation.write_text_bytes()
     }
 }
 
@@ -884,18 +960,19 @@ impl EnginePrivilegedRequestTracker {
         Ok(request)
     }
 
-    /// Consumes an exact operation-bound Clipboard request before source policy.
+    /// Consumes one exact operation-bound Clipboard request into permission mediation.
     ///
     /// Same-ID authority/operation/read-limit/write-text substitutions burn the stored slot.
     /// Tracker-accounted write-text bytes are released before type/equality/source checks. Only an
-    /// exact specialized Clipboard envelope can reach the Clipboard source preflight.
-    pub fn preflight_clipboard_once(
+    /// exact current source can yield an opaque permission request; no capability or backend action
+    /// occurs in this path.
+    pub fn request_clipboard_permission_once(
         &mut self,
         host: &EngineHost,
         request: EngineClipboardPrivilegedRequest,
     ) -> Result<EngineClipboardRequestDecision, EnginePrivilegedRequestError> {
         let stored = self.consume_clipboard_exact(request)?;
-        host.preflight_clipboard_source(&stored.source)
+        host.handoff_clipboard_permission(stored)
             .map_err(EnginePrivilegedRequestError::from)
     }
 
@@ -1023,21 +1100,30 @@ impl EnginePrivilegedRequestTracker {
 }
 
 impl EngineHost {
-    /// Revalidates the committed remote-document source of an already exact-matched one-shot
-    /// Clipboard request and then denies it because Clipboard capability/backend execution is not
-    /// implemented yet.
+    /// Revalidates an already exact-matched one-shot Clipboard request and, only for the exact
+    /// current source, hands its private operation state to product permission mediation.
     ///
-    /// This helper is intentionally private to the specialized Clipboard lifecycle. Possessing a
-    /// committed authority alone is not a public privileged-request admission surface.
-    fn preflight_clipboard_source(
+    /// This helper grants no Rarog capability and invokes no platform Clipboard backend.
+    fn handoff_clipboard_permission(
         &self,
-        source: &EngineCommittedDocumentSource,
+        request: EngineClipboardPrivilegedRequest,
     ) -> Result<EngineClipboardRequestDecision, EngineHostError> {
-        if !self.validate_committed_document_source(source)? {
+        if !self.validate_committed_document_source(&request.source)? {
             return Ok(EngineClipboardRequestDecision::DeniedStaleAuthority);
         }
 
-        Ok(EngineClipboardRequestDecision::DeniedUnsupported)
+        let EngineClipboardPrivilegedRequest {
+            id,
+            source,
+            operation,
+        } = request;
+        Ok(EngineClipboardRequestDecision::PermissionRequired(
+            EngineClipboardPermissionRequest {
+                id,
+                source,
+                operation,
+            },
+        ))
     }
 }
 
