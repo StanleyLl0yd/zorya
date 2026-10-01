@@ -279,13 +279,10 @@ impl fmt::Debug for EngineCommittedDocumentSource {
     }
 }
 
-/// Opaque, non-cloneable Host Network authorization bound to one exact consumed request envelope.
+/// Exact consumed Network envelope retained behind one authorization.
 ///
-/// The Rarog context-scoped capability remains private. Canonical request identity is retained so a
-/// later reviewed execution path cannot combine this capability with caller-selected replacement
-/// method/header/body/policy metadata. Debug output exposes only safe aggregate metadata and never
-/// serializes the source Origin, target, headers, body, custom destination contents or capability.
-pub struct EngineNetworkAuthorization {
+/// This type stays private so product callers cannot separate request identity from its capability.
+struct EngineNetworkAuthorizationEnvelope {
     source: EngineCommittedDocumentSource,
     target: WebUrl,
     method: FetchMethod,
@@ -296,58 +293,68 @@ pub struct EngineNetworkAuthorization {
     redirect: RedirectMode,
     destination: RequestDestination,
     max_response_body_bytes: usize,
+}
+
+/// Opaque, non-cloneable Host Network authorization bound to one exact consumed request envelope.
+///
+/// The Rarog context-scoped capability remains private. Canonical request identity is retained so a
+/// later reviewed execution path cannot combine this capability with caller-selected replacement
+/// method/header/body/policy metadata. Debug output exposes only safe aggregate metadata and never
+/// serializes the source Origin, target, headers, body, custom destination contents or capability.
+pub struct EngineNetworkAuthorization {
+    envelope: Box<EngineNetworkAuthorizationEnvelope>,
     capability: NavigationContextCapability,
 }
 
 impl EngineNetworkAuthorization {
     pub fn source(&self) -> &EngineCommittedDocumentSource {
-        &self.source
+        &self.envelope.source
     }
 
     pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
-        self.source.authority()
+        self.envelope.source.authority()
     }
 
     pub fn target(&self) -> &WebUrl {
-        &self.target
+        &self.envelope.target
     }
 
     pub fn method(&self) -> &FetchMethod {
-        &self.method
+        &self.envelope.method
     }
 
     pub fn headers(&self) -> &HeaderList {
-        &self.headers
+        &self.envelope.headers
     }
 
     pub fn body(&self) -> Option<&[u8]> {
-        self.body.as_deref()
+        self.envelope.body.as_deref()
     }
 
     pub const fn mode(&self) -> RequestMode {
-        self.mode
+        self.envelope.mode
     }
 
     pub const fn credentials(&self) -> CredentialsMode {
-        self.credentials
+        self.envelope.credentials
     }
 
     pub const fn redirect(&self) -> RedirectMode {
-        self.redirect
+        self.envelope.redirect
     }
 
     pub fn destination(&self) -> &RequestDestination {
-        &self.destination
+        &self.envelope.destination
     }
 
     pub const fn max_response_body_bytes(&self) -> usize {
-        self.max_response_body_bytes
+        self.envelope.max_response_body_bytes
     }
 }
 
 impl fmt::Debug for EngineNetworkAuthorization {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (destination_kind, destination_other_bytes) = match &self.destination {
+        let (destination_kind, destination_other_bytes) = match &self.envelope.destination {
             RequestDestination::Empty => ("empty", 0),
             RequestDestination::Document => ("document", 0),
             RequestDestination::Script => ("script", 0),
@@ -358,22 +365,29 @@ impl fmt::Debug for EngineNetworkAuthorization {
         };
         formatter
             .debug_struct("EngineNetworkAuthorization")
-            .field("authority", &self.source.authority())
-            .field("method", &self.method)
-            .field("target_bytes", &self.target.as_str().len())
-            .field("header_count", &self.headers.len())
-            .field("header_bytes", &self.headers.byte_len())
-            .field("body_present", &self.body.is_some())
+            .field("authority", &self.envelope.source.authority())
+            .field("method", &self.envelope.method)
+            .field("target_bytes", &self.envelope.target.as_str().len())
+            .field("header_count", &self.envelope.headers.len())
+            .field("header_bytes", &self.envelope.headers.byte_len())
+            .field("body_present", &self.envelope.body.is_some())
             .field(
                 "body_bytes",
-                &self.body.as_ref().map_or(0, |body| body.len()),
+                &self
+                    .envelope
+                    .body
+                    .as_ref()
+                    .map_or(0, |body| body.len()),
             )
-            .field("mode", &self.mode)
-            .field("credentials", &self.credentials)
-            .field("redirect", &self.redirect)
+            .field("mode", &self.envelope.mode)
+            .field("credentials", &self.envelope.credentials)
+            .field("redirect", &self.envelope.redirect)
             .field("destination_kind", &destination_kind)
             .field("destination_other_bytes", &destination_other_bytes)
-            .field("max_response_body_bytes", &self.max_response_body_bytes)
+            .field(
+                "max_response_body_bytes",
+                &self.envelope.max_response_body_bytes,
+            )
             .finish()
     }
 }
@@ -805,16 +819,18 @@ impl EngineHost {
             )
             .map_err(|error| EngineHostError::Host(error.to_string()))?;
         Ok(Some(EngineNetworkAuthorization {
-            source: source.clone(),
-            target,
-            method,
-            headers,
-            body,
-            mode,
-            credentials,
-            redirect,
-            destination,
-            max_response_body_bytes,
+            envelope: Box::new(EngineNetworkAuthorizationEnvelope {
+                source: source.clone(),
+                target,
+                method,
+                headers,
+                body,
+                mode,
+                credentials,
+                redirect,
+                destination,
+                max_response_body_bytes,
+            }),
             capability,
         }))
     }
@@ -823,9 +839,9 @@ impl EngineHost {
         &mut self,
         authorization: EngineNetworkAuthorization,
     ) -> Result<(), EngineHostError> {
-        if authorization.source.host_instance() != self.instance {
+        if authorization.envelope.source.host_instance() != self.instance {
             return Err(EngineHostError::ForeignNetworkAuthorization {
-                authorization_host: authorization.source.host_instance(),
+                authorization_host: authorization.envelope.source.host_instance(),
                 current_host: self.instance,
             });
         }
