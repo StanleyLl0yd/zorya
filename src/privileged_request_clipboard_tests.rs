@@ -109,10 +109,20 @@ fn clipboard_read_binds_exact_default_and_explicit_limits() {
         Some(MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES)
     );
     for request in [default, minimum, middle, maximum] {
+        let expected_limit = request.max_read_text_bytes();
+        let decision = tracker
+            .request_clipboard_permission_once(&host, request)
+            .expect("permission handoff");
+        let EngineClipboardRequestDecision::PermissionRequired(permission) = decision else {
+            panic!("current Clipboard source must require permission");
+        };
         assert_eq!(
-            tracker.preflight_clipboard_once(&host, request),
-            Ok(EngineClipboardRequestDecision::DeniedUnsupported)
+            permission.operation_kind(),
+            EngineClipboardOperationKind::ReadText
         );
+        assert_eq!(permission.max_read_text_bytes(), expected_limit);
+        assert_eq!(permission.write_text_bytes(), 0);
+        permission.deny();
     }
 }
 
@@ -181,13 +191,27 @@ fn clipboard_write_is_shared_redacted_consumed_once_and_releases_budget() {
     assert!(!debug.contains("127.0.0.1"));
     assert!(debug.contains("WriteText"));
     assert!(debug.contains("write_text_bytes"));
+    let decision = tracker
+        .request_clipboard_permission_once(&host, clone)
+        .expect("write permission handoff");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = decision else {
+        panic!("current Clipboard write must require permission");
+    };
     assert_eq!(
-        tracker.preflight_clipboard_once(&host, clone),
-        Ok(EngineClipboardRequestDecision::DeniedUnsupported)
+        permission.operation_kind(),
+        EngineClipboardOperationKind::WriteText
     );
+    assert_eq!(permission.max_read_text_bytes(), None);
+    assert_eq!(permission.write_text_bytes(), secret.len());
+    let permission_debug = format!("{permission:?}");
+    assert!(!permission_debug.contains(secret));
+    assert!(!permission_debug.contains("127.0.0.1"));
+    assert!(permission_debug.contains("WriteText"));
+    assert!(permission_debug.contains("write_text_bytes"));
+    permission.deny();
     assert_eq!(tracker.pending_clipboard_text_bytes(), 0);
     assert_eq!(
-        tracker.preflight_clipboard_once(&host, request.clone()),
+        tracker.request_clipboard_permission_once(&host, request.clone()),
         Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
     );
 }
@@ -224,10 +248,10 @@ fn clipboard_write_rejects_per_request_and_aggregate_overflow_before_slot_use() 
         })
     );
     assert_eq!(aggregate.pending_clipboard_text_bytes(), 5);
-    assert_eq!(
-        aggregate.preflight_clipboard_once(&host, first),
-        Ok(EngineClipboardRequestDecision::DeniedUnsupported)
-    );
+    assert!(matches!(
+        aggregate.request_clipboard_permission_once(&host, first),
+        Ok(EngineClipboardRequestDecision::PermissionRequired(_))
+    ));
     assert_eq!(aggregate.pending_clipboard_text_bytes(), 0);
 }
 
@@ -258,7 +282,7 @@ fn clipboard_operation_and_payload_substitution_burn_once_and_release_budget() {
         },
     };
     assert_eq!(
-        read_tracker.preflight_clipboard_once(&host, forged_limit),
+        read_tracker.request_clipboard_permission_once(&host, forged_limit),
         Err(EnginePrivilegedRequestError::MismatchedRequest(read.id()))
     );
 
@@ -274,7 +298,7 @@ fn clipboard_operation_and_payload_substitution_burn_once_and_release_budget() {
         },
     };
     assert_eq!(
-        write_tracker.preflight_clipboard_once(&host, forged_text),
+        write_tracker.request_clipboard_permission_once(&host, forged_text),
         Err(EnginePrivilegedRequestError::MismatchedRequest(write.id()))
     );
     assert_eq!(write_tracker.pending_clipboard_text_bytes(), 0);
@@ -291,7 +315,7 @@ fn clipboard_operation_and_payload_substitution_burn_once_and_release_budget() {
         },
     };
     assert_eq!(
-        operation_tracker.preflight_clipboard_once(&host, forged_operation),
+        operation_tracker.request_clipboard_permission_once(&host, forged_operation),
         Err(EnginePrivilegedRequestError::MismatchedRequest(write.id()))
     );
     assert_eq!(operation_tracker.pending_clipboard_text_bytes(), 0);
@@ -372,7 +396,7 @@ fn cross_kind_mismatch_releases_clipboard_and_network_accounting_before_equality
         },
     };
     assert_eq!(
-        network_tracker.preflight_clipboard_once(&host, forged_clipboard),
+        network_tracker.request_clipboard_permission_once(&host, forged_clipboard),
         Err(EnginePrivilegedRequestError::MismatchedRequest(
             network.id()
         ))
@@ -398,7 +422,7 @@ fn clipboard_source_substitution_burns_once_and_releases_write_budget() {
     };
 
     assert_eq!(
-        tracker.preflight_clipboard_once(&host, forged),
+        tracker.request_clipboard_permission_once(&host, forged),
         Err(EnginePrivilegedRequestError::MismatchedRequest(
             request.id()
         ))
@@ -406,7 +430,7 @@ fn clipboard_source_substitution_burns_once_and_releases_write_budget() {
     assert_eq!(tracker.pending_requests(), 0);
     assert_eq!(tracker.pending_clipboard_text_bytes(), 0);
     assert_eq!(
-        tracker.preflight_clipboard_once(&host, request.clone()),
+        tracker.request_clipboard_permission_once(&host, request.clone()),
         Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
     );
 }
@@ -428,7 +452,7 @@ fn clipboard_source_is_revalidated_only_at_consume_time() {
         first.authority().navigation_context()
     );
     assert_eq!(
-        tracker.preflight_clipboard_once(&host, request),
+        tracker.request_clipboard_permission_once(&host, request),
         Ok(EngineClipboardRequestDecision::DeniedStaleAuthority)
     );
     assert_eq!(tracker.pending_clipboard_text_bytes(), 0);
@@ -460,7 +484,7 @@ fn clipboard_request_cannot_cross_engine_host_replacement() {
     assert_ne!(replacement.host_instance(), first.host_instance());
 
     assert_eq!(
-        tracker.preflight_clipboard_once(&replacement_host, request),
+        tracker.request_clipboard_permission_once(&replacement_host, request),
         Ok(EngineClipboardRequestDecision::DeniedStaleAuthority)
     );
     assert_eq!(tracker.pending_requests(), 0);
@@ -496,10 +520,10 @@ fn clipboard_budget_is_independent_from_network_body_budget() {
         .expect("Network budget");
     assert_eq!(tracker.pending_clipboard_text_bytes(), 4);
     assert_eq!(tracker.pending_network_body_bytes(), 4);
-    assert_eq!(
-        tracker.preflight_clipboard_once(&host, clipboard),
-        Ok(EngineClipboardRequestDecision::DeniedUnsupported)
-    );
+    assert!(matches!(
+        tracker.request_clipboard_permission_once(&host, clipboard),
+        Ok(EngineClipboardRequestDecision::PermissionRequired(_))
+    ));
     assert_eq!(tracker.pending_clipboard_text_bytes(), 0);
     assert_eq!(tracker.pending_network_body_bytes(), 4);
     assert_eq!(
