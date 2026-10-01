@@ -1,5 +1,9 @@
 use crate::TabId;
 use crate::http_transport::HttpTransport;
+use crate::privileged_request::{
+    MAX_PRIVILEGED_NETWORK_BODY_BYTES, MAX_PRIVILEGED_NETWORK_HEADER_BYTES,
+    MAX_PRIVILEGED_NETWORK_HEADERS,
+};
 use rarog_compositor::FrameCause;
 use rarog_engine::{
     BaseUrl, Engine, EngineError, FrameStatus, HostPolicy, NavigationCompletion,
@@ -7,8 +11,8 @@ use rarog_engine::{
     View, ViewId, ViewOptions,
 };
 use rarog_fetch::{
-    CredentialsMode, FetchMethod, HeaderList, NetworkCapability, NetworkPoll, RedirectMode,
-    RequestDestination, RequestMode,
+    CredentialsMode, FetchError, FetchLimits, FetchMethod, FetchRequest, HeaderList,
+    NetworkCapability, NetworkPoll, RedirectMode, RequestDestination, RequestMode,
 };
 use rarog_host::{
     HostControlErrorKind, HostControlPlane, NavigationContextCapability, NavigationContextId,
@@ -388,6 +392,103 @@ impl fmt::Debug for EngineNetworkAuthorization {
     }
 }
 
+/// Opaque, non-cloneable canonical Rarog Fetch request paired with its exact Host capability.
+///
+/// The high-level Fetch request retains Origin, mode, credentials, redirect and destination policy
+/// state. It is deliberately not exposed as a transport `NetworkRequest`; later execution must
+/// continue through a separately reviewed Host-owned path.
+pub struct EnginePreparedNetworkRequest {
+    source: EngineCommittedDocumentSource,
+    request: FetchRequest,
+    capability: NavigationContextCapability,
+}
+
+impl EnginePreparedNetworkRequest {
+    pub fn source(&self) -> &EngineCommittedDocumentSource {
+        &self.source
+    }
+
+    pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
+        self.source.authority()
+    }
+
+    pub fn target(&self) -> &WebUrl {
+        self.request.url()
+    }
+
+    pub fn origin(&self) -> &rarog_url::Origin {
+        self.request.origin()
+    }
+
+    pub fn method(&self) -> &FetchMethod {
+        self.request.method()
+    }
+
+    pub fn headers(&self) -> &HeaderList {
+        self.request.headers()
+    }
+
+    pub fn body(&self) -> Option<&[u8]> {
+        self.request.body()
+    }
+
+    pub const fn mode(&self) -> RequestMode {
+        self.request.mode()
+    }
+
+    pub const fn credentials(&self) -> CredentialsMode {
+        self.request.credentials()
+    }
+
+    pub const fn redirect(&self) -> RedirectMode {
+        self.request.redirect()
+    }
+
+    pub fn destination(&self) -> &RequestDestination {
+        self.request.destination()
+    }
+
+    pub const fn limits(&self) -> FetchLimits {
+        self.request.limits()
+    }
+}
+
+impl fmt::Debug for EnginePreparedNetworkRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (destination_kind, destination_other_bytes) = match self.request.destination() {
+            RequestDestination::Empty => ("empty", 0),
+            RequestDestination::Document => ("document", 0),
+            RequestDestination::Script => ("script", 0),
+            RequestDestination::Style => ("style", 0),
+            RequestDestination::Image => ("image", 0),
+            RequestDestination::Font => ("font", 0),
+            RequestDestination::Other(value) => ("other", value.len()),
+        };
+        formatter
+            .debug_struct("EnginePreparedNetworkRequest")
+            .field("authority", &self.source.authority())
+            .field("method", self.request.method())
+            .field("target_bytes", &self.request.url().as_str().len())
+            .field("header_count", &self.request.headers().len())
+            .field("header_bytes", &self.request.headers().byte_len())
+            .field("body_present", &self.request.body().is_some())
+            .field(
+                "body_bytes",
+                &self.request.body().map_or(0, |body| body.len()),
+            )
+            .field("mode", &self.request.mode())
+            .field("credentials", &self.request.credentials())
+            .field("redirect", &self.request.redirect())
+            .field("destination_kind", &destination_kind)
+            .field("destination_other_bytes", &destination_other_bytes)
+            .field(
+                "max_response_body_bytes",
+                &self.request.limits().max_response_body_bytes,
+            )
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineNavigationPoll {
     Pending,
@@ -468,6 +569,7 @@ pub enum EngineHostError {
         authorization_host: EngineHostInstanceToken,
         current_host: EngineHostInstanceToken,
     },
+    NetworkAuthorizationProjection(String),
     StaleFrameRequest {
         tab: TabId,
         view_generation: u64,
@@ -510,6 +612,9 @@ impl fmt::Display for EngineHostError {
                 authorization_host.get(),
                 current_host.get()
             ),
+            Self::NetworkAuthorizationProjection(message) => {
+                write!(formatter, "Network authorization projection failed: {message}")
+            }
             Self::StaleFrameRequest {
                 tab,
                 view_generation,
@@ -529,6 +634,31 @@ impl From<EngineError> for EngineHostError {
     fn from(error: EngineError) -> Self {
         Self::Engine(error)
     }
+}
+
+fn project_network_authorization_envelope(
+    envelope: &EngineNetworkAuthorizationEnvelope,
+) -> Result<FetchRequest, FetchError> {
+    let limits = FetchLimits {
+        max_headers: MAX_PRIVILEGED_NETWORK_HEADERS,
+        max_header_bytes: MAX_PRIVILEGED_NETWORK_HEADER_BYTES,
+        max_request_body_bytes: MAX_PRIVILEGED_NETWORK_BODY_BYTES,
+        max_response_body_bytes: envelope.max_response_body_bytes,
+    };
+    let mut request =
+        FetchRequest::try_new(envelope.target.clone(), envelope.source.origin().clone(), limits)?;
+    request.set_method(envelope.method.clone())?;
+    for header in envelope.headers.iter() {
+        request
+            .headers_mut()
+            .append(header.name(), header.value())?;
+    }
+    request.set_body(envelope.body.as_ref().map(|body| body.to_vec()))?;
+    request.set_mode(envelope.mode);
+    request.set_credentials(envelope.credentials);
+    request.set_redirect(envelope.redirect);
+    request.set_destination(envelope.destination.clone());
+    Ok(request)
 }
 
 fn allocate_engine_host_instance() -> Result<EngineHostInstanceToken, EngineHostError> {
@@ -845,6 +975,84 @@ impl EngineHost {
         self.host
             .revoke_navigation_context_capability(authorization.capability)
             .map_err(|error| EngineHostError::Host(error.to_string()))
+    }
+
+    pub fn prepare_network_authorization(
+        &mut self,
+        authorization: EngineNetworkAuthorization,
+    ) -> Result<Option<EnginePreparedNetworkRequest>, EngineHostError> {
+        let authorization_host = authorization.envelope.source.host_instance();
+        if authorization_host != self.instance {
+            return Err(EngineHostError::ForeignNetworkAuthorization {
+                authorization_host,
+                current_host: self.instance,
+            });
+        }
+
+        let EngineNetworkAuthorization {
+            envelope,
+            capability,
+        } = authorization;
+        let source = envelope.source.clone();
+        let source_is_current = match self.validate_committed_document_source(&source) {
+            Ok(is_current) => is_current,
+            Err(error) => {
+                self.revoke_network_capability_if_live(capability)?;
+                return Err(error);
+            }
+        };
+        if !source_is_current {
+            self.revoke_network_capability_if_live(capability)?;
+            return Ok(None);
+        }
+
+        let request = match project_network_authorization_envelope(&envelope) {
+            Ok(request) => request,
+            Err(error) => {
+                self.revoke_network_capability_if_live(capability)?;
+                return Err(EngineHostError::NetworkAuthorizationProjection(
+                    error.to_string(),
+                ));
+            }
+        };
+
+        Ok(Some(EnginePreparedNetworkRequest {
+            source,
+            request,
+            capability,
+        }))
+    }
+
+    pub fn revoke_prepared_network_request(
+        &mut self,
+        prepared: EnginePreparedNetworkRequest,
+    ) -> Result<(), EngineHostError> {
+        if prepared.source.host_instance() != self.instance {
+            return Err(EngineHostError::ForeignNetworkAuthorization {
+                authorization_host: prepared.source.host_instance(),
+                current_host: self.instance,
+            });
+        }
+
+        self.host
+            .revoke_navigation_context_capability(prepared.capability)
+            .map_err(|error| EngineHostError::Host(error.to_string()))
+    }
+
+    fn revoke_network_capability_if_live(
+        &mut self,
+        capability: NavigationContextCapability,
+    ) -> Result<(), EngineHostError> {
+        match self.host.revoke_navigation_context_capability(capability) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if error.kind
+                    == HostControlErrorKind::InvalidNavigationContextCapabilityAuthority =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(EngineHostError::Host(error.to_string())),
+        }
     }
 
     #[cfg(test)]
