@@ -613,7 +613,10 @@ impl fmt::Display for EngineHostError {
                 current_host.get()
             ),
             Self::NetworkAuthorizationProjection(message) => {
-                write!(formatter, "Network authorization projection failed: {message}")
+                write!(
+                    formatter,
+                    "Network authorization projection failed: {message}"
+                )
             }
             Self::StaleFrameRequest {
                 tab,
@@ -645,8 +648,11 @@ fn project_network_authorization_envelope(
         max_request_body_bytes: MAX_PRIVILEGED_NETWORK_BODY_BYTES,
         max_response_body_bytes: envelope.max_response_body_bytes,
     };
-    let mut request =
-        FetchRequest::try_new(envelope.target.clone(), envelope.source.origin().clone(), limits)?;
+    let mut request = FetchRequest::try_new(
+        envelope.target.clone(),
+        envelope.source.origin().clone(),
+        limits,
+    )?;
     request.set_method(envelope.method.clone())?;
     for header in envelope.headers.iter() {
         request
