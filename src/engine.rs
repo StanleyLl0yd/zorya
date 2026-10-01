@@ -2418,7 +2418,7 @@ mod tests {
             Err(EngineHostError::InconsistentNavigationState { tab })
         );
         assert_eq!(
-            tracker.preflight_clipboard_once(&host, request),
+            tracker.request_clipboard_permission_once(&host, request),
             Err(EnginePrivilegedRequestError::Host(
                 EngineHostError::InconsistentNavigationState { tab }
             ))
