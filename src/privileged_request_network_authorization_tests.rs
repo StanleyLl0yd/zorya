@@ -109,8 +109,7 @@ fn authorization_retains_exact_consumed_envelope_and_canonical_target() {
     headers
         .append("X-Authorization-Secret", "secret-header-value")
         .expect("header");
-    let target =
-        "HTTP://127.0.0.1:1/envelope?token=raw-target-secret#client-fragment";
+    let target = "HTTP://127.0.0.1:1/envelope?token=raw-target-secret#client-fragment";
 
     let request = tracker
         .register_network_with_request_parts_and_response_limit(
@@ -144,9 +143,7 @@ fn authorization_retains_exact_consumed_envelope_and_canonical_target() {
     );
     assert_eq!(authorization.method().as_str(), "POST");
     assert_eq!(
-        authorization
-            .headers()
-            .get_first("x-authorization-secret"),
+        authorization.headers().get_first("x-authorization-secret"),
         Some("secret-header-value")
     );
     assert!(matches!(authorization.body(), Some(body) if body.is_empty()));
