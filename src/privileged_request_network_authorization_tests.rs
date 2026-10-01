@@ -207,6 +207,188 @@ fn authorization_retains_exact_consumed_envelope_and_canonical_target() {
 }
 
 #[test]
+fn authorization_projects_exact_canonical_rarog_fetch_request_without_transport() {
+    let (_tab, mut host, source) = current_source("/prepared-fetch-request");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(2).expect("tracker");
+    let mut headers = HeaderList::try_new(4, 1024).expect("headers");
+    headers
+        .append("X-Prepared-Secret", "prepared-secret-value")
+        .expect("header");
+
+    let request = tracker
+        .register_network_with_request_parts_and_response_limit(
+            &source,
+            FetchMethod::post(),
+            "HTTP://127.0.0.1:1/prepared?token=prepared-target-secret#client-fragment",
+            headers,
+            Some(Vec::new()),
+            RequestMode::NoCors,
+            CredentialsMode::Include,
+            RedirectMode::Manual,
+            RequestDestination::Other("prepared-destination-secret".into()),
+            4096,
+        )
+        .expect("register exact envelope");
+    let authorization = match tracker
+        .authorize_network_once(&mut host, request)
+        .expect("authorize exact envelope")
+    {
+        EngineNetworkAuthorizationResult::Authorized(authorization) => authorization,
+        EngineNetworkAuthorizationResult::Denied(decision) => {
+            panic!("exact envelope was denied: {decision:?}")
+        }
+    };
+
+    let prepared = host
+        .prepare_network_authorization(authorization)
+        .expect("prepare authorization")
+        .expect("current authorization");
+    assert_eq!(prepared.source(), &source);
+    assert_eq!(prepared.authority(), source.authority());
+    assert_eq!(
+        prepared.target().as_str(),
+        "http://127.0.0.1:1/prepared?token=prepared-target-secret"
+    );
+    assert_eq!(prepared.origin(), source.origin());
+    assert_eq!(prepared.method().as_str(), "POST");
+    assert_eq!(
+        prepared.headers().get_first("x-prepared-secret"),
+        Some("prepared-secret-value")
+    );
+    assert!(matches!(prepared.body(), Some(body) if body.is_empty()));
+    assert_eq!(prepared.mode(), RequestMode::NoCors);
+    assert_eq!(prepared.credentials(), CredentialsMode::Include);
+    assert_eq!(prepared.redirect(), RedirectMode::Manual);
+    assert_eq!(
+        prepared.destination(),
+        &RequestDestination::Other("prepared-destination-secret".into())
+    );
+    assert_eq!(
+        prepared.limits(),
+        rarog_fetch::FetchLimits {
+            max_headers: MAX_PRIVILEGED_NETWORK_HEADERS,
+            max_header_bytes: MAX_PRIVILEGED_NETWORK_HEADER_BYTES,
+            max_request_body_bytes: MAX_PRIVILEGED_NETWORK_BODY_BYTES,
+            max_response_body_bytes: 4096,
+        }
+    );
+
+    let debug = format!("{prepared:?}");
+    for sentinel in [
+        "127.0.0.1",
+        "prepared-target-secret",
+        "x-prepared-secret",
+        "prepared-secret-value",
+        "prepared-destination-secret",
+        "Capability",
+    ] {
+        assert!(
+            !debug.contains(sentinel),
+            "sensitive prepared-request Debug sentinel leaked"
+        );
+    }
+    assert!(debug.contains("POST"));
+    assert!(debug.contains("target_bytes"));
+    assert!(debug.contains("header_count"));
+    assert!(debug.contains("body_present"));
+    assert!(debug.contains("max_response_body_bytes"));
+
+    assert_eq!(host.active_privileged_capabilities(), 1);
+    host.revoke_prepared_network_request(prepared)
+        .expect("explicit prepared revoke");
+    assert_eq!(host.active_privileged_capabilities(), 0);
+
+    let no_body = tracker
+        .register_network_with_request_parts_and_response_limit(
+            &source,
+            FetchMethod::post(),
+            "http://127.0.0.1:1/prepared-no-body",
+            HeaderList::default(),
+            None,
+            RequestMode::Cors,
+            CredentialsMode::SameOrigin,
+            RedirectMode::Follow,
+            RequestDestination::Empty,
+            1024,
+        )
+        .expect("register absent-body envelope");
+    let no_body_authorization = match tracker
+        .authorize_network_once(&mut host, no_body)
+        .expect("authorize absent-body envelope")
+    {
+        EngineNetworkAuthorizationResult::Authorized(authorization) => authorization,
+        EngineNetworkAuthorizationResult::Denied(decision) => {
+            panic!("absent-body envelope was denied: {decision:?}")
+        }
+    };
+    let no_body_prepared = host
+        .prepare_network_authorization(no_body_authorization)
+        .expect("prepare absent-body authorization")
+        .expect("current absent-body authorization");
+    assert_eq!(no_body_prepared.body(), None);
+    host.revoke_prepared_network_request(no_body_prepared)
+        .expect("revoke absent-body prepared request");
+    assert_eq!(host.active_privileged_capabilities(), 0);
+}
+
+#[test]
+fn stale_and_foreign_authorizations_fail_before_fetch_projection() {
+    let (tab, mut host, source) = current_source("/prepared-stale-first");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+    let request = tracker
+        .register_network(&source, "http://127.0.0.1:1/prepared-stale")
+        .expect("register request");
+    let authorization = match tracker
+        .authorize_network_once(&mut host, request)
+        .expect("authorize request")
+    {
+        EngineNetworkAuthorizationResult::Authorized(authorization) => authorization,
+        EngineNetworkAuthorizationResult::Denied(decision) => {
+            panic!("exact current same-site request was denied: {decision:?}")
+        }
+    };
+    assert_eq!(host.active_privileged_capabilities(), 1);
+
+    let replacement = commit_remote(&mut host, tab, serve_once("/prepared-stale-second"));
+    assert_ne!(
+        replacement.navigation_context(),
+        source.navigation_context()
+    );
+    assert!(
+        host.prepare_network_authorization(authorization)
+            .expect("stale preparation result")
+            .is_none()
+    );
+    assert_eq!(host.active_privileged_capabilities(), 0);
+
+    let request = tracker
+        .register_network(&replacement, "http://127.0.0.1:1/prepared-foreign")
+        .expect("register foreign request");
+    let foreign = match tracker
+        .authorize_network_once(&mut host, request)
+        .expect("authorize foreign request")
+    {
+        EngineNetworkAuthorizationResult::Authorized(authorization) => authorization,
+        EngineNetworkAuthorizationResult::Denied(decision) => {
+            panic!("exact current same-site request was denied: {decision:?}")
+        }
+    };
+    assert!(host.close_view(tab).expect("close source view"));
+    assert_eq!(host.active_privileged_capabilities(), 0);
+
+    let mut replacement_host = EngineHost::new().expect("replacement host");
+    replacement_host.create_view(tab).expect("replacement view");
+    let error = replacement_host
+        .prepare_network_authorization(foreign)
+        .expect_err("foreign authorization must be rejected");
+    assert!(matches!(
+        error,
+        EngineHostError::ForeignNetworkAuthorization { .. }
+    ));
+    assert_eq!(replacement_host.active_privileged_capabilities(), 0);
+}
+
+#[test]
 fn authorization_is_one_shot_and_replay_fails_after_explicit_revoke() {
     let (_tab, mut host, source) = current_source("/authorization-replay");
     let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
