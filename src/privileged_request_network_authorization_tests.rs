@@ -102,6 +102,111 @@ fn exact_same_site_request_grants_one_context_capability_and_revokes_explicitly(
 }
 
 #[test]
+fn authorization_retains_exact_consumed_envelope_and_canonical_target() {
+    let (_tab, mut host, source) = current_source("/authorization-envelope");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(2).expect("tracker");
+    let mut headers = HeaderList::try_new(4, 1024).expect("headers");
+    headers
+        .append("X-Authorization-Secret", "secret-header-value")
+        .expect("header");
+    let target = "HTTP://127.0.0.1:1/envelope?token=raw-target-secret#client-fragment";
+
+    let request = tracker
+        .register_network_with_request_parts_and_response_limit(
+            &source,
+            FetchMethod::post(),
+            target,
+            headers,
+            Some(Vec::new()),
+            RequestMode::NoCors,
+            CredentialsMode::Include,
+            RedirectMode::Manual,
+            RequestDestination::Other("secret-destination-value".into()),
+            4096,
+        )
+        .expect("register exact envelope");
+
+    let authorization = match tracker
+        .authorize_network_once(&mut host, request)
+        .expect("authorize exact envelope")
+    {
+        EngineNetworkAuthorizationResult::Authorized(authorization) => authorization,
+        EngineNetworkAuthorizationResult::Denied(decision) => {
+            panic!("exact envelope was denied: {decision:?}")
+        }
+    };
+
+    assert_eq!(authorization.source(), &source);
+    assert_eq!(
+        authorization.target().as_str(),
+        "http://127.0.0.1:1/envelope?token=raw-target-secret#client-fragment"
+    );
+    assert_eq!(authorization.method().as_str(), "POST");
+    assert_eq!(
+        authorization.headers().get_first("x-authorization-secret"),
+        Some("secret-header-value")
+    );
+    assert!(matches!(authorization.body(), Some(body) if body.is_empty()));
+    assert_eq!(authorization.mode(), RequestMode::NoCors);
+    assert_eq!(authorization.credentials(), CredentialsMode::Include);
+    assert_eq!(authorization.redirect(), RedirectMode::Manual);
+    assert_eq!(
+        authorization.destination(),
+        &RequestDestination::Other("secret-destination-value".into())
+    );
+    assert_eq!(authorization.max_response_body_bytes(), 4096);
+
+    let debug = format!("{authorization:?}");
+    for secret in [
+        "127.0.0.1",
+        "raw-target-secret",
+        "x-authorization-secret",
+        "secret-header-value",
+        "secret-destination-value",
+        "Capability",
+    ] {
+        assert!(!debug.contains(secret), "sensitive Debug sentinel leaked");
+    }
+    assert!(debug.contains("POST"));
+    assert!(debug.contains("target_bytes"));
+    assert!(debug.contains("header_count"));
+    assert!(debug.contains("body_present"));
+    assert!(debug.contains("max_response_body_bytes"));
+
+    host.revoke_network_authorization(authorization)
+        .expect("explicit revoke");
+    assert_eq!(host.active_privileged_capabilities(), 0);
+
+    let no_body = tracker
+        .register_network_with_request_parts_and_response_limit(
+            &source,
+            FetchMethod::post(),
+            "http://127.0.0.1:1/no-body",
+            HeaderList::default(),
+            None,
+            RequestMode::Cors,
+            CredentialsMode::SameOrigin,
+            RedirectMode::Follow,
+            RequestDestination::Empty,
+            1024,
+        )
+        .expect("register absent-body envelope");
+    let no_body_authorization = match tracker
+        .authorize_network_once(&mut host, no_body)
+        .expect("authorize absent-body envelope")
+    {
+        EngineNetworkAuthorizationResult::Authorized(authorization) => authorization,
+        EngineNetworkAuthorizationResult::Denied(decision) => {
+            panic!("absent-body envelope was denied: {decision:?}")
+        }
+    };
+    assert_eq!(no_body_authorization.body(), None);
+    host.revoke_network_authorization(no_body_authorization)
+        .expect("revoke absent-body authorization");
+    assert_eq!(host.active_privileged_capabilities(), 0);
+}
+
+#[test]
 fn authorization_is_one_shot_and_replay_fails_after_explicit_revoke() {
     let (_tab, mut host, source) = current_source("/authorization-replay");
     let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
