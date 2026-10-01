@@ -373,11 +373,7 @@ impl fmt::Debug for EngineNetworkAuthorization {
             .field("body_present", &self.envelope.body.is_some())
             .field(
                 "body_bytes",
-                &self
-                    .envelope
-                    .body
-                    .as_ref()
-                    .map_or(0, |body| body.len()),
+                &self.envelope.body.as_ref().map_or(0, |body| body.len()),
             )
             .field("mode", &self.envelope.mode)
             .field("credentials", &self.envelope.credentials)
