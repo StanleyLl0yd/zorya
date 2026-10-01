@@ -86,13 +86,12 @@ pub(crate) fn authorize_consumed_network_target(
     host: &mut EngineHost,
     request: &EngineNetworkPrivilegedRequest,
 ) -> Result<EngineNetworkAuthorizationResult, EngineHostError> {
-    let target =
-        match classify_consumed_network_target(host, request.source(), request.target())? {
-            ConsumedNetworkTarget::Authorized(target) => target,
-            ConsumedNetworkTarget::Denied(decision) => {
-                return Ok(EngineNetworkAuthorizationResult::Denied(decision));
-            }
-        };
+    let target = match classify_consumed_network_target(host, request.source(), request.target())? {
+        ConsumedNetworkTarget::Authorized(target) => target,
+        ConsumedNetworkTarget::Denied(decision) => {
+            return Ok(EngineNetworkAuthorizationResult::Denied(decision));
+        }
+    };
 
     match host.grant_network_authorization(
         request.source(),
@@ -119,8 +118,10 @@ pub(crate) fn preflight_consumed_network_target(
     source: &EngineCommittedDocumentSource,
     target: &str,
 ) -> Result<EngineNetworkTargetDecision, EngineHostError> {
-    Ok(match classify_consumed_network_target(host, source, target)? {
-        ConsumedNetworkTarget::Authorized(_) => EngineNetworkTargetDecision::DeniedUnsupported,
-        ConsumedNetworkTarget::Denied(decision) => decision,
-    })
+    Ok(
+        match classify_consumed_network_target(host, source, target)? {
+            ConsumedNetworkTarget::Authorized(_) => EngineNetworkTargetDecision::DeniedUnsupported,
+            ConsumedNetworkTarget::Denied(decision) => decision,
+        },
+    )
 }
