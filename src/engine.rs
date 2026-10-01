@@ -432,15 +432,15 @@ impl EnginePreparedNetworkRequest {
         self.request.body()
     }
 
-    pub const fn mode(&self) -> RequestMode {
+    pub fn mode(&self) -> RequestMode {
         self.request.mode()
     }
 
-    pub const fn credentials(&self) -> CredentialsMode {
+    pub fn credentials(&self) -> CredentialsMode {
         self.request.credentials()
     }
 
-    pub const fn redirect(&self) -> RedirectMode {
+    pub fn redirect(&self) -> RedirectMode {
         self.request.redirect()
     }
 
@@ -448,7 +448,7 @@ impl EnginePreparedNetworkRequest {
         self.request.destination()
     }
 
-    pub const fn limits(&self) -> FetchLimits {
+    pub fn limits(&self) -> FetchLimits {
         self.request.limits()
     }
 }
