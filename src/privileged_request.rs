@@ -199,6 +199,10 @@ impl EngineNetworkPrivilegedRequest {
         self.body.as_deref()
     }
 
+    pub(crate) fn body_storage(&self) -> Option<Arc<[u8]>> {
+        self.body.clone()
+    }
+
     pub const fn mode(&self) -> RequestMode {
         self.mode
     }
@@ -920,8 +924,7 @@ impl EnginePrivilegedRequestTracker {
         request: EngineNetworkPrivilegedRequest,
     ) -> Result<EngineNetworkAuthorizationResult, EnginePrivilegedRequestError> {
         let stored = self.consume_network_exact(request)?;
-        authorize_consumed_network_target(host, &stored.source, stored.target())
-            .map_err(EnginePrivilegedRequestError::from)
+        authorize_consumed_network_target(host, &stored).map_err(EnginePrivilegedRequestError::from)
     }
 
     #[cfg(test)]
