@@ -350,11 +350,15 @@ fn stale_and_foreign_authorizations_fail_before_fetch_projection() {
     assert_eq!(host.active_privileged_capabilities(), 1);
 
     let replacement = commit_remote(&mut host, tab, serve_once("/prepared-stale-second"));
-    assert_ne!(replacement.navigation_context(), source.navigation_context());
-    assert!(host
-        .prepare_network_authorization(authorization)
-        .expect("stale preparation result")
-        .is_none());
+    assert_ne!(
+        replacement.navigation_context(),
+        source.navigation_context()
+    );
+    assert!(
+        host.prepare_network_authorization(authorization)
+            .expect("stale preparation result")
+            .is_none()
+    );
     assert_eq!(host.active_privileged_capabilities(), 0);
 
     let request = tracker
