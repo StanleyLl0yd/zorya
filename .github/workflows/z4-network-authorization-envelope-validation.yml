@@ -37,10 +37,21 @@ jobs:
         run: |
           set -euo pipefail
           git diff --exit-code 83b5b1bd5eacc64a3256b859c81df8d3b1355ab4..HEAD -- Cargo.toml Cargo.lock
+          grep -q '^struct EngineNetworkAuthorizationEnvelope {' src/engine.rs
+          grep -q '^pub struct EngineNetworkAuthorization {' src/engine.rs
+          grep -q 'envelope: Box<EngineNetworkAuthorizationEnvelope>' src/engine.rs
           grep -q 'target: WebUrl' src/engine.rs
+          grep -q 'method: FetchMethod' src/engine.rs
+          grep -q 'headers: HeaderList' src/engine.rs
+          grep -q 'body: Option<std::sync::Arc<\[u8\]>>' src/engine.rs
+          grep -q 'mode: RequestMode' src/engine.rs
+          grep -q 'credentials: CredentialsMode' src/engine.rs
+          grep -q 'redirect: RedirectMode' src/engine.rs
+          grep -q 'destination: RequestDestination' src/engine.rs
           grep -q 'max_response_body_bytes: usize' src/engine.rs
           grep -q 'authorize_consumed_network_target(host, &stored)' src/privileged_request.rs
           grep -q 'request.body_storage()' src/network_target_policy.rs
           ! grep -q 'start_navigation_context_network_operation' src/privileged_request.rs
           ! grep -q 'start_navigation_context_network_operation' src/network_target_policy.rs
           ! grep -q 'NavigationContextId::try_new' src/network_target_policy.rs
+          grep -q '331689e7dff02a556d0b96530178def821056e20' Cargo.toml
