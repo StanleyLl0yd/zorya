@@ -1250,13 +1250,13 @@ mod tests {
             EngineClipboardOperationKind::ReadText
         );
         assert_eq!(tracker.pending_requests(), 1);
-        assert_eq!(
-            tracker.preflight_clipboard_once(&host, request.clone()),
-            Ok(EngineClipboardRequestDecision::DeniedUnsupported)
-        );
+        assert!(matches!(
+            tracker.request_clipboard_permission_once(&host, request.clone()),
+            Ok(EngineClipboardRequestDecision::PermissionRequired(_))
+        ));
         assert_eq!(tracker.pending_requests(), 0);
         assert_eq!(
-            tracker.preflight_clipboard_once(&host, request.clone()),
+            tracker.request_clipboard_permission_once(&host, request.clone()),
             Err(EnginePrivilegedRequestError::UnknownRequest(request.id()))
         );
     }
@@ -1285,7 +1285,7 @@ mod tests {
         assert_eq!(replacement.site_process(), first.site_process());
         assert_ne!(replacement.navigation_context(), first.navigation_context());
         assert_eq!(
-            tracker.preflight_clipboard_once(&host, request.clone()),
+            tracker.request_clipboard_permission_once(&host, request.clone()),
             Ok(EngineClipboardRequestDecision::DeniedStaleAuthority)
         );
         assert_eq!(tracker.pending_requests(), 0);
@@ -1854,9 +1854,9 @@ mod tests {
             Err(EnginePrivilegedRequestError::CapacityExceeded)
         );
         assert_eq!(tracker.pending_requests(), 1);
-        assert_eq!(
-            tracker.preflight_clipboard_once(&host, first),
-            Ok(EngineClipboardRequestDecision::DeniedUnsupported)
-        );
+        assert!(matches!(
+            tracker.request_clipboard_permission_once(&host, first),
+            Ok(EngineClipboardRequestDecision::PermissionRequired(_))
+        ));
     }
 }
