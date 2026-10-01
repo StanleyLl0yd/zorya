@@ -6,7 +6,10 @@ use rarog_engine::{
     NavigationId as RarogNavigationId, NavigationRequest, NavigationStartOutcome, ResourceRequest,
     View, ViewId, ViewOptions,
 };
-use rarog_fetch::{NetworkCapability, NetworkPoll};
+use rarog_fetch::{
+    CredentialsMode, FetchMethod, HeaderList, NetworkCapability, NetworkPoll, RedirectMode,
+    RequestDestination, RequestMode,
+};
 use rarog_host::{
     HostControlErrorKind, HostControlPlane, NavigationContextCapability, NavigationContextId,
     NetworkOperationId,
@@ -276,8 +279,23 @@ impl fmt::Debug for EngineCommittedDocumentSource {
     }
 }
 
+/// Opaque, non-cloneable Host Network authorization bound to one exact consumed request envelope.
+///
+/// The Rarog context-scoped capability remains private. Canonical request identity is retained so a
+/// later reviewed execution path cannot combine this capability with caller-selected replacement
+/// method/header/body/policy metadata. Debug output exposes only safe aggregate metadata and never
+/// serializes the source Origin, target, headers, body, custom destination contents or capability.
 pub struct EngineNetworkAuthorization {
     source: EngineCommittedDocumentSource,
+    target: WebUrl,
+    method: FetchMethod,
+    headers: HeaderList,
+    body: Option<std::sync::Arc<[u8]>>,
+    mode: RequestMode,
+    credentials: CredentialsMode,
+    redirect: RedirectMode,
+    destination: RequestDestination,
+    max_response_body_bytes: usize,
     capability: NavigationContextCapability,
 }
 
@@ -289,13 +307,70 @@ impl EngineNetworkAuthorization {
     pub const fn authority(&self) -> EngineCommittedDocumentAuthority {
         self.source.authority()
     }
+
+    pub fn target(&self) -> &WebUrl {
+        &self.target
+    }
+
+    pub fn method(&self) -> &FetchMethod {
+        &self.method
+    }
+
+    pub fn headers(&self) -> &HeaderList {
+        &self.headers
+    }
+
+    pub fn body(&self) -> Option<&[u8]> {
+        self.body.as_deref()
+    }
+
+    pub const fn mode(&self) -> RequestMode {
+        self.mode
+    }
+
+    pub const fn credentials(&self) -> CredentialsMode {
+        self.credentials
+    }
+
+    pub const fn redirect(&self) -> RedirectMode {
+        self.redirect
+    }
+
+    pub fn destination(&self) -> &RequestDestination {
+        &self.destination
+    }
+
+    pub const fn max_response_body_bytes(&self) -> usize {
+        self.max_response_body_bytes
+    }
 }
 
 impl fmt::Debug for EngineNetworkAuthorization {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (destination_kind, destination_other_bytes) = match &self.destination {
+            RequestDestination::Empty => ("empty", 0),
+            RequestDestination::Document => ("document", 0),
+            RequestDestination::Script => ("script", 0),
+            RequestDestination::Style => ("style", 0),
+            RequestDestination::Image => ("image", 0),
+            RequestDestination::Font => ("font", 0),
+            RequestDestination::Other(value) => ("other", value.len()),
+        };
         formatter
             .debug_struct("EngineNetworkAuthorization")
             .field("authority", &self.source.authority())
+            .field("method", &self.method)
+            .field("target_bytes", &self.target.as_str().len())
+            .field("header_count", &self.headers.len())
+            .field("header_bytes", &self.headers.byte_len())
+            .field("body_present", &self.body.is_some())
+            .field("body_bytes", &self.body.as_ref().map_or(0, |body| body.len()))
+            .field("mode", &self.mode)
+            .field("credentials", &self.credentials)
+            .field("redirect", &self.redirect)
+            .field("destination_kind", &destination_kind)
+            .field("destination_other_bytes", &destination_other_bytes)
+            .field("max_response_body_bytes", &self.max_response_body_bytes)
             .finish()
     }
 }
@@ -702,9 +777,19 @@ impl EngineHost {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn grant_network_authorization(
         &mut self,
         source: &EngineCommittedDocumentSource,
+        target: WebUrl,
+        method: FetchMethod,
+        headers: HeaderList,
+        body: Option<std::sync::Arc<[u8]>>,
+        mode: RequestMode,
+        credentials: CredentialsMode,
+        redirect: RedirectMode,
+        destination: RequestDestination,
+        max_response_body_bytes: usize,
     ) -> Result<Option<EngineNetworkAuthorization>, EngineHostError> {
         if !self.validate_committed_document_source(source)? {
             return Ok(None);
@@ -718,6 +803,15 @@ impl EngineHost {
             .map_err(|error| EngineHostError::Host(error.to_string()))?;
         Ok(Some(EngineNetworkAuthorization {
             source: source.clone(),
+            target,
+            method,
+            headers,
+            body,
+            mode,
+            credentials,
+            redirect,
+            destination,
+            max_response_body_bytes,
             capability,
         }))
     }
