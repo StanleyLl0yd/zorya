@@ -165,7 +165,7 @@ fn authorization_retains_exact_consumed_envelope_and_canonical_target() {
         "secret-destination-value",
         "Capability",
     ] {
-        assert!(!debug.contains(secret), "{secret} leaked through Debug");
+        assert!(!debug.contains(secret), "sensitive Debug sentinel leaked");
     }
     assert!(debug.contains("POST"));
     assert!(debug.contains("target_bytes"));
