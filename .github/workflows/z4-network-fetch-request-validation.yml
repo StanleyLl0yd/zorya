@@ -31,5 +31,19 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked --all-targets
+      - name: Boundary checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'pub struct EnginePreparedNetworkRequest' src/engine.rs
+          grep -q 'FetchRequest::try_new' src/engine.rs
+          grep -q 'max_headers: MAX_PRIVILEGED_NETWORK_HEADERS' src/engine.rs
+          grep -q 'max_header_bytes: MAX_PRIVILEGED_NETWORK_HEADER_BYTES' src/engine.rs
+          grep -q 'max_request_body_bytes: MAX_PRIVILEGED_NETWORK_BODY_BYTES' src/engine.rs
+          test "$(grep -c 'start_navigation_context_network_operation' src/engine.rs)" -eq 1
+          ! grep -q 'network_request()' src/engine.rs
+          ! grep -B 3 'pub struct EnginePreparedNetworkRequest' src/engine.rs | grep -q 'derive.*Clone'
+          git diff --exit-code fea0d157aeeb22471c044576bba928f993231073..HEAD -- Cargo.toml Cargo.lock
+          grep -q '331689e7dff02a556d0b96530178def821056e20' Cargo.toml
       - name: Diff check
         run: git diff --check fea0d157aeeb22471c044576bba928f993231073..HEAD
