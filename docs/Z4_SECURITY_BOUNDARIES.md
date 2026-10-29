@@ -92,6 +92,10 @@ Explicit abandonment uses only the specialized `discard_network_once` and `disca
 
 Network no longer ends at the historical deny-only terminal: exact current same-site requests can reach opaque context-scoped Rarog Network authorization and canonical high-level `FetchRequest` preparation as described above, but still cannot start transport because Rarog Fetch policy above `NetworkRequest` is not bypassed. Exact current Clipboard requests now stop at permission mediation: `EngineClipboardPermissionRequest` is non-`Clone`/non-`Copy`, retains the exact consumed source/operation privately, exposes only authority/operation/size metadata, and can only be explicitly denied in this slice. No Clipboard capability grant, OS clipboard action, user permission decision, persisted permission, Host network operation from the privileged path, or IPC authority is introduced. Response policy/execution, Origin-header synthesis, CORS/Fetch execution, Clipboard backend access and streaming/file uploads remain out of scope.
 
+## Clipboard permission response (deny-only)
+
+`EngineClipboardPermissionRequest::resolve_once` consumes a non-cloneable permission handoff with typed Deny or AllowOnce intent. Deny does not require a live Host. AllowOnce repeats exact live Host-minted source/Origin validation at response time, regardless of any earlier prompt display: missing, stale, foreign or closed Host/View state returns `DeniedStaleAuthority`; current authority returns `DeniedUnsupported`. There is deliberately no approved-result variant. The resource lease is released on every outcome/error and no Rarog capability, OS Clipboard call, persisted preference or UI approval path exists.
+
 ## Explicitly not provided yet
 
 This boundary does not provide or claim:
