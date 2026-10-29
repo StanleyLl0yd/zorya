@@ -15,8 +15,8 @@ use rarog_fetch::{
 use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub const DEFAULT_MAX_PENDING_PRIVILEGED_REQUESTS: usize = 4096;
 pub const DEFAULT_MAX_PENDING_PRIVILEGED_NETWORK_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -94,6 +94,37 @@ impl EngineClipboardOperation {
     }
 }
 
+/// Accounting for Clipboard payloads retained by permission requests after the original
+/// one-shot tracker slot is consumed. The lease is resource ownership only, never capability
+/// authority: dropping it releases quotas without touching Host or OS state.
+#[derive(Clone, Copy, Debug, Default)]
+struct ClipboardPermissionAccounting {
+    outstanding: usize,
+    write_bytes: usize,
+}
+
+struct ClipboardPermissionLease {
+    accounting: Arc<Mutex<ClipboardPermissionAccounting>>,
+    write_bytes: usize,
+}
+
+impl Drop for ClipboardPermissionLease {
+    fn drop(&mut self) {
+        let mut state = self
+            .accounting
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.outstanding = state
+            .outstanding
+            .checked_sub(1)
+            .expect("Clipboard permission lease count must be accounted");
+        state.write_bytes = state
+            .write_bytes
+            .checked_sub(self.write_bytes)
+            .expect("Clipboard permission lease bytes must be accounted");
+    }
+}
+
 /// Opaque permission-mediation handoff for one exact consumed Clipboard operation.
 ///
 /// This value deliberately carries no Rarog Clipboard capability. It retains the exact source and
@@ -101,12 +132,20 @@ impl EngineClipboardOperation {
 /// limit or write payload. Public observation is restricted to safe UI metadata; source Origin and
 /// write text are never exposed by this type or its Debug implementation.
 #[must_use = "Clipboard permission requests must be explicitly denied or resolved"]
-#[derive(PartialEq, Eq)]
 pub struct EngineClipboardPermissionRequest {
     id: EnginePrivilegedRequestId,
     source: EngineCommittedDocumentSource,
     operation: EngineClipboardOperation,
+    lease: Option<ClipboardPermissionLease>,
 }
+
+impl PartialEq for EngineClipboardPermissionRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.source == other.source && self.operation == other.operation
+    }
+}
+
+impl Eq for EngineClipboardPermissionRequest {}
 
 impl EngineClipboardPermissionRequest {
     pub const fn request_id(&self) -> EnginePrivilegedRequestId {
@@ -600,6 +639,7 @@ pub struct EnginePrivilegedRequestTracker {
     pending_network_body_bytes: usize,
     max_pending_clipboard_text_bytes: usize,
     pending_clipboard_text_bytes: usize,
+    outstanding_clipboard_permissions: Arc<Mutex<ClipboardPermissionAccounting>>,
     pending: BTreeMap<EnginePrivilegedRequestId, PendingPrivilegedRequest>,
 }
 
@@ -644,6 +684,9 @@ impl EnginePrivilegedRequestTracker {
             pending_network_body_bytes: 0,
             max_pending_clipboard_text_bytes,
             pending_clipboard_text_bytes: 0,
+            outstanding_clipboard_permissions: Arc::new(Mutex::new(
+                ClipboardPermissionAccounting::default(),
+            )),
             pending: BTreeMap::new(),
         })
     }
@@ -674,6 +717,23 @@ impl EnginePrivilegedRequestTracker {
 
     pub fn pending_requests(&self) -> usize {
         self.pending.len()
+    }
+
+    /// Number of already consumed Clipboard requests still awaiting permission resolution.
+    pub fn outstanding_clipboard_permission_requests(&self) -> usize {
+        self.clipboard_permission_accounting().outstanding
+    }
+
+    /// Write-text bytes retained by outstanding Clipboard permission handoffs.
+    pub fn outstanding_clipboard_permission_write_bytes(&self) -> usize {
+        self.clipboard_permission_accounting().write_bytes
+    }
+
+    fn clipboard_permission_accounting(&self) -> ClipboardPermissionAccounting {
+        *self
+            .outstanding_clipboard_permissions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Registers a Clipboard text read request with the exact product maximum result bound.
@@ -724,17 +784,20 @@ impl EnginePrivilegedRequestTracker {
                 max: MAX_PRIVILEGED_CLIPBOARD_TEXT_BYTES,
             });
         }
-        let next_text_bytes = self
+        let accounted_text_bytes = self
             .pending_clipboard_text_bytes
-            .checked_add(text_bytes)
-            .ok_or(EnginePrivilegedRequestError::ClipboardTextBudgetExceeded {
-                pending: self.pending_clipboard_text_bytes,
+            .checked_add(self.clipboard_permission_accounting().write_bytes)
+            .ok_or(EnginePrivilegedRequestError::ClipboardTextAccountingInvariant)?;
+        let total_text_bytes = accounted_text_bytes.checked_add(text_bytes).ok_or(
+            EnginePrivilegedRequestError::ClipboardTextBudgetExceeded {
+                pending: accounted_text_bytes,
                 requested: text_bytes,
                 max: self.max_pending_clipboard_text_bytes,
-            })?;
-        if next_text_bytes > self.max_pending_clipboard_text_bytes {
+            },
+        )?;
+        if total_text_bytes > self.max_pending_clipboard_text_bytes {
             return Err(EnginePrivilegedRequestError::ClipboardTextBudgetExceeded {
-                pending: self.pending_clipboard_text_bytes,
+                pending: accounted_text_bytes,
                 requested: text_bytes,
                 max: self.max_pending_clipboard_text_bytes,
             });
@@ -750,7 +813,7 @@ impl EnginePrivilegedRequestTracker {
             },
         };
         self.insert_pending(id, PendingPrivilegedRequest::Clipboard(request.clone()));
-        self.pending_clipboard_text_bytes = next_text_bytes;
+        self.pending_clipboard_text_bytes += text_bytes;
         Ok(request)
     }
 
@@ -972,8 +1035,65 @@ impl EnginePrivilegedRequestTracker {
         request: EngineClipboardPrivilegedRequest,
     ) -> Result<EngineClipboardRequestDecision, EnginePrivilegedRequestError> {
         let stored = self.consume_clipboard_exact(request)?;
-        host.handoff_clipboard_permission(stored)
-            .map_err(EnginePrivilegedRequestError::from)
+        let decision = host
+            .handoff_clipboard_permission(stored)
+            .map_err(EnginePrivilegedRequestError::from)?;
+        match decision {
+            EngineClipboardRequestDecision::PermissionRequired(mut permission) => {
+                self.lease_clipboard_permission(&mut permission)?;
+                Ok(EngineClipboardRequestDecision::PermissionRequired(
+                    permission,
+                ))
+            }
+            EngineClipboardRequestDecision::DeniedStaleAuthority => {
+                Ok(EngineClipboardRequestDecision::DeniedStaleAuthority)
+            }
+        }
+    }
+
+    fn lease_clipboard_permission(
+        &self,
+        permission: &mut EngineClipboardPermissionRequest,
+    ) -> Result<(), EnginePrivilegedRequestError> {
+        let write_bytes = permission.write_text_bytes();
+        let mut state = self
+            .outstanding_clipboard_permissions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let total_slots = self
+            .pending
+            .len()
+            .checked_add(state.outstanding)
+            .and_then(|count| count.checked_add(1))
+            .ok_or(EnginePrivilegedRequestError::CapacityExceeded)?;
+        if total_slots > self.max_pending {
+            return Err(EnginePrivilegedRequestError::CapacityExceeded);
+        }
+        let retained_bytes = self
+            .pending_clipboard_text_bytes
+            .checked_add(state.write_bytes)
+            .ok_or(EnginePrivilegedRequestError::ClipboardTextAccountingInvariant)?;
+        let total_bytes = retained_bytes.checked_add(write_bytes).ok_or(
+            EnginePrivilegedRequestError::ClipboardTextBudgetExceeded {
+                pending: retained_bytes,
+                requested: write_bytes,
+                max: self.max_pending_clipboard_text_bytes,
+            },
+        )?;
+        if total_bytes > self.max_pending_clipboard_text_bytes {
+            return Err(EnginePrivilegedRequestError::ClipboardTextBudgetExceeded {
+                pending: retained_bytes,
+                requested: write_bytes,
+                max: self.max_pending_clipboard_text_bytes,
+            });
+        }
+        state.outstanding += 1;
+        state.write_bytes += write_bytes;
+        permission.lease = Some(ClipboardPermissionLease {
+            accounting: Arc::clone(&self.outstanding_clipboard_permissions),
+            write_bytes,
+        });
+        Ok(())
     }
 
     /// Discards one exact pending Clipboard request without running source policy or a backend.
@@ -1058,7 +1178,12 @@ impl EnginePrivilegedRequestTracker {
     }
 
     fn ensure_capacity(&self) -> Result<(), EnginePrivilegedRequestError> {
-        if self.pending.len() >= self.max_pending {
+        if self
+            .pending
+            .len()
+            .saturating_add(self.clipboard_permission_accounting().outstanding)
+            >= self.max_pending
+        {
             Err(EnginePrivilegedRequestError::CapacityExceeded)
         } else {
             Ok(())
@@ -1122,6 +1247,7 @@ impl EngineHost {
                 id,
                 source,
                 operation,
+                lease: None,
             },
         ))
     }

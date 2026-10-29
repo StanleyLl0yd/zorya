@@ -127,6 +127,154 @@ fn clipboard_read_binds_exact_default_and_explicit_limits() {
 }
 
 #[test]
+fn clipboard_permission_handoff_retains_slot_and_write_budget_until_denied() {
+    let (_tab, host, source) = current_authority("/clipboard-permission-budget");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new_with_budgets(
+        1,
+        DEFAULT_MAX_PENDING_PRIVILEGED_NETWORK_BODY_BYTES,
+        5,
+    )
+    .expect("bounded tracker");
+
+    let write = tracker
+        .register_clipboard_write(&source, "12345")
+        .expect("write request");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&host, write)
+        .expect("permission handoff")
+    else {
+        panic!("exact source must require permission");
+    };
+    assert_eq!(tracker.pending_requests(), 0);
+    assert_eq!(tracker.pending_clipboard_text_bytes(), 0);
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 1);
+    assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 5);
+    assert_eq!(
+        tracker.register_clipboard_read(&source),
+        Err(EnginePrivilegedRequestError::CapacityExceeded)
+    );
+    assert_eq!(
+        tracker.register_clipboard_write(&source, "1"),
+        Err(EnginePrivilegedRequestError::ClipboardTextBudgetExceeded {
+            pending: 5,
+            requested: 1,
+            max: 5,
+        })
+    );
+    permission.deny();
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
+    assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);
+    let next = tracker
+        .register_clipboard_write(&source, "12345")
+        .expect("quota restored after explicit deny");
+    assert_eq!(tracker.discard_clipboard_once(next), Ok(()));
+}
+
+#[test]
+fn clipboard_permission_write_budget_is_shared_with_available_pending_slots() {
+    let (_tab, host, source) = current_authority("/clipboard-permission-shared-budget");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new_with_budgets(
+        2,
+        DEFAULT_MAX_PENDING_PRIVILEGED_NETWORK_BODY_BYTES,
+        5,
+    )
+    .expect("bounded tracker");
+    let write = tracker
+        .register_clipboard_write(&source, "1234")
+        .expect("first write");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&host, write)
+        .expect("permission handoff")
+    else {
+        panic!("expected permission handoff");
+    };
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 1);
+    assert_eq!(
+        tracker.register_clipboard_write(&source, "12"),
+        Err(EnginePrivilegedRequestError::ClipboardTextBudgetExceeded {
+            pending: 4,
+            requested: 2,
+            max: 5,
+        })
+    );
+    let read = tracker
+        .register_clipboard_read(&source)
+        .expect("second slot remains available");
+    assert_eq!(
+        tracker.register_network(&source, "https://example.com/"),
+        Err(EnginePrivilegedRequestError::CapacityExceeded)
+    );
+    assert_eq!(tracker.discard_clipboard_once(read), Ok(()));
+    permission.deny();
+    let second = tracker
+        .register_clipboard_write(&source, "12")
+        .expect("write quota restored");
+    assert_eq!(tracker.discard_clipboard_once(second), Ok(()));
+}
+
+#[test]
+fn clipboard_permission_abandonment_releases_quota_without_host_or_tracker() {
+    let (tab, mut host, source) = current_authority("/clipboard-permission-abandon");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new_with_budgets(
+        1,
+        DEFAULT_MAX_PENDING_PRIVILEGED_NETWORK_BODY_BYTES,
+        4,
+    )
+    .expect("bounded tracker");
+    let request = tracker
+        .register_clipboard_write(&source, "abcd")
+        .expect("write request");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&host, request)
+        .expect("permission handoff")
+    else {
+        panic!("expected permission handoff");
+    };
+    let accounting = Arc::clone(&tracker.outstanding_clipboard_permissions);
+    assert!(host.close_view(tab).expect("close source View"));
+    drop(host);
+    drop(tracker);
+    {
+        let held = accounting.lock().expect("permission accounting");
+        assert_eq!(held.outstanding, 1);
+        assert_eq!(held.write_bytes, 4);
+    }
+    thread::spawn(move || drop(permission))
+        .join()
+        .expect("cross-thread permission abandonment");
+    let released = accounting.lock().expect("released permission accounting");
+    assert_eq!(released.outstanding, 0);
+    assert_eq!(released.write_bytes, 0);
+}
+
+#[test]
+fn clipboard_permission_handoff_drop_restores_read_slot_without_write_bytes() {
+    let (_tab, host, source) = current_authority("/clipboard-permission-read-slot");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+    let read = tracker
+        .register_clipboard_read_with_limit(&source, 17)
+        .expect("read request");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&host, read)
+        .expect("read permission")
+    else {
+        panic!("expected read permission");
+    };
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 1);
+    assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);
+    assert_eq!(
+        tracker.register_clipboard_read(&source),
+        Err(EnginePrivilegedRequestError::CapacityExceeded)
+    );
+    drop(permission);
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
+    let next = tracker
+        .register_clipboard_read(&source)
+        .expect("capacity restored");
+    assert_eq!(tracker.discard_clipboard_once(next), Ok(()));
+}
+
+#[test]
 fn clipboard_discard_is_exact_hostless_and_releases_write_budget() {
     let (tab, mut host, current) = current_authority("/clipboard-discard");
     let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");

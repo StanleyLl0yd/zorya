@@ -89,6 +89,10 @@ A later dedicated chrome cover may replace whole-window hiding for UX quality, b
 
 These coordinator APIs make the product-side ordering testable; on Windows the platform now supplies the required observable neutral phase by hiding the native window and verifying `is_visible() == Some(false)` before calling the corresponding presentation confirmation. The coordinator method itself is still never treated as proof that pixels were hidden.
 
+### Clipboard permission-handoff resource lifetime
+
+A consumed Clipboard one-shot request may carry an opaque, non-cloneable permission handoff beyond the ordinary request-tracker slot lifetime. Its retained write payload stays charged against the originating tracker's shared Clipboard permission accounting while the handoff lives. Pending requests and unresolved handoffs together respect the tracker slot cap, and pending write bytes plus unresolved write payloads respect the configured text budget. The handoff owns a synchronized resource lease that is released by explicit denial or normal drop, even if the tracker or Host has already been destroyed. Deliberately forgotten handoffs keep the quota charged; this accounting has no ability to grant capabilities or use the OS Clipboard.
+
 ### Browser navigation model
 
 Each `Tab` owns a platform-independent `TabNavigation` product state. Navigation work uses monotonically allocated `NavigationId` values; committed browser-history entries use separate monotonic `HistoryEntryId` values. Ordering stays in vectors, but current/back/forward targets are stable entry identities rather than array indices.
