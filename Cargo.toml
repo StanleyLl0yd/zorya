@@ -16,7 +16,7 @@ rarog-fetch = { git = "https://github.com/StanleyLl0yd/rarog", rev = "331689e7df
 rarog-host = { git = "https://github.com/StanleyLl0yd/rarog", rev = "331689e7dff02a556d0b96530178def821056e20" }
 rarog-types = { git = "https://github.com/StanleyLl0yd/rarog", rev = "331689e7dff02a556d0b96530178def821056e20" }
 rarog-url = { git = "https://github.com/StanleyLl0yd/rarog", rev = "331689e7dff02a556d0b96530178def821056e20" }
-reqwest = { version = "=0.13.4", default-features = false, features = ["rustls"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls"] }
 tokio = { version = "=1.53.1", default-features = false, features = ["net", "rt", "sync", "time"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
