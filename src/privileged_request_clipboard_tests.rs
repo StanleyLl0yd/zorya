@@ -275,6 +275,83 @@ fn clipboard_permission_handoff_drop_restores_read_slot_without_write_bytes() {
 }
 
 #[test]
+fn clipboard_prompt_origin_uses_exact_current_rarog_origin_and_never_debugs_it() {
+    let (_tab, host, source) = current_authority("/clipboard-prompt?untrusted=secret");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+    let request = tracker
+        .register_clipboard_write(&source, "sensitive clipboard payload")
+        .expect("write request");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&host, request)
+        .expect("permission handoff")
+    else {
+        panic!("expected permission handoff");
+    };
+
+    let display = permission
+        .trusted_origin_for_prompt(&host)
+        .expect("live source verification")
+        .expect("current permission prompt Origin");
+    assert_eq!(display, source.origin().ascii_serialization());
+    assert!(display.starts_with("http://127.0.0.1:"));
+    assert!(!display.contains("/clipboard-prompt"));
+    assert!(!display.contains("untrusted"));
+    let debug = format!("{permission:?}");
+    assert!(!debug.contains(&display));
+    assert!(!debug.contains("sensitive clipboard payload"));
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 1);
+    assert_eq!(
+        tracker.outstanding_clipboard_permission_write_bytes(),
+        "sensitive clipboard payload".len()
+    );
+    permission.deny();
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
+    assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);
+}
+
+#[test]
+fn clipboard_prompt_origin_fails_closed_after_view_replacement_and_foreign_host() {
+    let (tab, mut host, source) = current_authority("/clipboard-prompt-stale");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+    let request = tracker
+        .register_clipboard_read_with_limit(&source, 73)
+        .expect("read request");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&host, request)
+        .expect("permission handoff")
+    else {
+        panic!("expected permission handoff");
+    };
+    assert!(
+        permission
+            .trusted_origin_for_prompt(&host)
+            .expect("live source")
+            .is_some()
+    );
+
+    let foreign = EngineHost::new().expect("replacement Host");
+    assert!(matches!(
+        permission.trusted_origin_for_prompt(&foreign),
+        Ok(None)
+    ));
+    assert!(host.close_view(tab).expect("close committed remote View"));
+    assert!(matches!(
+        permission.trusted_origin_for_prompt(&host),
+        Ok(None)
+    ));
+    host.create_view(tab)
+        .expect("recreate View with same product TabId");
+    assert!(matches!(
+        permission.trusted_origin_for_prompt(&host),
+        Ok(None)
+    ));
+    assert_eq!(permission.max_read_text_bytes(), Some(73));
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 1);
+    drop(permission);
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
+}
+
+#[test]
 fn clipboard_discard_is_exact_hostless_and_releases_write_budget() {
     let (tab, mut host, current) = current_authority("/clipboard-discard");
     let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");

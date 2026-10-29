@@ -89,6 +89,10 @@ A later dedicated chrome cover may replace whole-window hiding for UX quality, b
 
 These coordinator APIs make the product-side ordering testable; on Windows the platform now supplies the required observable neutral phase by hiding the native window and verifying `is_visible() == Some(false)` before calling the corresponding presentation confirmation. The coordinator method itself is still never treated as proof that pixels were hidden.
 
+### Trusted Clipboard permission prompt Origin
+
+Privileged chrome must never derive a Clipboard permission prompt's requesting site from address-bar/history strings or Web-controlled content. `EngineClipboardPermissionRequest::trusted_origin_for_prompt(&EngineHost)` checks the live exact committed-document source and then uses pinned Rarog `Origin::ascii_serialization()` to return a schemeful canonical display string; a stale, local, foreign or replaced Host/View source returns no prompt identity. The handoff's `Debug` continues to redact Origin. This is only immediate UI presentation metadata, not permission approval, persistence or a Rarog Clipboard capability grant.
+
 ### Clipboard permission-handoff resource lifetime
 
 A consumed Clipboard one-shot request may carry an opaque, non-cloneable permission handoff beyond the ordinary request-tracker slot lifetime. Its retained write payload stays charged against the originating tracker's shared Clipboard permission accounting while the handoff lives. Pending requests and unresolved handoffs together respect the tracker slot cap, and pending write bytes plus unresolved write payloads respect the configured text budget. The handoff owns a synchronized resource lease that is released by explicit denial or normal drop, even if the tracker or Host has already been destroyed. Deliberately forgotten handoffs keep the quota charged; this accounting has no ability to grant capabilities or use the OS Clipboard.

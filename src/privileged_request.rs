@@ -168,6 +168,21 @@ impl EngineClipboardPermissionRequest {
         self.operation.write_text_bytes()
     }
 
+    /// Returns trusted, canonical Origin text for privileged permission UI only.
+    ///
+    /// This is a fresh Host revalidation and Rarog-owned ASCII serialization, not an authority
+    /// token. A stale/foreign/replaced source produces no prompt Origin. The returned display
+    /// string must never be replayed as evidence of an approved permission or as a grant.
+    pub fn trusted_origin_for_prompt(
+        &self,
+        host: &EngineHost,
+    ) -> Result<Option<String>, EngineHostError> {
+        if !host.validate_committed_document_source(&self.source)? {
+            return Ok(None);
+        }
+        Ok(Some(self.source.origin().ascii_serialization()))
+    }
+
     /// Explicitly denies this permission request without granting authority or touching a backend.
     pub fn deny(self) {}
 }
