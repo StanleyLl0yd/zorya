@@ -14,6 +14,7 @@ Zorya documentation follows the same principle as the browser architecture: prod
 
 - [Architecture](ARCHITECTURE.md) — browser/Rarog ownership and trust boundaries.
 - [Z4 security boundaries](Z4_SECURITY_BOUNDARIES.md) — current product-side process, Host-authority and remote-content policy boundaries.
+- [Clipboard permission integration proposal](CLIPBOARD_PERMISSION_INTEGRATION.md) — Rarog event prerequisite and trusted native-chrome lifecycle (design only).
 - [Roadmap](ROADMAP.md) — product milestones and current blockers.
 - [Dependencies](DEPENDENCIES.md) — pinned Rarog and dependency discipline.
 - [Releasing](RELEASING.md) — candidate and publication gates.
