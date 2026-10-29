@@ -96,6 +96,10 @@ Network no longer ends at the historical deny-only terminal: exact current same-
 
 `EngineClipboardPermissionRequest::resolve_once` consumes a non-cloneable permission handoff with typed Deny or AllowOnce intent. Deny does not require a live Host. AllowOnce repeats exact live Host-minted source/Origin validation at response time, regardless of any earlier prompt display: missing, stale, foreign or closed Host/View state returns `StaleAuthority`; current authority returns `Unsupported`. There is deliberately no approved-result variant. The resource lease is released on every outcome/error and no Rarog capability, OS Clipboard call, persisted preference or UI approval path exists.
 
+## Clipboard native integration prerequisite (design only)
+
+[The Clipboard permission integration proposal](CLIPBOARD_PERMISSION_INTEGRATION.md) specifies the required Rarog-authenticated Web-to-embedder event, bounded Windows-chrome mediation, cancellation and negative security tests for [Zorya #202](https://github.com/StanleyLl0yd/zorya/issues/202). Its upstream prerequisite is [Rarog #352](https://github.com/StanleyLl0yd/rarog/issues/352). This is **not implemented**: the exact Rarog pin still lacks the event contract; native prompt dispatch and successful AllowOnce/backend grants remain disabled. The design adds no new authority to current Clipboard handles.
+
 ## Explicitly not provided yet
 
 This boundary does not provide or claim:
