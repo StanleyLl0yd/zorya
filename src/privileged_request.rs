@@ -42,6 +42,21 @@ pub enum EngineClipboardRequestDecision {
     PermissionRequired(EngineClipboardPermissionRequest),
 }
 
+/// Intent submitted at the one-shot Clipboard permission boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineClipboardPermissionChoice {
+    Deny,
+    AllowOnce,
+}
+
+/// Terminal outcomes. No variant grants Clipboard authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineClipboardPermissionOutcome {
+    UserDenied,
+    StaleAuthority,
+    Unsupported,
+}
+
 /// Process-local identity for one pending privileged request attempt.
 ///
 /// This is a product correlation identity only. It is not a Rarog capability ID and conveys no
@@ -181,6 +196,31 @@ impl EngineClipboardPermissionRequest {
             return Ok(None);
         }
         Ok(Some(self.source.origin().ascii_serialization()))
+    }
+
+    /// Consumes one user response. Approval is deliberately unsupported in this slice.
+    ///
+    /// Denial needs no Host. AllowOnce must revalidate the exact live Host-minted source at
+    /// response time, even after an Origin was displayed. Missing, foreign or stale authority
+    /// fails closed; current authority remains unsupported until reviewed capability mediation.
+    /// The handoff lease is released on every return path, including Host verification errors.
+    pub fn resolve_once(
+        self,
+        host: Option<&EngineHost>,
+        choice: EngineClipboardPermissionChoice,
+    ) -> Result<EngineClipboardPermissionOutcome, EngineHostError> {
+        match choice {
+            EngineClipboardPermissionChoice::Deny => {
+                Ok(EngineClipboardPermissionOutcome::UserDenied)
+            }
+            EngineClipboardPermissionChoice::AllowOnce => match host {
+                None => Ok(EngineClipboardPermissionOutcome::StaleAuthority),
+                Some(host) if !host.validate_committed_document_source(&self.source)? => {
+                    Ok(EngineClipboardPermissionOutcome::StaleAuthority)
+                }
+                Some(_) => Ok(EngineClipboardPermissionOutcome::Unsupported),
+            },
+        }
     }
 
     /// Explicitly denies this permission request without granting authority or touching a backend.

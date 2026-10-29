@@ -352,6 +352,154 @@ fn clipboard_prompt_origin_fails_closed_after_view_replacement_and_foreign_host(
 }
 
 #[test]
+fn clipboard_permission_response_denies_current_read_write_and_releases_quota() {
+    let (_tab, host, source) = current_authority("/clipboard-response-current");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new_with_budgets(
+        1,
+        DEFAULT_MAX_PENDING_PRIVILEGED_NETWORK_BODY_BYTES,
+        4,
+    )
+    .expect("bounded tracker");
+    let read = tracker
+        .register_clipboard_read_with_limit(&source, 17)
+        .expect("read request");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&host, read)
+        .expect("read handoff")
+    else {
+        panic!("expected read handoff");
+    };
+    assert_eq!(
+        permission.resolve_once(Some(&host), EngineClipboardPermissionChoice::AllowOnce),
+        Ok(EngineClipboardPermissionOutcome::Unsupported)
+    );
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
+
+    let write = tracker
+        .register_clipboard_write(&source, "abcd")
+        .expect("write request");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&host, write)
+        .expect("write handoff")
+    else {
+        panic!("expected write handoff");
+    };
+    assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 4);
+    assert_eq!(
+        permission.resolve_once(Some(&host), EngineClipboardPermissionChoice::AllowOnce),
+        Ok(EngineClipboardPermissionOutcome::Unsupported)
+    );
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
+    assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);
+
+    let write = tracker
+        .register_clipboard_write(&source, "abcd")
+        .expect("restored write budget");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&host, write)
+        .expect("write handoff")
+    else {
+        panic!("expected write handoff");
+    };
+    assert_eq!(
+        permission.resolve_once(None, EngineClipboardPermissionChoice::Deny),
+        Ok(EngineClipboardPermissionOutcome::UserDenied)
+    );
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
+    assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);
+}
+
+#[test]
+fn clipboard_permission_response_rechecks_host_after_displayed_origin() {
+    let (tab, mut host, source) = current_authority("/clipboard-response-old");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+    let write = tracker
+        .register_clipboard_write(&source, "sensitive payload")
+        .expect("write request");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&host, write)
+        .expect("permission handoff")
+    else {
+        panic!("expected permission handoff");
+    };
+    assert!(
+        permission
+            .trusted_origin_for_prompt(&host)
+            .expect("validate prompt Origin")
+            .is_some()
+    );
+    let replacement = commit_remote(&mut host, tab, serve_once("/clipboard-response-new"));
+    assert_ne!(replacement, source);
+    assert_eq!(
+        permission.resolve_once(Some(&host), EngineClipboardPermissionChoice::AllowOnce),
+        Ok(EngineClipboardPermissionOutcome::StaleAuthority)
+    );
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
+    assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);
+
+    let read = tracker
+        .register_clipboard_read(&replacement)
+        .expect("read after previous handoff");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&host, read)
+        .expect("read handoff")
+    else {
+        panic!("expected read handoff");
+    };
+    let foreign = EngineHost::new().expect("foreign Host");
+    assert_eq!(
+        permission.resolve_once(Some(&foreign), EngineClipboardPermissionChoice::AllowOnce),
+        Ok(EngineClipboardPermissionOutcome::StaleAuthority)
+    );
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
+}
+
+#[test]
+fn clipboard_permission_response_after_view_teardown_or_missing_host_fails_closed() {
+    let (tab, mut host, source) = current_authority("/clipboard-response-teardown");
+    let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
+    let write = tracker
+        .register_clipboard_write(&source, "secret")
+        .expect("write request");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&host, write)
+        .expect("write handoff")
+    else {
+        panic!("expected write handoff");
+    };
+    assert!(host.close_view(tab).expect("close View"));
+    assert_eq!(
+        permission.resolve_once(Some(&host), EngineClipboardPermissionChoice::AllowOnce),
+        Ok(EngineClipboardPermissionOutcome::StaleAuthority)
+    );
+    assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);
+
+    let mut replacement_host = EngineHost::new().expect("replacement Host");
+    replacement_host.create_view(tab).expect("replacement View");
+    let replacement = commit_remote(
+        &mut replacement_host,
+        tab,
+        serve_once("/clipboard-response-replacement"),
+    );
+    let read = tracker
+        .register_clipboard_read(&replacement)
+        .expect("read after old quota released");
+    let EngineClipboardRequestDecision::PermissionRequired(permission) = tracker
+        .request_clipboard_permission_once(&replacement_host, read)
+        .expect("replacement handoff")
+    else {
+        panic!("expected replacement handoff");
+    };
+    drop(replacement_host);
+    assert_eq!(
+        permission.resolve_once(None, EngineClipboardPermissionChoice::AllowOnce),
+        Ok(EngineClipboardPermissionOutcome::StaleAuthority)
+    );
+    assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
+    assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);
+}
+
+#[test]
 fn clipboard_discard_is_exact_hostless_and_releases_write_budget() {
     let (tab, mut host, current) = current_authority("/clipboard-discard");
     let mut tracker = EnginePrivilegedRequestTracker::try_new(1).expect("tracker");
