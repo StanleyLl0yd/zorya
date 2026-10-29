@@ -351,7 +351,6 @@ fn clipboard_prompt_origin_fails_closed_after_view_replacement_and_foreign_host(
     assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
 }
 
-
 #[test]
 fn clipboard_permission_response_denies_current_read_write_and_releases_quota() {
     let (_tab, host, source) = current_authority("/clipboard-response-current");
