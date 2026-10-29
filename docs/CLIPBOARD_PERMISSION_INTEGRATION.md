@@ -44,7 +44,7 @@ Any shell/worker queue must be bounded independently from the existing tracker l
 A successful grant is **not part of the bridge proposal**. Before enabling it, require:
 
 - An exact engine-originated, context/initiator-bound one-shot Web operation and fresh source revalidation **immediately before** Host grant; stale response must fail before any privileged backend effect.
-- Rarog `grant_navigation_context_clipboard_capability` using the original `NavigationContextId`, never a reconstructed numeric token, with correct `CapabilityClass::Clipboard`; no raw `CapabilityId` or process ID exported.
+- Rarog `HostControlPlane::grant_navigation_context_capability(context, CapabilityClass::Clipboard)` using the original `NavigationContextId`, never a reconstructed numeric token; no raw `CapabilityId` or process ID exported.
 - A single prepared operation whose type, read maximum or immutable write text is bound to the consumed handoff; reject replacement or replay.
 - Concrete `ClipboardLimits` and `ClipboardText::try_new` read/write enforcement, including the stricter Zorya 1 MiB UTF-8 limit. No backend calls on invalid limits or denied request.
 - Revoke and release on success, failure, timeout, cancellation and process loss, including backend errors; no persistent Allow and no cross-navigation reusable grant.
