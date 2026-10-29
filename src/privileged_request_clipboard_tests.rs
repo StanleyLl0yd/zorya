@@ -322,17 +322,29 @@ fn clipboard_prompt_origin_fails_closed_after_view_replacement_and_foreign_host(
     else {
         panic!("expected permission handoff");
     };
-    assert!(permission
-        .trusted_origin_for_prompt(&host)
-        .expect("live source")
-        .is_some());
+    assert!(
+        permission
+            .trusted_origin_for_prompt(&host)
+            .expect("live source")
+            .is_some()
+    );
 
     let foreign = EngineHost::new().expect("replacement Host");
-    assert!(matches!(permission.trusted_origin_for_prompt(&foreign), Ok(None)));
+    assert!(matches!(
+        permission.trusted_origin_for_prompt(&foreign),
+        Ok(None)
+    ));
     assert!(host.close_view(tab).expect("close committed remote View"));
-    assert!(matches!(permission.trusted_origin_for_prompt(&host), Ok(None)));
-    host.create_view(tab).expect("recreate View with same product TabId");
-    assert!(matches!(permission.trusted_origin_for_prompt(&host), Ok(None)));
+    assert!(matches!(
+        permission.trusted_origin_for_prompt(&host),
+        Ok(None)
+    ));
+    host.create_view(tab)
+        .expect("recreate View with same product TabId");
+    assert!(matches!(
+        permission.trusted_origin_for_prompt(&host),
+        Ok(None)
+    ));
     assert_eq!(permission.max_read_text_bytes(), Some(73));
     assert_eq!(tracker.outstanding_clipboard_permission_requests(), 1);
     drop(permission);
