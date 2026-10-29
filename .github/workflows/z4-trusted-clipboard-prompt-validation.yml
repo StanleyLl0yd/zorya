@@ -1,0 +1,39 @@
+name: Z4 trusted Clipboard prompt Origin verification
+
+on:
+  push:
+    branches:
+      - z4/clipboard-trusted-prompt-origin
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check
+        run: cargo check --locked --all-targets
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked --all-targets
+      - name: Diff check
+        run: git diff --check 0daa1386d35ffd290c5dcc763eb04acd16c92125..HEAD
+      - name: Reviewed prompt-boundary source checks
+        shell: bash
+        run: |
+          grep -Fq 'host.validate_committed_document_source(&self.source)?' src/privileged_request.rs
+          grep -Fq 'self.source.origin().ascii_serialization()' src/privileged_request.rs
+          ! grep -Eq 'grant_navigation_context_capability|read_navigation_context_clipboard_text|write_navigation_context_clipboard_text' src/privileged_request.rs
+          git diff --name-only 0daa1386d35ffd290c5dcc763eb04acd16c92125..HEAD -- Cargo.toml Cargo.lock | (! grep .)
