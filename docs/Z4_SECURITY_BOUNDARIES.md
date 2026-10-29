@@ -94,7 +94,7 @@ Network no longer ends at the historical deny-only terminal: exact current same-
 
 ## Clipboard permission response (deny-only)
 
-`EngineClipboardPermissionRequest::resolve_once` consumes a non-cloneable permission handoff with typed Deny or AllowOnce intent. Deny does not require a live Host. AllowOnce repeats exact live Host-minted source/Origin validation at response time, regardless of any earlier prompt display: missing, stale, foreign or closed Host/View state returns `DeniedStaleAuthority`; current authority returns `DeniedUnsupported`. There is deliberately no approved-result variant. The resource lease is released on every outcome/error and no Rarog capability, OS Clipboard call, persisted preference or UI approval path exists.
+`EngineClipboardPermissionRequest::resolve_once` consumes a non-cloneable permission handoff with typed Deny or AllowOnce intent. Deny does not require a live Host. AllowOnce repeats exact live Host-minted source/Origin validation at response time, regardless of any earlier prompt display: missing, stale, foreign or closed Host/View state returns `StaleAuthority`; current authority returns `Unsupported`. There is deliberately no approved-result variant. The resource lease is released on every outcome/error and no Rarog capability, OS Clipboard call, persisted preference or UI approval path exists.
 
 ## Explicitly not provided yet
 

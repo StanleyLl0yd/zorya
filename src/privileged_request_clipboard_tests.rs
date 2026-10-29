@@ -371,7 +371,7 @@ fn clipboard_permission_response_denies_current_read_write_and_releases_quota() 
     };
     assert_eq!(
         permission.resolve_once(Some(&host), EngineClipboardPermissionChoice::AllowOnce),
-        Ok(EngineClipboardPermissionOutcome::DeniedUnsupported)
+        Ok(EngineClipboardPermissionOutcome::Unsupported)
     );
     assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
 
@@ -387,7 +387,7 @@ fn clipboard_permission_response_denies_current_read_write_and_releases_quota() 
     assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 4);
     assert_eq!(
         permission.resolve_once(Some(&host), EngineClipboardPermissionChoice::AllowOnce),
-        Ok(EngineClipboardPermissionOutcome::DeniedUnsupported)
+        Ok(EngineClipboardPermissionOutcome::Unsupported)
     );
     assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
     assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);
@@ -403,7 +403,7 @@ fn clipboard_permission_response_denies_current_read_write_and_releases_quota() 
     };
     assert_eq!(
         permission.resolve_once(None, EngineClipboardPermissionChoice::Deny),
-        Ok(EngineClipboardPermissionOutcome::DeniedByUser)
+        Ok(EngineClipboardPermissionOutcome::UserDenied)
     );
     assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
     assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);
@@ -422,15 +422,17 @@ fn clipboard_permission_response_rechecks_host_after_displayed_origin() {
     else {
         panic!("expected permission handoff");
     };
-    assert!(permission
-        .trusted_origin_for_prompt(&host)
-        .expect("validate prompt Origin")
-        .is_some());
+    assert!(
+        permission
+            .trusted_origin_for_prompt(&host)
+            .expect("validate prompt Origin")
+            .is_some()
+    );
     let replacement = commit_remote(&mut host, tab, serve_once("/clipboard-response-new"));
     assert_ne!(replacement, source);
     assert_eq!(
         permission.resolve_once(Some(&host), EngineClipboardPermissionChoice::AllowOnce),
-        Ok(EngineClipboardPermissionOutcome::DeniedStaleAuthority)
+        Ok(EngineClipboardPermissionOutcome::StaleAuthority)
     );
     assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
     assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);
@@ -447,7 +449,7 @@ fn clipboard_permission_response_rechecks_host_after_displayed_origin() {
     let foreign = EngineHost::new().expect("foreign Host");
     assert_eq!(
         permission.resolve_once(Some(&foreign), EngineClipboardPermissionChoice::AllowOnce),
-        Ok(EngineClipboardPermissionOutcome::DeniedStaleAuthority)
+        Ok(EngineClipboardPermissionOutcome::StaleAuthority)
     );
     assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
 }
@@ -468,7 +470,7 @@ fn clipboard_permission_response_after_view_teardown_or_missing_host_fails_close
     assert!(host.close_view(tab).expect("close View"));
     assert_eq!(
         permission.resolve_once(Some(&host), EngineClipboardPermissionChoice::AllowOnce),
-        Ok(EngineClipboardPermissionOutcome::DeniedStaleAuthority)
+        Ok(EngineClipboardPermissionOutcome::StaleAuthority)
     );
     assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);
 
@@ -491,7 +493,7 @@ fn clipboard_permission_response_after_view_teardown_or_missing_host_fails_close
     drop(replacement_host);
     assert_eq!(
         permission.resolve_once(None, EngineClipboardPermissionChoice::AllowOnce),
-        Ok(EngineClipboardPermissionOutcome::DeniedStaleAuthority)
+        Ok(EngineClipboardPermissionOutcome::StaleAuthority)
     );
     assert_eq!(tracker.outstanding_clipboard_permission_requests(), 0);
     assert_eq!(tracker.outstanding_clipboard_permission_write_bytes(), 0);

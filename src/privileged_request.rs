@@ -52,9 +52,9 @@ pub enum EngineClipboardPermissionChoice {
 /// Terminal outcomes. No variant grants Clipboard authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineClipboardPermissionOutcome {
-    DeniedByUser,
-    DeniedStaleAuthority,
-    DeniedUnsupported,
+    UserDenied,
+    StaleAuthority,
+    Unsupported,
 }
 
 /// Process-local identity for one pending privileged request attempt.
@@ -211,14 +211,14 @@ impl EngineClipboardPermissionRequest {
     ) -> Result<EngineClipboardPermissionOutcome, EngineHostError> {
         match choice {
             EngineClipboardPermissionChoice::Deny => {
-                Ok(EngineClipboardPermissionOutcome::DeniedByUser)
+                Ok(EngineClipboardPermissionOutcome::UserDenied)
             }
             EngineClipboardPermissionChoice::AllowOnce => match host {
-                None => Ok(EngineClipboardPermissionOutcome::DeniedStaleAuthority),
+                None => Ok(EngineClipboardPermissionOutcome::StaleAuthority),
                 Some(host) if !host.validate_committed_document_source(&self.source)? => {
-                    Ok(EngineClipboardPermissionOutcome::DeniedStaleAuthority)
+                    Ok(EngineClipboardPermissionOutcome::StaleAuthority)
                 }
-                Some(_) => Ok(EngineClipboardPermissionOutcome::DeniedUnsupported),
+                Some(_) => Ok(EngineClipboardPermissionOutcome::Unsupported),
             },
         }
     }
